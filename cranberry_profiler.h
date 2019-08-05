@@ -1,5 +1,5 @@
-#ifndef __CRAN_PROFILER_H
-#define __CRAN_PROFILER_H
+#ifndef __CRANBERRY_PROFILER_H
+#define __CRANBERRY_PROFILER_H
 
 /*
 cran_profiler Usage, License: MIT
@@ -136,7 +136,7 @@ int64_t cranpr_timestamp(void);
 
 void cranpr_write_to_file(const char* filePath);
 
-#endif /* __CRAN_PROFILER_H */
+#endif /* __CRANBERRY_PROFILER_H */
 
 /* -Implementation- */
 #ifdef CRANPR_IMPLEMENTATION
