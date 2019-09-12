@@ -720,6 +720,12 @@ typedef struct
 		uint32_t bufferCount;
 	} commandBuffers;
 
+	struct
+	{
+		VkFramebuffer framebuffers[cranvk_max_framebuffer_count];
+		uint32_t count;
+	} framebuffers;
+
 	VkDescriptorPool descriptorPool;
 	VkPipelineCache pipelineCache;
 	VkCommandPool graphicsCommandPool;
@@ -757,14 +763,6 @@ typedef struct
 			uint32_t count;
 		} allocatedFramebuffers;
 	} swapchainData;
-	
-	// Keeps track of all our framebuffers and allows us to reconstruct them
-	struct
-	{
-		VkFramebuffer framebuffers[cranvk_max_framebuffer_count];
-		VkRenderPass renderPasses_weak[cranvk_max_framebuffer_count];
-		uint32_t count;
-	} framebufferData;
 
 	uint32_t backBufferIndex;
 
@@ -1068,6 +1066,11 @@ void crang_destroy_graphics_device(crang_ctx_t* ctx, crang_graphics_device_t* de
 		vkDestroyPipelineLayout(vkDevice->devices.logicalDevice, vkDevice->pipelines.layouts[i], cranvk_no_allocator);
 	}
 
+	for (uint32_t i = 0; i < vkDevice->framebuffers.count; i++)
+	{
+		vkDestroyFramebuffer(vkDevice->devices.logicalDevice, vkDevice->framebuffers.framebuffers[i], cranvk_no_allocator);
+	}
+
 	vkDestroyFence(vkDevice->devices.logicalDevice, vkDevice->immediateFence, cranvk_no_allocator);
 	cranvk_destroy_allocator(vkDevice->devices.logicalDevice, &vkDevice->allocator);
 	vkDestroyDescriptorPool(vkDevice->devices.logicalDevice, vkDevice->descriptorPool, cranvk_no_allocator);
@@ -1076,36 +1079,38 @@ void crang_destroy_graphics_device(crang_ctx_t* ctx, crang_graphics_device_t* de
 	vkDestroyDevice(vkDevice->devices.logicalDevice, cranvk_no_allocator);
 }
 
-uint32_t cranvk_allocate_framebuffer_from_swapchain(cranvk_graphics_device_t* vkDevice, cranvk_present_t* vkPresent, VkRenderPass renderPass, uint32_t swapchainImageIndex)
+void cranvk_allocate_framebuffers_from_swapchain(cranvk_graphics_device_t* vkDevice, cranvk_present_t* vkPresent)
 {
-	// Create the framebuffer
-	uint32_t framebufferIndex;
-	{
-		framebufferIndex = vkPresent->framebufferData.count++;
-		vkPresent->framebufferData.renderPasses_weak[framebufferIndex] = renderPass;
-
-		VkFramebufferCreateInfo framebufferCreate =
-		{
-			.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-			.attachmentCount = 1,
-			.width = vkPresent->surfaceExtents.width,
-			.height = vkPresent->surfaceExtents.height,
-			.layers = 1,
-			.renderPass = renderPass,
-			.pAttachments = &vkPresent->swapchainData.imageViews[swapchainImageIndex]
-		};
-
-		cranvk_check(vkCreateFramebuffer(vkDevice->devices.logicalDevice, &framebufferCreate, cranvk_no_allocator, &vkPresent->framebufferData.framebuffers[framebufferIndex]));
-	}
-
-	// Tell the swapchain a framebuffer was allocated
+	for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
 	{
 		uint32_t nextSwapchainFramebuffer = vkPresent->swapchainData.allocatedFramebuffers.count++;
-		vkPresent->swapchainData.allocatedFramebuffers.framebufferIndices[nextSwapchainFramebuffer] = framebufferIndex;
-		vkPresent->swapchainData.allocatedFramebuffers.imageViewIndices[nextSwapchainFramebuffer] = swapchainImageIndex;
-	}
 
-	return framebufferIndex;
+		// Create the framebuffer
+		uint32_t framebufferIndex;
+		{
+			VkFramebufferCreateInfo framebufferCreate =
+			{
+				.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+				.attachmentCount = 1,
+				.width = vkPresent->surfaceExtents.width,
+				.height = vkPresent->surfaceExtents.height,
+				.layers = 1,
+				.renderPass = vkPresent->presentRenderPass.renderPass,
+				.pAttachments = &vkPresent->swapchainData.imageViews[i]
+			};
+
+			framebufferIndex = vkDevice->framebuffers.count++;
+			cranvk_check(vkCreateFramebuffer(vkDevice->devices.logicalDevice, &framebufferCreate, cranvk_no_allocator, &vkDevice->framebuffers.framebuffers[framebufferIndex]));
+		}
+
+		// Tell the swapchain a framebuffer was allocated
+		{
+			vkPresent->swapchainData.allocatedFramebuffers.framebufferIndices[nextSwapchainFramebuffer] = framebufferIndex;
+			vkPresent->swapchainData.allocatedFramebuffers.imageViewIndices[nextSwapchainFramebuffer] = i;
+		}
+
+		vkPresent->presentRenderPass.framebufferIndices[i] = framebufferIndex;
+	}
 }
 
 void cranvk_create_render_pass(cranvk_render_pass_t* vkRenderPass, cranvk_graphics_device_t* vkDevice, cranvk_present_t* vkPresent)
@@ -1149,10 +1154,7 @@ void cranvk_create_render_pass(cranvk_render_pass_t* vkRenderPass, cranvk_graphi
 		cranvk_check(vkCreateRenderPass(vkDevice->devices.logicalDevice, &createRenderPass, cranvk_no_allocator, &vkRenderPass->renderPass));
 	}
 
-	for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
-	{
-		vkRenderPass->framebufferIndices[i] = cranvk_allocate_framebuffer_from_swapchain(vkDevice, vkPresent, vkRenderPass->renderPass, i);
-	}
+	cranvk_allocate_framebuffers_from_swapchain(vkDevice, vkPresent);
 }
 
 void cranvk_destroy_render_pass(cranvk_graphics_device_t* device, cranvk_render_pass_t* vkRenderPass)
@@ -1213,7 +1215,7 @@ void cranvk_create_swapchain(cranvk_graphics_device_t* vkDevice, cranvk_surface_
 		for (uint32_t i = 0; i < vkPresent->swapchainData.allocatedFramebuffers.count; i++)
 		{
 			uint32_t framebufferIndex = vkPresent->swapchainData.allocatedFramebuffers.framebufferIndices[i];
-			vkDestroyFramebuffer(vkDevice->devices.logicalDevice, vkPresent->framebufferData.framebuffers[framebufferIndex], cranvk_no_allocator);
+			vkDestroyFramebuffer(vkDevice->devices.logicalDevice, vkDevice->framebuffers.framebuffers[framebufferIndex], cranvk_no_allocator);
 		}
 	}
 
@@ -1263,11 +1265,11 @@ void cranvk_create_swapchain(cranvk_graphics_device_t* vkDevice, cranvk_surface_
 			.width = vkPresent->surfaceExtents.width,
 			.height = vkPresent->surfaceExtents.height,
 			.layers = 1,
-			.renderPass = vkPresent->framebufferData.renderPasses_weak[framebufferIndex],
+			.renderPass = vkPresent->presentRenderPass.renderPass,
 			.pAttachments = &vkPresent->swapchainData.imageViews[imageViewIndex]
 		};
 
-		cranvk_check(vkCreateFramebuffer(vkDevice->devices.logicalDevice, &framebufferCreate, cranvk_no_allocator, &vkPresent->framebufferData.framebuffers[framebufferIndex]));
+		cranvk_check(vkCreateFramebuffer(vkDevice->devices.logicalDevice, &framebufferCreate, cranvk_no_allocator, &vkDevice->framebuffers.framebuffers[framebufferIndex]));
 	}
 }
 
@@ -1398,11 +1400,6 @@ void crang_destroy_present(crang_graphics_device_t* device, crang_present_t* pre
 	for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
 	{
 		vkDestroyImageView(vkDevice->devices.logicalDevice, vkPresent->swapchainData.imageViews[i], cranvk_no_allocator);
-	}
-
-	for (uint32_t i = 0; i < vkPresent->framebufferData.count; i++)
-	{
-		vkDestroyFramebuffer(vkDevice->devices.logicalDevice, vkPresent->framebufferData.framebuffers[i], cranvk_no_allocator);
 	}
 
 	for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
@@ -1726,12 +1723,12 @@ void crang_render(crang_render_desc_t* renderDesc)
 			.color = clearColor
 		};
 
-		uint32_t framebufferIndex = vkRenderPass->framebufferIndices[currentBackBuffer];
+		uint32_t framebufferIndex = vkPresent->swapchainData.allocatedFramebuffers.framebufferIndices[currentBackBuffer];
 		VkRenderPassBeginInfo renderPassBeginInfo =
 		{
 			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 			.renderPass = vkRenderPass->renderPass,
-			.framebuffer = vkPresent->framebufferData.framebuffers[framebufferIndex],
+			.framebuffer = vkDevice->framebuffers.framebuffers[framebufferIndex],
 			.renderArea = { .extent = vkPresent->surfaceExtents },
 			.clearValueCount = 1,
 			.pClearValues = &clearValue
