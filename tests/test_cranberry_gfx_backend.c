@@ -100,7 +100,7 @@ int main(void)
 						{
 							.inputs = (crang_shader_input_t[])
 							{
-								[0] = {.type = crang_shader_input_type_uniform_buffer, .binding = 0}
+								[0] = {.type = crang_shader_input_type_uniform_buffer, .binding = 0},
 							},
 							.count = 1,
 						}
@@ -143,7 +143,11 @@ int main(void)
 						.sourceSize = fragSize,
 						.shaderInputs =
 						{
-							.count = 0,
+							.inputs = (crang_shader_input_t[])
+							{
+								[0] = {.type = crang_shader_input_type_sampler, .binding = 1}
+							},
+							.count = 1,
 						}
 					},
 					[1] = &(crang_cmd_callback_t)
@@ -222,6 +226,45 @@ int main(void)
 			});
 	}
 
+	// Images
+	crang_image_id_t greyImage = crang_request_image_id(graphicsDevice);
+	{
+		crang_execute_commands_immediate(graphicsDevice,
+			&(crang_cmd_buffer_t)
+			{
+				.commandDescs = (crang_cmd_e[])
+				{
+					[0] = crang_cmd_create_image,
+					[1] = crang_cmd_copy_to_image
+				},
+				.commandDatas = (void*[])
+				{
+					[0] = &(crang_cmd_create_image_t)
+					{
+						.imageId = greyImage,
+						.format = crang_image_format_r8g8b8a8,
+						.width = 1,
+						.height = 1
+					},
+					[1] = &(crang_cmd_copy_to_image_t)
+					{
+						.imageId = greyImage,
+						.format = crang_image_format_r8g8b8a8,
+						.data = (uint8_t[])
+						{
+							128, 128, 128, 128
+						},
+						.offset = 0,
+						.width = 1,
+						.height = 1,
+						.offsetX = 0,
+						.offsetY = 0
+					}
+				},
+				.count = 2
+			});
+	}
+
 	// Uniforms
 	typedef struct
 	{
@@ -252,6 +295,7 @@ int main(void)
 
 	crang_buffer_id_t vertInputBuffer = crang_request_buffer_id(graphicsDevice);
 	crang_shader_input_id_t vertInputs = crang_request_shader_input_id(graphicsDevice);
+	crang_shader_input_id_t fragSamplerInput = crang_request_shader_input_id(graphicsDevice);
 	{
 		crang_execute_commands_immediate(graphicsDevice,
 			&(crang_cmd_buffer_t)
@@ -261,7 +305,9 @@ int main(void)
 					[0] = crang_cmd_create_shader_input,
 					[1] = crang_cmd_create_buffer,
 					[2] = crang_cmd_copy_to_buffer,
-					[3] = crang_cmd_bind_to_shader_input
+					[3] = crang_cmd_bind_to_shader_input,
+					[4] = crang_cmd_create_shader_input,
+					[5] = crang_cmd_bind_to_shader_input
 				},
 				.commandDatas = (void*[])
 				{
@@ -287,15 +333,31 @@ int main(void)
 					{
 						.shaderInputId = vertInputs,
 						.binding = 0,
-						.buffer = 
+						.type = crang_shader_input_type_uniform_buffer,
+						.uniformBuffer =
 						{
 							.bufferId = vertInputBuffer,
 							.size = sizeof(camera_t),
 							.offset = 0
 						}
-					}
+					},
+					[4] = &(crang_cmd_create_shader_input_t)
+					{
+						.shaderId = fragShader,
+						.shaderInputId = fragSamplerInput
+					},
+					[5] = &(crang_cmd_bind_to_shader_input_t)
+					{
+						.shaderInputId = fragSamplerInput,
+						.binding = 1,
+						.type = crang_shader_input_type_sampler,
+						.sampler = 
+						{
+							.imageId = greyImage
+						}
+					},
 				},
-				.count = 4
+				.count = 6
 			});
 	}
 
@@ -335,9 +397,10 @@ int main(void)
 			{
 				[0] = crang_cmd_bind_pipeline,
 				[1] = crang_cmd_bind_shader_input,
-				[2] = crang_cmd_bind_vertex_inputs,
-				[3] = crang_cmd_bind_index_input,
-				[4] = crang_cmd_draw_indexed,
+				[2] = crang_cmd_bind_shader_input,
+				[3] = crang_cmd_bind_vertex_inputs,
+				[4] = crang_cmd_bind_index_input,
+				[5] = crang_cmd_draw_indexed,
 			},
 			.commandDatas = (void*[])
 			{
@@ -347,10 +410,17 @@ int main(void)
 				},
 				[1] = &(crang_cmd_bind_shader_input_t)
 				{
+					.shaderBinding = crang_shader_vertex,
 					.pipelineId = pipeline,
 					.shaderInputId = vertInputs
 				},
-				[2] = &(crang_cmd_bind_vertex_inputs_t)
+				[2] = &(crang_cmd_bind_shader_input_t)
+				{
+					.shaderBinding = crang_shader_fragment,
+					.pipelineId = pipeline,
+					.shaderInputId = fragSamplerInput
+				},
+				[3] = &(crang_cmd_bind_vertex_inputs_t)
 				{
 					.bindings = (crang_vertex_input_binding_t[])
 					{
@@ -358,19 +428,19 @@ int main(void)
 					},
 					.count = 1
 				},
-				[3] = &(crang_cmd_bind_index_input_t)
+				[4] = &(crang_cmd_bind_index_input_t)
 				{
 					.bufferId = indexBuffer,
 					.offset = 0,
 					.indexType = crang_index_type_u32
 				},
-				[4] = &(crang_cmd_draw_indexed_t)
+				[5] = &(crang_cmd_draw_indexed_t)
 				{
 					.indexCount = 36,
 					.instanceCount = 1,
 				}
 			},
-			.count = 5
+			.count = 6
 		});
 
 	while (true)
@@ -396,7 +466,7 @@ int main(void)
 			break;
 		}
 
-		crang_render(&(crang_render_desc_t)
+		crang_present(&(crang_present_desc_t)
 		{
 			.graphicsDevice = graphicsDevice,
 			.presentCtx = presentCtx,

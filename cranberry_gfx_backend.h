@@ -15,6 +15,7 @@ typedef struct { unsigned int id; } crang_buffer_id_t;
 typedef struct { unsigned int id; } crang_pipeline_id_t;
 typedef struct { unsigned int id; } crang_recording_buffer_id_t;
 typedef struct { unsigned int id; } crang_shader_input_id_t;
+typedef struct { unsigned int id; } crang_image_id_t;
 
 typedef enum
 {
@@ -85,7 +86,7 @@ typedef struct
 		crang_recording_buffer_id_t* buffers;
 		unsigned int count;
 	} recordedBuffers;
-} crang_render_desc_t;
+} crang_present_desc_t;
 
 typedef enum
 {
@@ -93,6 +94,8 @@ typedef enum
 	crang_cmd_create_shader_input,
 	crang_cmd_create_buffer,
 	crang_cmd_copy_to_buffer,
+	crang_cmd_create_image,
+	crang_cmd_copy_to_image,
 	crang_cmd_callback, // not sure about callbacks yet. I'll see if it bites me in the butt.
 	crang_cmd_bind_pipeline,
 	crang_cmd_bind_vertex_inputs,
@@ -112,6 +115,7 @@ typedef struct
 typedef enum
 {
 	crang_shader_input_type_uniform_buffer,
+	crang_shader_input_type_sampler,
 } crang_shader_input_type_e;
 
 typedef struct
@@ -145,12 +149,21 @@ typedef struct
 	crang_shader_input_id_t shaderInputId;
 	unsigned int binding;
 
-	struct
+	crang_shader_input_type_e type;
+	union
 	{
-		crang_buffer_id_t bufferId;
-		unsigned int offset;
-		unsigned int size;
-	} buffer;
+		struct
+		{
+			crang_buffer_id_t bufferId;
+			unsigned int offset;
+			unsigned int size;
+		} uniformBuffer;
+
+		struct
+		{
+			crang_image_id_t imageId;
+		} sampler;
+	};
 } crang_cmd_bind_to_shader_input_t;
 
 typedef struct
@@ -167,6 +180,32 @@ typedef struct
 	unsigned int size;
 	unsigned int offset;
 } crang_cmd_copy_to_buffer_t;
+
+typedef enum
+{
+	crang_image_format_r8g8b8a8,
+	crang_image_format_max
+} crang_image_format_e;
+
+typedef struct
+{
+	crang_image_id_t imageId;
+	crang_image_format_e format;
+	unsigned int width;
+	unsigned int height;
+} crang_cmd_create_image_t;
+
+typedef struct
+{
+	crang_image_id_t imageId;
+	crang_image_format_e format;
+	void* data;
+	unsigned int offset;
+	unsigned int width;
+	unsigned int height;
+	unsigned int offsetX;
+	unsigned int offsetY;
+} crang_cmd_copy_to_image_t;
 
 typedef struct
 {
@@ -201,6 +240,7 @@ typedef struct
 
 typedef struct
 {
+	crang_shader_e shaderBinding;
 	crang_shader_input_id_t shaderInputId;
 	crang_pipeline_id_t pipelineId;
 } crang_cmd_bind_shader_input_t;
@@ -246,6 +286,7 @@ crang_shader_id_t crang_request_shader_id(crang_graphics_device_t* device, crang
 crang_shader_input_id_t crang_request_shader_input_id(crang_graphics_device_t* device);
 crang_buffer_id_t crang_request_buffer_id(crang_graphics_device_t* device);
 crang_recording_buffer_id_t crang_request_recording_buffer_id(crang_graphics_device_t* device);
+crang_image_id_t crang_request_image_id(crang_graphics_device_t* device);
 
 // Execute a command stream immediately. Blocking call!
 void crang_execute_commands_immediate(crang_graphics_device_t* device, crang_cmd_buffer_t* cmdBuffer);
@@ -253,7 +294,7 @@ void crang_execute_commands_immediate(crang_graphics_device_t* device, crang_cmd
 // Record a command stream, some commands might be executed in the process such as callbacks.
 // Allows you to provide recorded commands to rendering.
 void crang_record_commands(crang_graphics_device_t* device, crang_present_t* present, crang_recording_buffer_id_t recordingBuffer, crang_cmd_buffer_t* cmdBuffer);
-void crang_render(crang_render_desc_t* renderDesc);
+void crang_present(crang_present_desc_t* renderDesc);
 
 #endif // __CRANBERRY_BACKEND_GFX
 
@@ -412,6 +453,8 @@ void cranvk_destroy_allocator(VkDevice device, cranvk_allocator_t* allocator)
 
 cranvk_allocation_t cranvk_allocator_allocate(VkDevice device, cranvk_allocator_t* allocator, uint32_t memoryTypeIndex, VkDeviceSize size, VkDeviceSize alignment)
 {
+	cranvk_assert(memoryTypeIndex != UINT32_MAX);
+
 	uint32_t foundPoolIndex = UINT32_MAX;
 	for (uint32_t i = 0; i < cranvk_max_allocator_pools; i++)
 	{
@@ -648,6 +691,7 @@ const char* cranvk_validation_layers[cranvk_validation_count] = {};
 #define cranvk_max_shader_inputs 32
 #define cranvk_max_vertex_inputs 32
 #define cranvk_max_vertex_attributes 32
+#define cranvk_max_image_count 100
 
 typedef struct
 {
@@ -726,6 +770,15 @@ typedef struct
 		uint32_t count;
 	} framebuffers;
 
+	struct
+	{
+		VkImage images[cranvk_max_image_count];
+		VkImageView imageViews[cranvk_max_image_count];
+		VkSampler samplers[cranvk_max_image_count];
+		cranvk_allocation_t allocations[cranvk_max_image_count];
+		uint32_t count;
+	} images;
+
 	VkDescriptorPool descriptorPool;
 	VkPipelineCache pipelineCache;
 	VkCommandPool graphicsCommandPool;
@@ -737,7 +790,12 @@ typedef struct
 typedef struct
 {
 	VkRenderPass renderPass;
+	uint32_t backBufferIndex;
 	uint32_t framebufferIndices[cranvk_render_buffer_count];
+	VkCommandBuffer primaryBuffers[cranvk_render_buffer_count];
+
+	VkSemaphore finishedSemaphores[cranvk_render_buffer_count];
+	VkFence finishedFences[cranvk_render_buffer_count];
 } cranvk_render_pass_t;
 
 typedef struct
@@ -747,8 +805,6 @@ typedef struct
 	VkPresentModeKHR presentMode;
 
 	VkSemaphore acquireSemaphores[cranvk_render_buffer_count];
-	VkSemaphore presentSemaphores[cranvk_render_buffer_count];
-	VkFence presentFences[cranvk_render_buffer_count];
 
 	struct
 	{
@@ -763,10 +819,6 @@ typedef struct
 			uint32_t count;
 		} allocatedFramebuffers;
 	} swapchainData;
-
-	uint32_t backBufferIndex;
-
-	VkCommandBuffer primaryRenderBuffers[cranvk_render_buffer_count];
 
 	cranvk_render_pass_t presentRenderPass;
 } cranvk_present_t;
@@ -1155,6 +1207,45 @@ void cranvk_create_render_pass(cranvk_render_pass_t* vkRenderPass, cranvk_graphi
 	}
 
 	cranvk_allocate_framebuffers_from_swapchain(vkDevice, vkPresent);
+
+	{
+		VkSemaphoreCreateInfo semaphoreCreateInfo =
+		{
+			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+		};
+
+		for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
+		{
+			cranvk_check(vkCreateSemaphore(vkDevice->devices.logicalDevice, &semaphoreCreateInfo, cranvk_no_allocator, &vkRenderPass->finishedSemaphores[i]));
+		}
+	}
+
+	{
+		VkCommandBufferAllocateInfo commandBufferAllocateInfo =
+		{
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+			.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+			.commandBufferCount = cranvk_render_buffer_count,
+			.commandPool = vkDevice->graphicsCommandPool
+		};
+
+		cranvk_check(vkAllocateCommandBuffers(vkDevice->devices.logicalDevice, &commandBufferAllocateInfo, vkRenderPass->primaryBuffers));
+	}
+
+	{
+		VkFenceCreateInfo fenceCreateInfo =
+		{
+			.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+			.flags = VK_FENCE_CREATE_SIGNALED_BIT
+		};
+
+		for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
+		{
+			cranvk_check(vkCreateFence(vkDevice->devices.logicalDevice, &fenceCreateInfo, cranvk_no_allocator, &vkRenderPass->finishedFences[i]));
+		}
+	}
+
+	vkRenderPass->backBufferIndex = 0;
 }
 
 void cranvk_destroy_render_pass(cranvk_graphics_device_t* device, cranvk_render_pass_t* vkRenderPass)
@@ -1162,6 +1253,16 @@ void cranvk_destroy_render_pass(cranvk_graphics_device_t* device, cranvk_render_
 	cranvk_graphics_device_t* vkDevice = (cranvk_graphics_device_t*)device;
 
 	vkDestroyRenderPass(vkDevice->devices.logicalDevice, vkRenderPass->renderPass, cranvk_no_allocator);
+
+	for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
+	{
+		vkDestroySemaphore(vkDevice->devices.logicalDevice, vkRenderPass->finishedSemaphores[i], cranvk_no_allocator);
+	}
+
+	for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
+	{
+		vkDestroyFence(vkDevice->devices.logicalDevice, vkRenderPass->finishedFences[i], cranvk_no_allocator);
+	}
 }
 
 void cranvk_create_swapchain(cranvk_graphics_device_t* vkDevice, cranvk_surface_t* vkSurface, cranvk_present_t* vkPresent, VkSwapchainKHR oldSwapchain)
@@ -1295,20 +1396,6 @@ crang_present_t* crang_create_present(void* buffer, crang_graphics_device_t* dev
 		for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
 		{
 			cranvk_check(vkCreateSemaphore(vkDevice->devices.logicalDevice, &semaphoreCreateInfo, cranvk_no_allocator, &vkPresent->acquireSemaphores[i]));
-			cranvk_check(vkCreateSemaphore(vkDevice->devices.logicalDevice, &semaphoreCreateInfo, cranvk_no_allocator, &vkPresent->presentSemaphores[i]));
-		}
-	}
-
-	{
-		VkFenceCreateInfo fenceCreateInfo =
-		{
-			.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-			.flags = VK_FENCE_CREATE_SIGNALED_BIT
-		};
-
-		for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
-		{
-			cranvk_check(vkCreateFence(vkDevice->devices.logicalDevice, &fenceCreateInfo, cranvk_no_allocator, &vkPresent->presentFences[i]));
 		}
 	}
 
@@ -1370,20 +1457,6 @@ crang_present_t* crang_create_present(void* buffer, crang_graphics_device_t* dev
 
 	cranvk_create_swapchain(vkDevice, vkSurface, vkPresent, VK_NULL_HANDLE);
 
-	{
-		VkCommandBufferAllocateInfo commandBufferAllocateInfo =
-		{
-			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-			.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-			.commandBufferCount = cranvk_render_buffer_count,
-			.commandPool = vkDevice->graphicsCommandPool
-		};
-
-		cranvk_check(vkAllocateCommandBuffers(vkDevice->devices.logicalDevice, &commandBufferAllocateInfo, vkPresent->primaryRenderBuffers));
-	}
-
-	vkPresent->backBufferIndex = 0;
-
 	cranvk_create_render_pass(&vkPresent->presentRenderPass, vkDevice, vkPresent);
 	return (crang_present_t*)vkPresent;
 }
@@ -1405,12 +1478,6 @@ void crang_destroy_present(crang_graphics_device_t* device, crang_present_t* pre
 	for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
 	{
 		vkDestroySemaphore(vkDevice->devices.logicalDevice, vkPresent->acquireSemaphores[i], cranvk_no_allocator);
-		vkDestroySemaphore(vkDevice->devices.logicalDevice, vkPresent->presentSemaphores[i], cranvk_no_allocator);
-	}
-
-	for (uint32_t i = 0; i < cranvk_render_buffer_count; i++)
-	{
-		vkDestroyFence(vkDevice->devices.logicalDevice, vkPresent->presentFences[i], cranvk_no_allocator);
 	}
 
 	vkDestroySwapchainKHR(vkDevice->devices.logicalDevice, vkPresent->swapchainData.swapchain, cranvk_no_allocator);
@@ -1485,6 +1552,17 @@ crang_recording_buffer_id_t crang_request_recording_buffer_id(crang_graphics_dev
 	cranvk_check(vkAllocateCommandBuffers(vkDevice->devices.logicalDevice, &commandBufferAllocateInfo, &vkDevice->commandBuffers.recordingBuffers[nextSlot]));
 
 	return (crang_recording_buffer_id_t){ .id = nextSlot };
+}
+
+crang_image_id_t crang_request_image_id(crang_graphics_device_t* device)
+{
+	cranvk_graphics_device_t* vkDevice = (cranvk_graphics_device_t*)device;
+	cranvk_assert(vkDevice->images.count < cranvk_max_image_count);
+
+	uint32_t nextSlot = vkDevice->images.count;
+	vkDevice->images.count++;
+
+	return (crang_image_id_t) { .id = nextSlot };
 }
 
 crang_pipeline_id_t crang_create_pipeline(crang_graphics_device_t* device, crang_pipeline_desc_t* pipelineDesc)
@@ -1686,18 +1764,18 @@ crang_pipeline_id_t crang_create_pipeline(crang_graphics_device_t* device, crang
 	return pipelineId;
 }
 
-void crang_render(crang_render_desc_t* renderDesc)
+void crang_present(crang_present_desc_t* presentDesc)
 {
-	cranvk_present_t* vkPresent = (cranvk_present_t*)renderDesc->presentCtx;
-	cranvk_graphics_device_t* vkDevice = (cranvk_graphics_device_t*)renderDesc->graphicsDevice;
+	cranvk_present_t* vkPresent = (cranvk_present_t*)presentDesc->presentCtx;
+	cranvk_graphics_device_t* vkDevice = (cranvk_graphics_device_t*)presentDesc->graphicsDevice;
 	cranvk_render_pass_t* vkRenderPass = &vkPresent->presentRenderPass;
-	cranvk_surface_t* vkSurface = (cranvk_surface_t*)renderDesc->surface;
+	cranvk_surface_t* vkSurface = (cranvk_surface_t*)presentDesc->surface;
 
 	// Start the frame
-	uint32_t currentBackBuffer = vkPresent->backBufferIndex;
+	uint32_t currentBackBuffer = vkRenderPass->backBufferIndex;
 
-	cranvk_check(vkWaitForFences(vkDevice->devices.logicalDevice, 1, &vkPresent->presentFences[currentBackBuffer], VK_TRUE, UINT64_MAX));
-	cranvk_check(vkResetFences(vkDevice->devices.logicalDevice, 1, &vkPresent->presentFences[currentBackBuffer]));
+	cranvk_check(vkWaitForFences(vkDevice->devices.logicalDevice, 1, &vkRenderPass->finishedFences[currentBackBuffer], VK_TRUE, UINT64_MAX));
+	cranvk_check(vkResetFences(vkDevice->devices.logicalDevice, 1, &vkRenderPass->finishedFences[currentBackBuffer]));
 
 	uint32_t imageIndex = 0;
 	VkResult result = vkAcquireNextImageKHR(vkDevice->devices.logicalDevice, vkPresent->swapchainData.swapchain, UINT64_MAX, vkPresent->acquireSemaphores[currentBackBuffer], VK_NULL_HANDLE, &imageIndex);
@@ -1707,7 +1785,7 @@ void crang_render(crang_render_desc_t* renderDesc)
 		return;
 	}
 
-	VkCommandBuffer currentCommands = vkPresent->primaryRenderBuffers[currentBackBuffer];
+	VkCommandBuffer currentCommands = vkRenderPass->primaryBuffers[currentBackBuffer];
 	{
 		cranvk_check(vkResetCommandBuffer(currentCommands, 0));
 
@@ -1717,7 +1795,7 @@ void crang_render(crang_render_desc_t* renderDesc)
 		};
 		cranvk_check(vkBeginCommandBuffer(currentCommands, &beginBufferInfo));
 
-		VkClearColorValue clearColor = { .float32 = { renderDesc->clearColor[0], renderDesc->clearColor[1], renderDesc->clearColor[2], 1.0f } };
+		VkClearColorValue clearColor = { .float32 = { presentDesc->clearColor[0], presentDesc->clearColor[1], presentDesc->clearColor[2], 1.0f } };
 		VkClearValue clearValue =
 		{
 			.color = clearColor
@@ -1735,7 +1813,7 @@ void crang_render(crang_render_desc_t* renderDesc)
 		};
 		vkCmdBeginRenderPass(currentCommands, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 
-		for (uint32_t i = 0; i < renderDesc->recordedBuffers.count; i++)
+		for (uint32_t i = 0; i < presentDesc->recordedBuffers.count; i++)
 		{
 			VkCommandBuffer recordedBuffer = vkDevice->commandBuffers.recordingBuffers[i];
 			vkCmdExecuteCommands(currentCommands, 1, &recordedBuffer);
@@ -1746,7 +1824,7 @@ void crang_render(crang_render_desc_t* renderDesc)
 	}
 
 	VkSemaphore* acquire = &vkPresent->acquireSemaphores[currentBackBuffer];
-	VkSemaphore* finished = &vkPresent->presentSemaphores[currentBackBuffer];
+	VkSemaphore* finished = &vkRenderPass->finishedSemaphores[currentBackBuffer];
 
 	VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 	VkSubmitInfo submitInfo =
@@ -1761,7 +1839,7 @@ void crang_render(crang_render_desc_t* renderDesc)
 		.pWaitDstStageMask = &dstStageMask
 	};
 
-	cranvk_check(vkQueueSubmit(vkDevice->queues.graphicsQueue, 1, &submitInfo, vkPresent->presentFences[currentBackBuffer]));
+	cranvk_check(vkQueueSubmit(vkDevice->queues.graphicsQueue, 1, &submitInfo, vkRenderPass->finishedFences[currentBackBuffer]));
 
 	VkPresentInfoKHR presentInfo =
 	{
@@ -1779,7 +1857,7 @@ void crang_render(crang_render_desc_t* renderDesc)
 		cranvk_resize_present(vkDevice, vkSurface, vkPresent);
 	}
 
-	vkPresent->backBufferIndex = (vkPresent->backBufferIndex + 1) % cranvk_render_buffer_count;
+	vkRenderPass->backBufferIndex = (vkRenderPass->backBufferIndex + 1) % cranvk_render_buffer_count;
 }
 
 void cranvk_create_shader(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* ctx, void* commandData)
@@ -1809,7 +1887,8 @@ void cranvk_create_shader(cranvk_graphics_device_t* vkDevice, cranvk_execution_c
 
 		VkDescriptorType descriptorTypeConversionTable[] =
 		{
-			[crang_shader_input_type_uniform_buffer] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+			[crang_shader_input_type_uniform_buffer] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			[crang_shader_input_type_sampler] = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
 		};
 
 		VkDescriptorSetLayoutBinding layoutBindings[cranvk_max_shader_inputs];
@@ -1858,24 +1937,54 @@ void cranvk_bind_to_shader_input(cranvk_graphics_device_t* vkDevice, cranvk_exec
 	cranvk_unused(context);
 	crang_cmd_bind_to_shader_input_t* bindInput = (crang_cmd_bind_to_shader_input_t*)commandData;
 
-	VkDescriptorBufferInfo bufferInfo =
+	switch (bindInput->type)
 	{
-		.buffer = vkDevice->buffers.buffers[bindInput->buffer.bufferId.id],
-		.offset = bindInput->buffer.offset,
-		.range = bindInput->buffer.size
-	};
+		case crang_shader_input_type_uniform_buffer:
+		{
+			VkDescriptorBufferInfo bufferInfo =
+			{
+				.buffer = vkDevice->buffers.buffers[bindInput->uniformBuffer.bufferId.id],
+				.offset = bindInput->uniformBuffer.offset,
+				.range = bindInput->uniformBuffer.size
+			};
 
-	VkWriteDescriptorSet writeDescriptorSet =
-	{
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.dstSet = vkDevice->shaders.descriptorSets.sets[bindInput->shaderInputId.id],
-		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		.dstBinding = bindInput->binding,
-		.descriptorCount = 1,
-		.pBufferInfo = &bufferInfo
-	};
+			VkWriteDescriptorSet writeDescriptorSet =
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = vkDevice->shaders.descriptorSets.sets[bindInput->shaderInputId.id],
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.dstBinding = bindInput->binding,
+				.descriptorCount = 1,
+				.pBufferInfo = &bufferInfo
+			};
 
-	vkUpdateDescriptorSets(vkDevice->devices.logicalDevice, 1, &writeDescriptorSet, 0, NULL);
+			vkUpdateDescriptorSets(vkDevice->devices.logicalDevice, 1, &writeDescriptorSet, 0, NULL);
+		}
+		break;
+		case crang_shader_input_type_sampler:
+		{
+			VkDescriptorImageInfo imageInfo =
+			{
+				.imageView = vkDevice->images.imageViews[bindInput->sampler.imageId.id],
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				.sampler = vkDevice->images.samplers[bindInput->sampler.imageId.id]
+			};
+
+			VkWriteDescriptorSet writeDescriptorSet =
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = vkDevice->shaders.descriptorSets.sets[bindInput->shaderInputId.id],
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.dstBinding = bindInput->binding,
+				.descriptorCount = 1,
+				.pImageInfo = &imageInfo
+			};
+
+			vkUpdateDescriptorSets(vkDevice->devices.logicalDevice, 1, &writeDescriptorSet, 0, NULL);
+		}
+		break;
+	}
+	
 }
 
 
@@ -1933,8 +2042,7 @@ void cranvk_copy_to_buffer(cranvk_graphics_device_t* vkDevice, cranvk_execution_
 		VkMemoryRequirements memoryRequirements;
 		vkGetBufferMemoryRequirements(vkDevice->devices.logicalDevice, srcBuffer, &memoryRequirements);
 
-		unsigned int preferredBits = 0;
-		uint32_t memoryIndex = cranvk_find_memory_index(vkDevice->devices.physicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, preferredBits);
+		uint32_t memoryIndex = cranvk_find_memory_index(vkDevice->devices.physicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
 		allocation = cranvk_allocator_allocate(vkDevice->devices.logicalDevice, &vkDevice->allocator, memoryIndex, copyToBufferData->size, memoryRequirements.alignment);
 		cranvk_check(vkBindBufferMemory(vkDevice->devices.logicalDevice, srcBuffer, allocation.memory, allocation.offset));
@@ -1974,6 +2082,228 @@ void cranvk_copy_to_buffer(cranvk_graphics_device_t* vkDevice, cranvk_execution_
 	context->singleUseResources.allocations[context->singleUseResources.allocationCount] = allocation;
 	context->singleUseResources.allocationCount++;
 	cranvk_assert(context->singleUseResources.allocationCount <= cranvk_max_single_use_resource_count);
+}
+
+void cranvk_create_image(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* ctx, void* commandData)
+{
+	cranvk_unused(ctx);
+
+	crang_cmd_create_image_t* createImageData = (crang_cmd_create_image_t*)commandData;
+	uint32_t imageId = createImageData->imageId.id;
+
+	VkFormat formats[crang_image_format_max] =
+	{
+		[crang_image_format_r8g8b8a8] = VK_FORMAT_R8G8B8A8_UNORM
+	};
+
+	uint32_t formatSize[crang_image_format_max] =
+	{
+		[crang_image_format_r8g8b8a8] = 4
+	};
+
+	// Image
+	{
+		VkImageCreateInfo imageCreate =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.imageType = VK_IMAGE_TYPE_2D,
+			.format = formats[createImageData->format],
+			.extent = {.width = createImageData->width,.height = createImageData->height,.depth = 1 },
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.tiling = VK_IMAGE_TILING_OPTIMAL,
+			.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT ,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.sharingMode = VK_SHARING_MODE_EXCLUSIVE
+		};
+
+		cranvk_check(vkCreateImage(vkDevice->devices.logicalDevice, &imageCreate, cranvk_no_allocator, &vkDevice->images.images[imageId]));
+	}
+
+	// Allocation
+	{
+		VkMemoryRequirements memoryRequirements;
+		vkGetImageMemoryRequirements(vkDevice->devices.logicalDevice, vkDevice->images.images[imageId], &memoryRequirements);
+
+		unsigned int preferredBits = 0;
+		uint32_t memoryIndex = cranvk_find_memory_index(vkDevice->devices.physicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
+
+		cranvk_allocation_t* allocation = &vkDevice->images.allocations[imageId];
+		*allocation = cranvk_allocator_allocate(vkDevice->devices.logicalDevice, &vkDevice->allocator, memoryIndex,
+			createImageData->width * createImageData->height * formatSize[createImageData->format], memoryRequirements.alignment);
+
+		cranvk_check(vkBindImageMemory(vkDevice->devices.logicalDevice, vkDevice->images.images[imageId], allocation->memory, allocation->offset));
+	}
+
+	// Image view
+	{
+		VkImageViewCreateInfo  imageCreateViewInfo =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = vkDevice->images.images[imageId],
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = formats[createImageData->format],
+
+			.components = {.r = VK_COMPONENT_SWIZZLE_R,.g = VK_COMPONENT_SWIZZLE_G,.b = VK_COMPONENT_SWIZZLE_B,.a = VK_COMPONENT_SWIZZLE_A },
+			.subresourceRange =
+			{
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.levelCount = 1,
+				.layerCount = 1,
+				.baseMipLevel = 0
+			}
+		};
+
+		cranvk_check(vkCreateImageView(vkDevice->devices.logicalDevice, &imageCreateViewInfo, cranvk_no_allocator, &vkDevice->images.imageViews[imageId]));
+	}
+
+	// Sampler
+	{
+		VkSamplerCreateInfo samplerCreate = 
+		{
+			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+			.magFilter = VK_FILTER_LINEAR,
+			.minFilter = VK_FILTER_LINEAR,
+			.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.anisotropyEnable = VK_FALSE,
+			.maxAnisotropy = 0,
+			.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+			.compareEnable = VK_FALSE,
+			.compareOp = VK_COMPARE_OP_ALWAYS,
+			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+			.mipLodBias = 0.0f,
+			.minLod = 0.0f,
+			.maxLod = 0.0f
+		};
+
+		cranvk_check(vkCreateSampler(vkDevice->devices.logicalDevice, &samplerCreate, cranvk_no_allocator, &vkDevice->images.samplers[imageId]));
+	}
+}
+
+void cranvk_copy_to_image(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* ctx, void* commandData)
+{
+	crang_cmd_copy_to_image_t* copyToImage = (crang_cmd_copy_to_image_t*)commandData;
+	uint32_t imageId = copyToImage->imageId.id;
+
+	VkBuffer srcBuffer;
+	cranvk_allocation_t allocation;
+	{
+		uint32_t formatSize[crang_image_format_max] =
+		{
+			[crang_image_format_r8g8b8a8] = 4
+		};
+
+		uint32_t bufferSize = copyToImage->width * copyToImage->height * formatSize[copyToImage->format];
+
+		VkBufferCreateInfo bufferCreate =
+		{
+			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+			.size = bufferSize,
+			.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+		};
+
+		cranvk_check(vkCreateBuffer(vkDevice->devices.logicalDevice, &bufferCreate, cranvk_no_allocator, &srcBuffer));
+
+		VkMemoryRequirements memoryRequirements;
+		vkGetBufferMemoryRequirements(vkDevice->devices.logicalDevice, srcBuffer, &memoryRequirements);
+
+		uint32_t memoryIndex = cranvk_find_memory_index(vkDevice->devices.physicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+		allocation = cranvk_allocator_allocate(vkDevice->devices.logicalDevice, &vkDevice->allocator, memoryIndex, bufferSize, memoryRequirements.alignment);
+		cranvk_check(vkBindBufferMemory(vkDevice->devices.logicalDevice, srcBuffer, allocation.memory, allocation.offset));
+
+		{
+			void* memory;
+			unsigned int flags = 0;
+			cranvk_check(vkMapMemory(vkDevice->devices.logicalDevice, allocation.memory, allocation.offset, bufferSize, flags, &memory));
+			memcpy(memory, (uint8_t*)copyToImage->data + copyToImage->offset, bufferSize);
+
+			VkMappedMemoryRange mappedMemory = 
+			{
+				.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+				.memory = allocation.memory,
+				.offset = allocation.offset,
+				.size = bufferSize
+			};
+			vkFlushMappedMemoryRanges(vkDevice->devices.logicalDevice, 1, &mappedMemory);
+			vkUnmapMemory(vkDevice->devices.logicalDevice, allocation.memory);
+		}
+	}
+
+	// Image barrier UNDEFINED -> OPTIMAL
+	{
+		VkAccessFlagBits sourceAccessMask = 0;
+		VkAccessFlagBits dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+		VkPipelineStageFlags sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+		VkPipelineStageFlags destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+		VkImageMemoryBarrier imageBarrier =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.image = vkDevice->images.images[imageId],
+			.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,.levelCount = 1, .baseMipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+			.srcAccessMask = sourceAccessMask,
+			.dstAccessMask = dstAccessMask
+		};
+
+		vkCmdPipelineBarrier(ctx->commandBuffer, sourceStage, destinationStage, 0, 0, NULL, 0, NULL, 1, &imageBarrier);
+	}
+
+	// Image copy
+	{
+		VkBufferImageCopy copyRegion = 
+		{
+			.bufferOffset = 0,
+			.bufferRowLength = 0,
+			.bufferImageHeight = 0,
+			.imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+			.imageOffset = {.x = copyToImage->offsetX, .y = copyToImage->offsetY, .z = 0},
+			.imageExtent = {.width = copyToImage->width, .height = copyToImage->height, .depth = 1}
+		};
+
+		vkCmdCopyBufferToImage(ctx->commandBuffer, srcBuffer, vkDevice->images.images[imageId], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+	}
+
+	// Image barrier OPTIMAL -> FRAGMEN_SHADER
+	{
+
+		VkAccessFlagBits sourceAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		VkAccessFlagBits dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+		VkPipelineStageFlags sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		VkPipelineStageFlags destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+		VkImageMemoryBarrier imageBarrier =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.image = vkDevice->images.images[imageId],
+			.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,.levelCount = 1, .baseMipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+			.srcAccessMask = sourceAccessMask,
+			.dstAccessMask = dstAccessMask
+		};
+
+		vkCmdPipelineBarrier(ctx->commandBuffer, sourceStage, destinationStage, 0, 0, NULL, 0, NULL, 1, &imageBarrier);
+	}
+
+	ctx->singleUseResources.buffers[ctx->singleUseResources.bufferCount] = srcBuffer;
+	ctx->singleUseResources.bufferCount++;
+	cranvk_assert(ctx->singleUseResources.bufferCount <= cranvk_max_single_use_resource_count);
+
+	ctx->singleUseResources.allocations[ctx->singleUseResources.allocationCount] = allocation;
+	ctx->singleUseResources.allocationCount++;
+	cranvk_assert(ctx->singleUseResources.allocationCount <= cranvk_max_single_use_resource_count);
 }
 
 void cranvk_execute_callback(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* context, void* commandData)
@@ -2019,10 +2349,16 @@ void cranvk_bind_index_input(cranvk_graphics_device_t* vkDevice, cranvk_executio
 void cranvk_bind_shader_input(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* context, void* commandData)
 {
 	cranvk_unused(context);
+	uint32_t bindingIndex[crang_shader_max] =
+	{
+		[crang_shader_vertex] = 0,
+		[crang_shader_fragment] = 1
+	};
+
 	crang_cmd_bind_shader_input_t* shaderInput = (crang_cmd_bind_shader_input_t*)commandData;
 	vkCmdBindDescriptorSets(
 		context->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vkDevice->pipelines.layouts[shaderInput->pipelineId.id],
-		0, 1, &vkDevice->shaders.descriptorSets.sets[shaderInput->shaderInputId.id], 0, VK_NULL_HANDLE);
+		bindingIndex[shaderInput->shaderBinding], 1, &vkDevice->shaders.descriptorSets.sets[shaderInput->shaderInputId.id], 0, VK_NULL_HANDLE);
 }
 
 void cranvk_draw_indexed(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* context, void* commandData)
@@ -2040,6 +2376,8 @@ cranvk_cmd_processor cmdProcessors[] =
 	[crang_cmd_bind_to_shader_input] = &cranvk_bind_to_shader_input,
 	[crang_cmd_create_buffer] = &cranvk_create_buffer,
 	[crang_cmd_copy_to_buffer] = &cranvk_copy_to_buffer,
+	[crang_cmd_create_image] = &cranvk_create_image,
+	[crang_cmd_copy_to_image] = &cranvk_copy_to_image,
 	[crang_cmd_callback] = &cranvk_execute_callback,
 	[crang_cmd_bind_pipeline] = &cranvk_bind_pipeline,
 	[crang_cmd_bind_vertex_inputs] = &cranvk_bind_vertex_inputs,
