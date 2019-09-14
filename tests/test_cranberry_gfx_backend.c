@@ -252,7 +252,7 @@ int main(void)
 						.format = crang_image_format_r8g8b8a8,
 						.data = (uint8_t[])
 						{
-							128, 128, 128, 128
+							128, 128, 128, 255
 						},
 						.offset = 0,
 						.width = 1,
@@ -305,9 +305,9 @@ int main(void)
 					[0] = crang_cmd_create_shader_input,
 					[1] = crang_cmd_create_buffer,
 					[2] = crang_cmd_copy_to_buffer,
-					[3] = crang_cmd_bind_to_shader_input,
+					[3] = crang_cmd_set_shader_input_data,
 					[4] = crang_cmd_create_shader_input,
-					[5] = crang_cmd_bind_to_shader_input
+					[5] = crang_cmd_set_shader_input_data
 				},
 				.commandDatas = (void*[])
 				{
@@ -329,7 +329,7 @@ int main(void)
 						.size = sizeof(camera_t),
 						.offset = 0
 					},
-					[3] = &(crang_cmd_bind_to_shader_input_t)
+					[3] = &(crang_cmd_set_shader_input_data_t)
 					{
 						.shaderInputId = vertInputs,
 						.binding = 0,
@@ -346,7 +346,7 @@ int main(void)
 						.shaderId = fragShader,
 						.shaderInputId = fragSamplerInput
 					},
-					[5] = &(crang_cmd_bind_to_shader_input_t)
+					[5] = &(crang_cmd_set_shader_input_data_t)
 					{
 						.shaderInputId = fragSamplerInput,
 						.binding = 1,

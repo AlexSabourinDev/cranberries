@@ -92,6 +92,7 @@ typedef enum
 {
 	crang_cmd_create_shader,
 	crang_cmd_create_shader_input,
+	crang_cmd_set_shader_input_data,
 	crang_cmd_create_buffer,
 	crang_cmd_copy_to_buffer,
 	crang_cmd_create_image,
@@ -100,7 +101,6 @@ typedef enum
 	crang_cmd_bind_pipeline,
 	crang_cmd_bind_vertex_inputs,
 	crang_cmd_bind_index_input,
-	crang_cmd_bind_to_shader_input,
 	crang_cmd_bind_shader_input,
 	crang_cmd_draw_indexed,
 } crang_cmd_e;
@@ -164,7 +164,7 @@ typedef struct
 			crang_image_id_t imageId;
 		} sampler;
 	};
-} crang_cmd_bind_to_shader_input_t;
+} crang_cmd_set_shader_input_data_t;
 
 typedef struct
 {
@@ -1932,28 +1932,28 @@ void cranvk_create_shader_input(cranvk_graphics_device_t* vkDevice, cranvk_execu
 		&vkDevice->shaders.descriptorSets.sets[shaderInput->shaderInputId.id]));
 }
 
-void cranvk_bind_to_shader_input(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* context, void* commandData)
+void cranvk_set_shader_input_data(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* context, void* commandData)
 {
 	cranvk_unused(context);
-	crang_cmd_bind_to_shader_input_t* bindInput = (crang_cmd_bind_to_shader_input_t*)commandData;
+	crang_cmd_set_shader_input_data_t* setInput = (crang_cmd_set_shader_input_data_t*)commandData;
 
-	switch (bindInput->type)
+	switch (setInput->type)
 	{
 		case crang_shader_input_type_uniform_buffer:
 		{
 			VkDescriptorBufferInfo bufferInfo =
 			{
-				.buffer = vkDevice->buffers.buffers[bindInput->uniformBuffer.bufferId.id],
-				.offset = bindInput->uniformBuffer.offset,
-				.range = bindInput->uniformBuffer.size
+				.buffer = vkDevice->buffers.buffers[setInput->uniformBuffer.bufferId.id],
+				.offset = setInput->uniformBuffer.offset,
+				.range = setInput->uniformBuffer.size
 			};
 
 			VkWriteDescriptorSet writeDescriptorSet =
 			{
 				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-				.dstSet = vkDevice->shaders.descriptorSets.sets[bindInput->shaderInputId.id],
+				.dstSet = vkDevice->shaders.descriptorSets.sets[setInput->shaderInputId.id],
 				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-				.dstBinding = bindInput->binding,
+				.dstBinding = setInput->binding,
 				.descriptorCount = 1,
 				.pBufferInfo = &bufferInfo
 			};
@@ -1965,17 +1965,17 @@ void cranvk_bind_to_shader_input(cranvk_graphics_device_t* vkDevice, cranvk_exec
 		{
 			VkDescriptorImageInfo imageInfo =
 			{
-				.imageView = vkDevice->images.imageViews[bindInput->sampler.imageId.id],
+				.imageView = vkDevice->images.imageViews[setInput->sampler.imageId.id],
 				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-				.sampler = vkDevice->images.samplers[bindInput->sampler.imageId.id]
+				.sampler = vkDevice->images.samplers[setInput->sampler.imageId.id]
 			};
 
 			VkWriteDescriptorSet writeDescriptorSet =
 			{
 				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-				.dstSet = vkDevice->shaders.descriptorSets.sets[bindInput->shaderInputId.id],
+				.dstSet = vkDevice->shaders.descriptorSets.sets[setInput->shaderInputId.id],
 				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-				.dstBinding = bindInput->binding,
+				.dstBinding = setInput->binding,
 				.descriptorCount = 1,
 				.pImageInfo = &imageInfo
 			};
@@ -2373,7 +2373,7 @@ cranvk_cmd_processor cmdProcessors[] =
 {
 	[crang_cmd_create_shader] = &cranvk_create_shader,
 	[crang_cmd_create_shader_input] = &cranvk_create_shader_input,
-	[crang_cmd_bind_to_shader_input] = &cranvk_bind_to_shader_input,
+	[crang_cmd_set_shader_input_data] = &cranvk_set_shader_input_data,
 	[crang_cmd_create_buffer] = &cranvk_create_buffer,
 	[crang_cmd_copy_to_buffer] = &cranvk_copy_to_buffer,
 	[crang_cmd_create_image] = &cranvk_create_image,
