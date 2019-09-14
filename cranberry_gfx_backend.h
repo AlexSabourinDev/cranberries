@@ -483,7 +483,7 @@ cranvk_allocation_t cranvk_allocator_allocate(VkDevice device, cranvk_allocator_
 				cranvk_check(vkAllocateMemory(device, &memoryAllocInfo, cranvk_no_allocator, &memoryPool->memory));
 
 				cranvk_assert(allocator->freeBlockCount > 0);
-				uint32_t newBlockIndex = allocator->freeBlockCount - 1;
+				uint32_t newBlockIndex = allocator->freeBlocks[allocator->freeBlockCount - 1];
 				allocator->freeBlockCount--;
 
 				cranvk_memory_block_t* block = &allocator->blockPool[newBlockIndex];
@@ -560,7 +560,7 @@ cranvk_allocation_t cranvk_allocator_allocate(VkDevice device, cranvk_allocator_
 		iter->allocated = true;
 		cranvk_assert(allocator->freeBlockCount >= 2);
 
-		uint32_t leftIndex = allocator->freeBlockCount - 1;
+		uint32_t leftIndex = allocator->freeBlocks[allocator->freeBlockCount - 1];
 		allocator->freeBlockCount--;
 
 		cranvk_memory_block_t* left = &allocator->blockPool[leftIndex];
@@ -570,7 +570,7 @@ cranvk_allocation_t cranvk_allocator_allocate(VkDevice device, cranvk_allocator_
 		left->allocated = false;
 		++memoryPool->nextId;
 
-		uint32_t rightIndex = allocator->freeBlockCount - 1;
+		uint32_t rightIndex = allocator->freeBlocks[allocator->freeBlockCount - 1];
 		allocator->freeBlockCount--;
 
 		cranvk_memory_block_t* right = &allocator->blockPool[rightIndex];
