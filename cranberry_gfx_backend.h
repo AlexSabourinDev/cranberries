@@ -43,10 +43,16 @@ typedef struct
 
 typedef enum
 {
-	crang_shader_vertex,
+	crang_shader_vertex = 0,
 	crang_shader_fragment,
 	crang_shader_max
 } crang_shader_e;
+
+typedef enum
+{
+	crang_shader_flag_vertex = 1 << crang_shader_vertex,
+	crang_shader_flag_fragment = 1 << crang_shader_fragment
+} crang_shader_flags_e;
 
 typedef enum
 {
@@ -61,6 +67,12 @@ typedef struct
 	crang_present_t* presentCtx;
 
 	crang_shader_id_t shaders[crang_shader_max];
+
+	struct
+	{
+		crang_shader_layout_id_t* layouts;
+		unsigned int count;
+	} shaderLayouts;
 
 	struct
 	{
@@ -130,7 +142,6 @@ typedef struct
 typedef struct
 {
 	crang_shader_id_t shaderId;
-	crang_shader_layout_id_t shaderLayoutId;
 	void* source;
 	unsigned int sourceSize;
 } crang_cmd_create_shader_t;
@@ -291,7 +302,7 @@ void crang_destroy_present(crang_graphics_device_t* device, crang_present_t* pre
 
 crang_pipeline_id_t crang_create_pipeline(crang_graphics_device_t* device, crang_pipeline_desc_t* pipelineDesc);
 
-crang_shader_layout_id_t crang_request_shader_layout_id(crang_graphics_device_t* device, crang_shader_e supportedTypes);
+crang_shader_layout_id_t crang_request_shader_layout_id(crang_graphics_device_t* device, crang_shader_flags_e supportedTypes);
 crang_shader_id_t crang_request_shader_id(crang_graphics_device_t* device, crang_shader_e type);
 crang_shader_input_id_t crang_request_shader_input_id(crang_graphics_device_t* device);
 crang_buffer_id_t crang_request_buffer_id(crang_graphics_device_t* device);
@@ -706,6 +717,7 @@ const char* cranvk_validation_layers[cranvk_validation_count] = {};
 #define cranvk_max_vertex_attributes 32
 #define cranvk_max_image_count 100
 #define cranvk_max_promise_count 100
+#define cranvk_max_pipeline_shader_layout_count 10
 
 typedef struct
 {
@@ -751,7 +763,7 @@ typedef struct
 
 	struct
 	{
-		crang_shader_e supportedTypes[cranvk_max_shader_layout_count];
+		crang_shader_flags_e supportedTypes[cranvk_max_shader_layout_count];
 		VkDescriptorSetLayout descriptorSetLayouts[cranvk_max_shader_layout_count];
 		uint32_t layoutCount;
 	} shaderLayouts;
@@ -760,7 +772,6 @@ typedef struct
 	{
 		crang_shader_e types[cranvk_max_shader_count];
 		VkShaderModule shaders[cranvk_max_shader_count];
-		crang_shader_layout_id_t shaderLayouts[cranvk_max_shader_count];
 
 		struct
 		{
@@ -1576,7 +1587,7 @@ crang_shader_id_t crang_request_shader_id(crang_graphics_device_t* device, crang
 	return (crang_shader_id_t){ .id = nextSlot };
 }
 
-crang_shader_layout_id_t crang_request_shader_layout_id(crang_graphics_device_t* device, crang_shader_e supportedTypes)
+crang_shader_layout_id_t crang_request_shader_layout_id(crang_graphics_device_t* device, crang_shader_flags_e supportedTypes)
 {
 	cranvk_graphics_device_t* vkDevice = (cranvk_graphics_device_t*)device;
 
@@ -1660,19 +1671,16 @@ crang_pipeline_id_t crang_create_pipeline(crang_graphics_device_t* device, crang
 	crang_shader_id_t fragShader = pipelineDesc->shaders[crang_shader_fragment];
 
 	{
-		crang_shader_layout_id_t vertLayout = vkDevice->shaders.shaderLayouts[vertShader.id];
-		crang_shader_layout_id_t fragLayout = vkDevice->shaders.shaderLayouts[fragShader.id];
-
-		VkDescriptorSetLayout descriptorSetLayouts[crang_shader_max] =
+		VkDescriptorSetLayout descriptorSetLayouts[cranvk_max_pipeline_shader_layout_count];
+		for (uint32_t i = 0; i < pipelineDesc->shaderLayouts.count; i++)
 		{
-			[crang_shader_vertex] = vkDevice->shaderLayouts.descriptorSetLayouts[vertLayout.id],
-			[crang_shader_fragment] = vkDevice->shaderLayouts.descriptorSetLayouts[fragLayout.id]
-		};
+			descriptorSetLayouts[i] = vkDevice->shaderLayouts.descriptorSetLayouts[pipelineDesc->shaderLayouts.layouts[i].id];
+		}
 
 		VkPipelineLayoutCreateInfo pipelineLayoutCreate =
 		{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-			.setLayoutCount = crang_shader_max,
+			.setLayoutCount = pipelineDesc->shaderLayouts.count,
 			.pSetLayouts = descriptorSetLayouts
 		};
 
@@ -1958,8 +1966,6 @@ static void cranvk_create_shader(cranvk_graphics_device_t* vkDevice, cranvk_exec
 
 	VkShaderModule* shader = &vkDevice->shaders.shaders[createShaderData->shaderId.id];
 	cranvk_check(vkCreateShaderModule(vkDevice->devices.logicalDevice, &createShader, cranvk_no_allocator, shader));
-
-	vkDevice->shaders.shaderLayouts[createShaderData->shaderId.id] = createShaderData->shaderLayoutId;
 }
 
 static void cranvk_create_shader_layout(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* ctx, void* commandData)
@@ -1970,8 +1976,9 @@ static void cranvk_create_shader_layout(cranvk_graphics_device_t* vkDevice, cran
 
 	VkShaderStageFlagBits shaderStageConversionTable[] =
 	{
-		[crang_shader_vertex] = VK_SHADER_STAGE_VERTEX_BIT,
-		[crang_shader_fragment] = VK_SHADER_STAGE_FRAGMENT_BIT
+		[crang_shader_flag_vertex] = VK_SHADER_STAGE_VERTEX_BIT,
+		[crang_shader_flag_fragment] = VK_SHADER_STAGE_FRAGMENT_BIT,
+		[crang_shader_flag_vertex | crang_shader_flag_fragment] = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
 	};
 
 	VkDescriptorType descriptorTypeConversionTable[] =

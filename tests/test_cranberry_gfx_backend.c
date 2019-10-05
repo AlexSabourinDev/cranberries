@@ -6,46 +6,10 @@
 #include <malloc.h>
 #include <stdio.h>
 
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+#include <Windows.h>
+
+void test_backend(void* hinstance, void* hwnd)
 {
-    switch(msg)
-    {
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
-        break;
-        case WM_DESTROY:
-            PostQuitMessage(0);
-        break;
-        default:
-            return DefWindowProc(hwnd, msg, wParam, lParam);
-    }
-    return 0;
-}
-
-void test_backend(void)
-{
-	HINSTANCE instance = GetModuleHandle(NULL);
-
-	WNDCLASS wc = { 0 };
-	wc.lpfnWndProc = WndProc;
-	wc.hInstance = instance;
-	wc.lpszClassName = "CranberryWindow";
-
-	RegisterClass(&wc);
-
-	HWND hwnd = CreateWindowEx(
-		0,
-		"CranberryWindow",
-		"CRANBERRIES",
-		WS_OVERLAPPEDWINDOW,
-		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-		NULL,
-		NULL,
-		instance,
-		NULL
-		);
-	ShowWindow(hwnd, SW_SHOWNORMAL);
-
 	unsigned int ctxSize = crang_ctx_size();
 	unsigned int surfaceSize = crang_win32_surface_size();
 	unsigned int graphicsDeviceSize = crang_graphics_device_size();
@@ -57,7 +21,7 @@ void test_backend(void)
 	crang_ctx_t* ctx = crang_create_ctx(buffer);
 	buffer += ctxSize;
 
-	crang_surface_t* surface = crang_win32_create_surface(buffer, ctx, instance, hwnd);
+	crang_surface_t* surface = crang_win32_create_surface(buffer, ctx, hinstance, hwnd);
 	buffer += surfaceSize;
 
 	crang_graphics_device_t* graphicsDevice = crang_create_graphics_device(buffer, ctx, surface);
@@ -69,8 +33,8 @@ void test_backend(void)
 	crang_shader_id_t vertShader = crang_request_shader_id(graphicsDevice, crang_shader_vertex);
 	crang_shader_id_t fragShader = crang_request_shader_id(graphicsDevice, crang_shader_fragment);
 
-	crang_shader_layout_id_t vertShaderLayout = crang_request_shader_layout_id(graphicsDevice, crang_shader_vertex);
-	crang_shader_layout_id_t fragShaderLayout = crang_request_shader_layout_id(graphicsDevice, crang_shader_fragment);
+	crang_shader_layout_id_t vertShaderLayout = crang_request_shader_layout_id(graphicsDevice, crang_shader_flag_vertex);
+	crang_shader_layout_id_t fragShaderLayout = crang_request_shader_layout_id(graphicsDevice, crang_shader_flag_fragment);
 
 	crang_promise_id_t vertPromise;
 	crang_promise_id_t fragPromise;
@@ -111,7 +75,6 @@ void test_backend(void)
 					[1] = &(crang_cmd_create_shader_t)
 					{
 						.shaderId = vertShader,
-						.shaderLayoutId = vertShaderLayout,
 						.source = vertSource,
 						.sourceSize = vertSize
 					},
@@ -162,7 +125,6 @@ void test_backend(void)
 					[1] = &(crang_cmd_create_shader_t)
 					{
 						.shaderId = fragShader,
-						.shaderLayoutId = fragShaderLayout,
 						.source = fragSource,
 						.sourceSize = fragSize
 					},
@@ -395,6 +357,15 @@ void test_backend(void)
 		{
 			[crang_shader_vertex] = vertShader,
 			[crang_shader_fragment] = fragShader
+		},
+
+		.shaderLayouts = 
+		{
+			.layouts = (crang_shader_layout_id_t[])
+			{
+				vertShaderLayout, fragShaderLayout
+			},
+			.count = 2
 		},
 
 		.vertexInputs = 

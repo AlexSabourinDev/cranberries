@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 
 #define CRANBERRY_GFX_IMPLEMENTATION
 #include "../cranberry_gfx.h"
@@ -5,48 +6,11 @@
 #include <stdbool.h>
 #include <malloc.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <Windows.h>
 
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+void test_frontend(void* hinstance, void* hwnd)
 {
-    switch(msg)
-    {
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
-        break;
-        case WM_DESTROY:
-            PostQuitMessage(0);
-        break;
-        default:
-            return DefWindowProc(hwnd, msg, wParam, lParam);
-    }
-    return 0;
-}
-
-void test_frontend(void)
-{
-	HINSTANCE hinstance = GetModuleHandle(NULL);
-
-	WNDCLASS wc = { 0 };
-	wc.lpfnWndProc = WndProc;
-	wc.hInstance = hinstance;
-	wc.lpszClassName = "CranberryWindow";
-
-	RegisterClass(&wc);
-
-	HWND hwnd = CreateWindowEx(
-		0,
-		"CranberryWindow",
-		"CRANBERRIES",
-		WS_OVERLAPPEDWINDOW,
-		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-		NULL,
-		NULL,
-		hinstance,
-		NULL
-		);
-	ShowWindow(hwnd, SW_SHOWNORMAL);
-
 	unsigned int gfxSize = crang_gfx_size();
 	void* gfxMem = malloc(gfxSize);
 
@@ -76,6 +40,91 @@ void test_frontend(void)
 				},
 				.indexType = crang_index_type_u16,
 				.count = 6
+			}
+		});
+
+	void* vertSource;
+	unsigned int vertSize;
+	{
+		FILE* file = fopen("test_cranberry_gfx_frontend_data/Shaders/SPIR-V/default.vspv", "rb");
+		fseek(file, 0, SEEK_END);
+		long fileSize = ftell(file);
+		fseek(file, 0, SEEK_SET);
+
+		vertSource = malloc(fileSize);
+		vertSize = fileSize;
+		fread(vertSource, fileSize, 1, file);
+		fclose(file);
+	}
+
+	void* fragSource;
+	unsigned int fragSize;
+	{
+		FILE* file = fopen("test_cranberry_gfx_frontend_data/Shaders/SPIR-V/default.fspv", "rb");
+		fseek(file, 0, SEEK_END);
+		long fileSize = ftell(file);
+		fseek(file, 0, SEEK_SET);
+
+		fragSource = malloc(fileSize);
+		fragSize = fileSize;
+		fread(fragSource, fileSize, 1, file);
+		fclose(file);
+	}
+
+	crang_shader_group_t shaders = crang_create_shader_group(gfx,
+		&(crang_shader_group_desc_t)
+		{
+			.vertShader = 
+			{
+				.source = vertSource,
+				.size = vertSize
+			},
+			.fragShader = 
+			{
+				.source = fragSource,
+				.size = fragSize
+			},
+			.shaderLayouts = 
+			{
+				.layouts = (crang_material_shader_layout_t[])
+				{
+					(crang_material_shader_layout_t)
+					{
+						.inputs = (crang_shader_input_t[])
+						{
+							{.type = crang_shader_input_type_uniform_buffer,.binding = 0 }
+						},
+						.count = 1
+					},
+					(crang_material_shader_layout_t)
+					{
+						.inputs = (crang_shader_input_t[])
+						{
+							{.type = crang_shader_input_type_sampler,.binding = 0 }
+						},
+						.count = 1
+					}
+				},
+				.count = 2
+			}
+		});
+
+	crang_material_t material = crang_create_material(gfx,
+		&(crang_material_desc_t)
+		{
+			.shaders = &shaders,
+			.shaderInputs = 
+			{
+				.inputBindings = (crang_material_input_binding_t[])
+				{
+					{
+						.data = (float[]) { 1.0f, 0.0f, 0.0f, 1.0f},
+						.size = sizeof(float) * 4,
+						.binding = 0,
+						.shaderLayoutIndex = 0
+					}
+				},
+				.count = 1
 			}
 		});
 
