@@ -6,7 +6,7 @@
 #include <malloc.h>
 #include <stdio.h>
 
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch(msg)
     {
@@ -22,7 +22,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-int main(void)
+void test_backend(void)
 {
 	HINSTANCE instance = GetModuleHandle(NULL);
 
@@ -69,7 +69,11 @@ int main(void)
 	crang_shader_id_t vertShader = crang_request_shader_id(graphicsDevice, crang_shader_vertex);
 	crang_shader_id_t fragShader = crang_request_shader_id(graphicsDevice, crang_shader_fragment);
 
+	crang_shader_layout_id_t vertShaderLayout = crang_request_shader_layout_id(graphicsDevice, crang_shader_vertex);
+	crang_shader_layout_id_t fragShaderLayout = crang_request_shader_layout_id(graphicsDevice, crang_shader_fragment);
 
+	crang_promise_id_t vertPromise;
+	crang_promise_id_t fragPromise;
 	{
 		FILE* file = fopen("test_cranberry_gfx_backend_data/Shaders/SPIR-V/default.vspv", "rb");
 		fseek(file, 0, SEEK_END);
@@ -81,21 +85,20 @@ int main(void)
 		fread(vertSource, fileSize, 1, file);
 		fclose(file);
 
-		crang_execute_commands_immediate(graphicsDevice,
+		vertPromise = crang_execute_commands_async(graphicsDevice,
 			&(crang_cmd_buffer_t)
 			{
 				.commandDescs = (crang_cmd_e[])
 				{
-					[0] = crang_cmd_create_shader,
-					[1] = crang_cmd_callback
+					[0] = crang_cmd_create_shader_layout,
+					[1] = crang_cmd_create_shader,
+					[2] = crang_cmd_callback
 				},
 				.commandDatas = (void*[])
 				{
-					[0] = &(crang_cmd_create_shader_t)
+					[0] = &(crang_cmd_create_shader_layout_t)
 					{
-						.shaderId = vertShader,
-						.source = vertSource,
-						.sourceSize = vertSize,
+						.shaderLayoutId = vertShaderLayout,
 						.shaderInputs =
 						{
 							.inputs = (crang_shader_input_t[])
@@ -105,7 +108,14 @@ int main(void)
 							.count = 1,
 						}
 					},
-					[1] = &(crang_cmd_callback_t)
+					[1] = &(crang_cmd_create_shader_t)
+					{
+						.shaderId = vertShader,
+						.shaderLayoutId = vertShaderLayout,
+						.source = vertSource,
+						.sourceSize = vertSize
+					},
+					[2] = &(crang_cmd_callback_t)
 					{
 						.callback = &free,
 						.data = vertSource
@@ -126,21 +136,20 @@ int main(void)
 		fread(fragSource, fileSize, 1, file);
 		fclose(file);
 
-		crang_execute_commands_immediate(graphicsDevice,
+		fragPromise = crang_execute_commands_async(graphicsDevice,
 			&(crang_cmd_buffer_t)
 			{
 				.commandDescs = (crang_cmd_e[])
 				{
-					[0] = crang_cmd_create_shader,
-					[1] = crang_cmd_callback
+					[0] = crang_cmd_create_shader_layout,
+					[1] = crang_cmd_create_shader,
+					[2] = crang_cmd_callback
 				},
 				.commandDatas = (void*[])
 				{
-					[0] = &(crang_cmd_create_shader_t)
+					[0] = &(crang_cmd_create_shader_layout_t)
 					{
-						.shaderId = fragShader,
-						.source = fragSource,
-						.sourceSize = fragSize,
+						.shaderLayoutId = fragShaderLayout,
 						.shaderInputs =
 						{
 							.inputs = (crang_shader_input_t[])
@@ -150,7 +159,14 @@ int main(void)
 							.count = 1,
 						}
 					},
-					[1] = &(crang_cmd_callback_t)
+					[1] = &(crang_cmd_create_shader_t)
+					{
+						.shaderId = fragShader,
+						.shaderLayoutId = fragShaderLayout,
+						.source = fragSource,
+						.sourceSize = fragSize
+					},
+					[2] = &(crang_cmd_callback_t)
 					{
 						.callback = &free,
 						.data = fragSource
@@ -164,8 +180,9 @@ int main(void)
 	crang_buffer_id_t vertexBuffer = crang_request_buffer_id(graphicsDevice);
 	crang_buffer_id_t indexBuffer = crang_request_buffer_id(graphicsDevice);
 
+	crang_promise_id_t meshBufferPromise;
 	{
-		crang_execute_commands_immediate(graphicsDevice,
+		meshBufferPromise = crang_execute_commands_async(graphicsDevice,
 			&(crang_cmd_buffer_t)
 			{
 				.commandDescs = (crang_cmd_e[])
@@ -228,8 +245,9 @@ int main(void)
 
 	// Images
 	crang_image_id_t greyImage = crang_request_image_id(graphicsDevice);
+	crang_promise_id_t imagePromise;
 	{
-		crang_execute_commands_immediate(graphicsDevice,
+		imagePromise = crang_execute_commands_async(graphicsDevice,
 			&(crang_cmd_buffer_t)
 			{
 				.commandDescs = (crang_cmd_e[])
@@ -243,8 +261,8 @@ int main(void)
 					{
 						.imageId = greyImage,
 						.format = crang_image_format_r8g8b8a8,
-						.width = 1,
-						.height = 1
+						.width = 2,
+						.height = 2
 					},
 					[1] = &(crang_cmd_copy_to_image_t)
 					{
@@ -252,11 +270,14 @@ int main(void)
 						.format = crang_image_format_r8g8b8a8,
 						.data = (uint8_t[])
 						{
-							128, 128, 128, 255
+							0, 0, 255, 255,
+							255, 0, 0, 255,
+							0, 255, 0, 255,
+							0, 255, 255, 255,
 						},
 						.offset = 0,
-						.width = 1,
-						.height = 1,
+						.width = 2,
+						.height = 2,
 						.offsetX = 0,
 						.offsetY = 0
 					}
@@ -293,6 +314,12 @@ int main(void)
 		[14] = 1.0f,
 	}, sizeof(float) * 16);
 
+
+	crang_wait_promise(graphicsDevice, vertPromise);
+	crang_wait_promise(graphicsDevice, fragPromise);
+	crang_wait_promise(graphicsDevice, meshBufferPromise);
+	crang_wait_promise(graphicsDevice, imagePromise);
+
 	crang_buffer_id_t vertInputBuffer = crang_request_buffer_id(graphicsDevice);
 	crang_shader_input_id_t vertInputs = crang_request_shader_input_id(graphicsDevice);
 	crang_shader_input_id_t fragSamplerInput = crang_request_shader_input_id(graphicsDevice);
@@ -313,7 +340,7 @@ int main(void)
 				{
 					[0] = &(crang_cmd_create_shader_input_t)
 					{
-						.shaderId = vertShader,
+						.shaderLayoutId = vertShaderLayout,
 						.shaderInputId = vertInputs
 					},
 					[1] = &(crang_cmd_create_buffer_t)
@@ -343,7 +370,7 @@ int main(void)
 					},
 					[4] = &(crang_cmd_create_shader_input_t)
 					{
-						.shaderId = fragShader,
+						.shaderLayoutId = fragShaderLayout,
 						.shaderInputId = fragSamplerInput
 					},
 					[5] = &(crang_cmd_set_shader_input_data_t)
