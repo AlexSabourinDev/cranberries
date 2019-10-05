@@ -1179,6 +1179,8 @@ void crang_destroy_graphics_device(crang_ctx_t* ctx, crang_graphics_device_t* de
 
 	for (uint32_t i = 0; i < vkDevice->images.count; i++)
 	{
+		vkDestroySampler(vkDevice->devices.logicalDevice, vkDevice->images.samplers[i], cranvk_no_allocator);
+		vkDestroyImageView(vkDevice->devices.logicalDevice, vkDevice->images.imageViews[i], cranvk_no_allocator);
 		vkDestroyImage(vkDevice->devices.logicalDevice, vkDevice->images.images[i], cranvk_no_allocator);
 	}
 

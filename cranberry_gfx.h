@@ -2,7 +2,6 @@
 #define __CRANBERRY_GFX
 
 #include "cranberry_gfx_backend.h"
-#include <stdint.h>
 
 typedef struct _crang_gfx_t crang_gfx_t;
 
@@ -34,8 +33,9 @@ typedef struct
 	{
 		void* data;
 		unsigned int count;
+		crang_index_type_e indexType;
 	} indices;
-} crang_mesh_desc;
+} crang_mesh_desc_t;
 
 typedef struct
 {
@@ -52,12 +52,13 @@ unsigned int crang_gfx_size(void);
 crang_gfx_t* crang_create_gfx_win32(void* buffer, void* hinstance, void* hwnd);
 void crang_destroy_gfx(crang_gfx_t* gfx);
 
-crang_mesh_t crang_create_mesh(crang_mesh_desc* meshDesc);
+crang_mesh_t crang_create_mesh(crang_gfx_t* gfx, crang_mesh_desc_t* meshDesc);
 
 #endif // __CRANBERRY_GFX 
 
 #ifdef CRANBERRY_GFX_IMPLEMENTATION
 
+#include <stdint.h>
 #include <string.h>
 
 typedef struct
@@ -134,7 +135,7 @@ void crang_destroy_gfx(crang_gfx_t* gfx)
 	crang_destroy_ctx(gfxData->backendCtx);
 }
 
-crang_mesh_t crang_create_mesh(crang_gfx_t* gfx, crang_mesh_desc* meshDesc)
+crang_mesh_t crang_create_mesh(crang_gfx_t* gfx, crang_mesh_desc_t* meshDesc)
 {
 	crang_mesh_t mesh;
 
