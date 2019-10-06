@@ -309,7 +309,7 @@ void test_backend(void* hinstance, void* hwnd)
 					{
 						.bufferId = vertInputBuffer,
 						.size = sizeof(camera_t),
-						.type = crang_buffer_shader_input
+						.type = crang_buffer_shader_uniform_input
 					},
 					[2] = &(crang_cmd_copy_to_buffer_t)
 					{
@@ -408,13 +408,13 @@ void test_backend(void* hinstance, void* hwnd)
 				},
 				[1] = &(crang_cmd_bind_shader_input_t)
 				{
-					.shaderBinding = crang_shader_vertex,
+					.shaderLayoutIndex = 0,
 					.pipelineId = pipeline,
 					.shaderInputId = vertInputs
 				},
 				[2] = &(crang_cmd_bind_shader_input_t)
 				{
-					.shaderBinding = crang_shader_fragment,
+					.shaderLayoutIndex = 1,
 					.pipelineId = pipeline,
 					.shaderInputId = fragSamplerInput
 				},

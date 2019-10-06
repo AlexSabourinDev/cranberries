@@ -58,7 +58,8 @@ typedef enum
 {
 	crang_buffer_vertex,
 	crang_buffer_index,
-	crang_buffer_shader_input,
+	crang_buffer_shader_uniform_input,
+	crang_buffer_shader_storage_input,
 	crang_buffer_max
 } crang_buffer_e;
 
@@ -117,6 +118,7 @@ typedef enum
 	crang_cmd_bind_vertex_inputs,
 	crang_cmd_bind_index_input,
 	crang_cmd_bind_shader_input,
+	crang_cmd_immediate_shader_input,
 	crang_cmd_draw_indexed,
 } crang_cmd_e;
 
@@ -130,6 +132,7 @@ typedef struct
 typedef enum
 {
 	crang_shader_input_type_uniform_buffer,
+	crang_shader_input_type_storage_buffer,
 	crang_shader_input_type_sampler,
 } crang_shader_input_type_e;
 
@@ -138,6 +141,12 @@ typedef struct
 	crang_shader_input_type_e type;
 	unsigned int binding;
 } crang_shader_input_t;
+
+typedef struct
+{
+	unsigned int size;
+	unsigned int offset;
+} crang_immediate_input_t;
 
 typedef struct
 {
@@ -155,6 +164,12 @@ typedef struct
 		crang_shader_input_t* inputs;
 		unsigned int count;
 	} shaderInputs;
+
+	struct
+	{
+		crang_immediate_input_t* inputs;
+		unsigned int count;
+	} immediateInputs;
 } crang_cmd_create_shader_layout_t;
 
 typedef struct
@@ -260,10 +275,19 @@ typedef struct
 
 typedef struct
 {
-	crang_shader_e shaderBinding;
+	unsigned int shaderLayoutIndex;
 	crang_shader_input_id_t shaderInputId;
 	crang_pipeline_id_t pipelineId;
 } crang_cmd_bind_shader_input_t;
+
+typedef struct
+{
+	crang_pipeline_id_t pipelineId;
+	void* data;
+	unsigned int size;
+	unsigned int offset;
+	crang_shader_flags_e supportedShaders;
+} crang_cmd_immediate_shader_input_t;
 
 typedef struct
 {
@@ -703,6 +727,7 @@ const char* cranvk_validation_layers[cranvk_validation_count] = {};
 #define cranvk_max_physical_device_property_count 50
 #define cranvk_max_physical_image_count 10
 #define cranvk_max_uniform_buffer_count 1000
+#define cranvk_max_storage_buffer_count 1000
 #define cranvk_max_image_sampler_count 1000
 #define cranvk_max_descriptor_set_count 1000
 #define cranvk_max_shader_count 100
@@ -718,6 +743,7 @@ const char* cranvk_validation_layers[cranvk_validation_count] = {};
 #define cranvk_max_image_count 100
 #define cranvk_max_promise_count 100
 #define cranvk_max_pipeline_shader_layout_count 10
+#define cranvk_max_immediate_input_count 10
 
 typedef struct
 {
@@ -765,6 +791,13 @@ typedef struct
 	{
 		crang_shader_flags_e supportedTypes[cranvk_max_shader_layout_count];
 		VkDescriptorSetLayout descriptorSetLayouts[cranvk_max_shader_layout_count];
+
+		struct
+		{
+			crang_immediate_input_t inputs[cranvk_max_immediate_input_count];
+			unsigned int count;
+		} immediateInputs[cranvk_max_shader_layout_count];
+
 		uint32_t layoutCount;
 	} shaderLayouts;
 
@@ -1090,9 +1123,10 @@ crang_graphics_device_t* crang_create_graphics_device(void* buffer, crang_ctx_t*
 
 	// Create the descriptor pools
 	{
-		VkDescriptorPoolSize descriptorPoolSizes[2] =
+		VkDescriptorPoolSize descriptorPoolSizes[3] =
 		{
 			{ .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,.descriptorCount = cranvk_max_uniform_buffer_count },
+			{ .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,.descriptorCount = cranvk_max_storage_buffer_count },
 			{ .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = cranvk_max_image_sampler_count }
 		};
 
@@ -1101,7 +1135,7 @@ crang_graphics_device_t* crang_create_graphics_device(void* buffer, crang_ctx_t*
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 			.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
 			.maxSets = cranvk_max_descriptor_set_count,
-			.poolSizeCount = 2,
+			.poolSizeCount = 3,
 			.pPoolSizes = descriptorPoolSizes
 		};
 
@@ -1677,11 +1711,55 @@ crang_pipeline_id_t crang_create_pipeline(crang_graphics_device_t* device, crang
 			descriptorSetLayouts[i] = vkDevice->shaderLayouts.descriptorSetLayouts[pipelineDesc->shaderLayouts.layouts[i].id];
 		}
 
+		VkShaderStageFlagBits shaderStageConversionTable[] =
+		{
+			[crang_shader_flag_vertex] = VK_SHADER_STAGE_VERTEX_BIT,
+			[crang_shader_flag_fragment] = VK_SHADER_STAGE_FRAGMENT_BIT,
+			[crang_shader_flag_vertex | crang_shader_flag_fragment] = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+		};
+
+		uint32_t immediateInputIndex = 0;
+		VkPushConstantRange pushConstantRanges[cranvk_max_immediate_input_count];
+		for (uint32_t i = 0; i < pipelineDesc->shaderLayouts.count; i++)
+		{
+			crang_shader_layout_id_t shaderLayout = pipelineDesc->shaderLayouts.layouts[i];
+			for (uint32_t immediateIndex = 0; immediateIndex < vkDevice->shaderLayouts.immediateInputs[shaderLayout.id].count; immediateIndex++)
+			{
+				// Make sure our push constant range is at minimum from 0 to 128. It's not ideal, but the spec states
+				// that our push constant range has to be at least 128. (https://github.com/SaschaWillems/Vulkan/blob/ca17e359649c4f25ae9aa07352cfe5f532a8ca13/examples/pushconstants/pushconstants.cpp#L278)
+				
+				uint32_t offset;
+				uint32_t size;
+				{
+					offset = vkDevice->shaderLayouts.immediateInputs[shaderLayout.id].inputs[immediateIndex].offset;
+					if (offset > 0)
+					{
+						offset = 0;
+					}
+
+					size = vkDevice->shaderLayouts.immediateInputs[shaderLayout.id].inputs[immediateIndex].size;
+					if (size < 128)
+					{
+						size = 128;
+					}
+				}
+
+				pushConstantRanges[immediateInputIndex++] = (VkPushConstantRange)
+				{
+					.stageFlags = shaderStageConversionTable[vkDevice->shaderLayouts.supportedTypes[shaderLayout.id]],
+					.offset = offset,
+					.size = size
+				};
+			}
+		}
+
 		VkPipelineLayoutCreateInfo pipelineLayoutCreate =
 		{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 			.setLayoutCount = pipelineDesc->shaderLayouts.count,
-			.pSetLayouts = descriptorSetLayouts
+			.pSetLayouts = descriptorSetLayouts,
+			.pushConstantRangeCount = immediateInputIndex,
+			.pPushConstantRanges = pushConstantRanges
 		};
 
 		cranvk_check(vkCreatePipelineLayout(vkDevice->devices.logicalDevice, &pipelineLayoutCreate, cranvk_no_allocator, &vkDevice->pipelines.layouts[pipelineId.id]));
@@ -1984,6 +2062,7 @@ static void cranvk_create_shader_layout(cranvk_graphics_device_t* vkDevice, cran
 	VkDescriptorType descriptorTypeConversionTable[] =
 	{
 		[crang_shader_input_type_uniform_buffer] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		[crang_shader_input_type_storage_buffer] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 		[crang_shader_input_type_sampler] = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
 	};
 
@@ -2008,6 +2087,12 @@ static void cranvk_create_shader_layout(cranvk_graphics_device_t* vkDevice, cran
 
 	VkDescriptorSetLayout* layout = &vkDevice->shaderLayouts.descriptorSetLayouts[createShaderLayoutData->shaderLayoutId.id];
 	cranvk_check(vkCreateDescriptorSetLayout(vkDevice->devices.logicalDevice, &createLayout, cranvk_no_allocator, layout));
+
+	for (uint32_t i = 0; i < createShaderLayoutData->immediateInputs.count; i++)
+	{
+		vkDevice->shaderLayouts.immediateInputs[createShaderLayoutData->shaderLayoutId.id].inputs[i] = createShaderLayoutData->immediateInputs.inputs[i];
+	}
+	vkDevice->shaderLayouts.immediateInputs[createShaderLayoutData->shaderLayoutId.id].count = createShaderLayoutData->immediateInputs.count;
 }
 
 static void cranvk_create_shader_input(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* ctx, void* commandData)
@@ -2032,9 +2117,17 @@ static void cranvk_set_shader_input_data(cranvk_graphics_device_t* vkDevice, cra
 	cranvk_unused(context);
 	crang_cmd_set_shader_input_data_t* setInput = (crang_cmd_set_shader_input_data_t*)commandData;
 
+	VkDescriptorType descriptorTypeConversionTable[] =
+	{
+		[crang_shader_input_type_uniform_buffer] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		[crang_shader_input_type_storage_buffer] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		[crang_shader_input_type_sampler] = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+	};
+
 	switch (setInput->type)
 	{
 		case crang_shader_input_type_uniform_buffer:
+		case crang_shader_input_type_storage_buffer:
 		{
 			VkDescriptorBufferInfo bufferInfo =
 			{
@@ -2047,7 +2140,7 @@ static void cranvk_set_shader_input_data(cranvk_graphics_device_t* vkDevice, cra
 			{
 				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 				.dstSet = vkDevice->shaders.descriptorSets.sets[setInput->shaderInputId.id],
-				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.descriptorType = descriptorTypeConversionTable[setInput->type],
 				.dstBinding = setInput->binding,
 				.descriptorCount = 1,
 				.pBufferInfo = &bufferInfo
@@ -2091,7 +2184,8 @@ static void cranvk_create_buffer(cranvk_graphics_device_t* vkDevice, cranvk_exec
 	{
 		[crang_buffer_vertex] = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
 		[crang_buffer_index] = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-		[crang_buffer_shader_input] = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+		[crang_buffer_shader_storage_input] = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		[crang_buffer_shader_uniform_input] = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 	};
 
 	crang_cmd_create_buffer_t* createBufferData = (crang_cmd_create_buffer_t*)commandData;
@@ -2146,7 +2240,7 @@ static void cranvk_copy_to_buffer(cranvk_graphics_device_t* vkDevice, cranvk_exe
 			void* memory;
 			unsigned int flags = 0;
 			cranvk_check(vkMapMemory(vkDevice->devices.logicalDevice, allocation.memory, allocation.offset, copyToBufferData->size, flags, &memory));
-			memcpy(memory, (uint8_t*)copyToBufferData->data + copyToBufferData->offset, copyToBufferData->size);
+			memcpy(memory, (uint8_t*)copyToBufferData->data, copyToBufferData->size);
 
 			VkMappedMemoryRange mappedMemory = 
 			{
@@ -2443,17 +2537,24 @@ static void cranvk_bind_index_input(cranvk_graphics_device_t* vkDevice, cranvk_e
 
 static void cranvk_bind_shader_input(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* context, void* commandData)
 {
-	cranvk_unused(context);
-	uint32_t bindingIndex[crang_shader_max] =
-	{
-		[crang_shader_vertex] = 0,
-		[crang_shader_fragment] = 1
-	};
-
 	crang_cmd_bind_shader_input_t* shaderInput = (crang_cmd_bind_shader_input_t*)commandData;
 	vkCmdBindDescriptorSets(
 		context->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vkDevice->pipelines.layouts[shaderInput->pipelineId.id],
-		bindingIndex[shaderInput->shaderBinding], 1, &vkDevice->shaders.descriptorSets.sets[shaderInput->shaderInputId.id], 0, VK_NULL_HANDLE);
+		shaderInput->shaderLayoutIndex, 1, &vkDevice->shaders.descriptorSets.sets[shaderInput->shaderInputId.id], 0, VK_NULL_HANDLE);
+}
+
+static void cranvk_immediate_shader_input(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* context, void* commandData)
+{
+	VkShaderStageFlagBits shaderStageConversionTable[] =
+	{
+		[crang_shader_flag_vertex] = VK_SHADER_STAGE_VERTEX_BIT,
+		[crang_shader_flag_fragment] = VK_SHADER_STAGE_FRAGMENT_BIT,
+		[crang_shader_flag_vertex | crang_shader_flag_fragment] = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+	};
+
+	crang_cmd_immediate_shader_input_t* immediateInput = (crang_cmd_immediate_shader_input_t*)commandData;
+	vkCmdPushConstants(context->commandBuffer, vkDevice->pipelines.layouts[immediateInput->pipelineId.id],
+		shaderStageConversionTable[immediateInput->supportedShaders], immediateInput->offset, immediateInput->size, immediateInput->data);
 }
 
 static void cranvk_draw_indexed(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* context, void* commandData)
@@ -2479,6 +2580,7 @@ cranvk_cmd_processor cmdProcessors[] =
 	[crang_cmd_bind_vertex_inputs] = &cranvk_bind_vertex_inputs,
 	[crang_cmd_bind_index_input] = &cranvk_bind_index_input,
 	[crang_cmd_bind_shader_input] = &cranvk_bind_shader_input,
+	[crang_cmd_immediate_shader_input] = &cranvk_immediate_shader_input,
 	[crang_cmd_draw_indexed] = &cranvk_draw_indexed,
 };
 

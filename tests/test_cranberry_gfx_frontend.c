@@ -23,10 +23,10 @@ void test_frontend(void* hinstance, void* hwnd)
 			{
 				.data = (float[])
 				{
-					1.0f, 1.0f, 1.0f,
+					10.0f, 1.0f, 10.0f,
 					0.0f, 1.0f, 1.0f,
-					0.0f, 0.0f, 1.0f,
-					1.0f, 0.0f, 1.0f
+					0.0f, -1.0f, 1.0f,
+					10.0f, -1.0f, 10.0f
 				},
 				.size = sizeof(float) * 3 * 4,
 				.vertLayout = crang_vert_type_position_f32_3
@@ -38,7 +38,7 @@ void test_frontend(void* hinstance, void* hwnd)
 					0, 1, 2,
 					0, 2, 3
 				},
-				.indexType = crang_index_type_u16,
+				.type = crang_index_type_u16,
 				.count = 6
 			}
 		});
@@ -113,15 +113,50 @@ void test_frontend(void* hinstance, void* hwnd)
 		&(crang_material_desc_t)
 		{
 			.shaders = &shaders,
-			.shaderInputs = 
+			.shaderInputs = {0}
+		});
+
+
+	crang_camera_transform_t transform = crang_convert_camera_to_transform(
+											&(crang_camera_t)
+											{
+												.pos = { 0.0f, 0.0f, -15.0f },
+												.rotation = { .right = { 1.0f, 0.0f, 0.0f }, .up = { 0.0f, 1.0f, 0.0f }, .forward = { 0.0f, 0.0f, 1.0f } },
+												.width = 16.0f,
+												.height = 9.0f,
+												.zoom = 10.0f,
+												.farPlane = 1000.0f
+											});
+	crang_recording_buffer_id_t draw = crang_record_draw(gfx,
+		&(crang_draw_desc_t)
+		{
+			.materialGroups = 
 			{
-				.inputBindings = (crang_material_input_binding_t[])
+				.materials = (crang_material_group_t[])
+
 				{
+					(crang_material_group_t)
 					{
-						.data = (float[]) { 1.0f, 0.0f, 0.0f, 1.0f},
-						.size = sizeof(float) * 4,
-						.binding = 0,
-						.shaderLayoutIndex = 0
+						.material = &material,
+						.cameraGroups =
+						{
+							.cameras = (crang_camera_group_t[])
+							{
+								(crang_camera_group_t)
+								{
+									.camera = &transform,
+									.meshGroups =
+									{
+										.meshes = (crang_mesh_t[])
+										{
+											mesh
+										},
+										.count = 1
+									}
+								}
+							},
+							.count = 1,
+						}
 					}
 				},
 				.count = 1
@@ -150,6 +185,8 @@ void test_frontend(void* hinstance, void* hwnd)
 		{
 			break;
 		}
+
+		crang_submit_draw(gfx, &draw, 1);
 	}
 
 	crang_destroy_gfx(gfx);
