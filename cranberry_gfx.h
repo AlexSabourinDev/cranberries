@@ -282,7 +282,7 @@ crang_gfx_t* crang_create_gfx_win32(void* buffer, void* hinstance, void* hwnd)
 		gfx->recordingPool.recordings[i] = crang_request_recording_buffer_id(gfx->backendDevice);
 	}
 
-	gfx->layouts.defaultVertLayout = crang_request_shader_layout_id(gfx->backendDevice, crang_shader_flag_vertex | crang_shader_flag_fragment);
+	gfx->layouts.defaultVertLayout = crang_request_shader_layout_id(gfx->backendDevice, crang_shader_flag_vertex);
 	crang_execute_commands_immediate(gfx->backendDevice,
 		&(crang_cmd_buffer_t)
 		{
@@ -303,14 +303,7 @@ crang_gfx_t* crang_create_gfx_win32(void* buffer, void* hinstance, void* hwnd)
 						},
 						.count = 1,
 					},
-					.immediateInputs = 
-					{
-						.inputs = (crang_immediate_input_t[])
-						{
-							[0] = { .offset = 0, .size = sizeof(crang_camera_transform_t) }
-						},
-						.count = 1
-					}
+					.immediateInput = { .offset = 0, .size = sizeof(crang_camera_transform_t) }
 				},
 			},
 			.count = 1
@@ -715,7 +708,7 @@ crang_recording_buffer_id_t crang_record_draw(crang_gfx_t* gfx, crang_draw_desc_
 				.pipelineId = material->pipeline,
 				.data = camera,
 				.size = sizeof(crang_camera_transform_t),
-				.supportedShaders = crang_shader_flag_vertex | crang_shader_flag_fragment
+				.supportedShaders = crang_shader_flag_vertex
 			};
 
 			drawCommands[commandIndex] = crang_cmd_immediate_shader_input;

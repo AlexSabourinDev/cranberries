@@ -165,11 +165,7 @@ typedef struct
 		unsigned int count;
 	} shaderInputs;
 
-	struct
-	{
-		crang_immediate_input_t* inputs;
-		unsigned int count;
-	} immediateInputs;
+	crang_immediate_input_t immediateInput;
 } crang_cmd_create_shader_layout_t;
 
 typedef struct
@@ -792,11 +788,7 @@ typedef struct
 		crang_shader_flags_e supportedTypes[cranvk_max_shader_layout_count];
 		VkDescriptorSetLayout descriptorSetLayouts[cranvk_max_shader_layout_count];
 
-		struct
-		{
-			crang_immediate_input_t inputs[cranvk_max_immediate_input_count];
-			unsigned int count;
-		} immediateInputs[cranvk_max_shader_layout_count];
+		crang_immediate_input_t immediateInputs[cranvk_max_shader_layout_count]; // Only a single immediate input is supported per shader layout.
 
 		uint32_t layoutCount;
 	} shaderLayouts;
@@ -1723,21 +1715,23 @@ crang_pipeline_id_t crang_create_pipeline(crang_graphics_device_t* device, crang
 		for (uint32_t i = 0; i < pipelineDesc->shaderLayouts.count; i++)
 		{
 			crang_shader_layout_id_t shaderLayout = pipelineDesc->shaderLayouts.layouts[i];
-			for (uint32_t immediateIndex = 0; immediateIndex < vkDevice->shaderLayouts.immediateInputs[shaderLayout.id].count; immediateIndex++)
+			crang_immediate_input_t immediateInput = vkDevice->shaderLayouts.immediateInputs[shaderLayout.id];
+
+
+			if (immediateInput.size > 0)
 			{
 				// Make sure our push constant range is at minimum from 0 to 128. It's not ideal, but the spec states
 				// that our push constant range has to be at least 128. (https://github.com/SaschaWillems/Vulkan/blob/ca17e359649c4f25ae9aa07352cfe5f532a8ca13/examples/pushconstants/pushconstants.cpp#L278)
-				
 				uint32_t offset;
 				uint32_t size;
 				{
-					offset = vkDevice->shaderLayouts.immediateInputs[shaderLayout.id].inputs[immediateIndex].offset;
+					offset = immediateInput.offset;
 					if (offset > 0)
 					{
 						offset = 0;
 					}
 
-					size = vkDevice->shaderLayouts.immediateInputs[shaderLayout.id].inputs[immediateIndex].size;
+					size = immediateInput.size;
 					if (size < 128)
 					{
 						size = 128;
@@ -2088,11 +2082,7 @@ static void cranvk_create_shader_layout(cranvk_graphics_device_t* vkDevice, cran
 	VkDescriptorSetLayout* layout = &vkDevice->shaderLayouts.descriptorSetLayouts[createShaderLayoutData->shaderLayoutId.id];
 	cranvk_check(vkCreateDescriptorSetLayout(vkDevice->devices.logicalDevice, &createLayout, cranvk_no_allocator, layout));
 
-	for (uint32_t i = 0; i < createShaderLayoutData->immediateInputs.count; i++)
-	{
-		vkDevice->shaderLayouts.immediateInputs[createShaderLayoutData->shaderLayoutId.id].inputs[i] = createShaderLayoutData->immediateInputs.inputs[i];
-	}
-	vkDevice->shaderLayouts.immediateInputs[createShaderLayoutData->shaderLayoutId.id].count = createShaderLayoutData->immediateInputs.count;
+	vkDevice->shaderLayouts.immediateInputs[createShaderLayoutData->shaderLayoutId.id] = createShaderLayoutData->immediateInput;
 }
 
 static void cranvk_create_shader_input(cranvk_graphics_device_t* vkDevice, cranvk_execution_ctx_t* ctx, void* commandData)
