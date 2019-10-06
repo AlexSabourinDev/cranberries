@@ -606,7 +606,8 @@ crang_material_t crang_create_material(crang_gfx_t* gfx, crang_material_desc_t* 
 		.vertexAttributes = 
 		{
 			.count = 0
-		}
+		},
+		.polygonMode = crang_polygon_mode_line
 	});
 
 	return material;

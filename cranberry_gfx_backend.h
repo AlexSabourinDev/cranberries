@@ -63,6 +63,12 @@ typedef enum
 	crang_buffer_max
 } crang_buffer_e;
 
+typedef enum
+{
+	crang_polygon_mode_fill,
+	crang_polygon_mode_line
+} crang_polygon_mode_e;
+
 typedef struct
 {
 	crang_present_t* presentCtx;
@@ -87,6 +93,7 @@ typedef struct
 		unsigned int count;
 	} vertexAttributes;
 
+	crang_polygon_mode_e polygonMode;
 } crang_pipeline_desc_t;
 
 typedef struct
@@ -1806,6 +1813,12 @@ crang_pipeline_id_t crang_create_pipeline(crang_graphics_device_t* device, crang
 			.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
 		};
 
+		VkPolygonMode polygonModeConversionTable[] =
+		{
+			[crang_polygon_mode_fill] = VK_POLYGON_MODE_FILL,
+			[crang_polygon_mode_line] = VK_POLYGON_MODE_LINE
+		};
+
 		// Rasterization
 		VkPipelineRasterizationStateCreateInfo rasterizationCreate =
 		{
@@ -1815,7 +1828,7 @@ crang_pipeline_id_t crang_create_pipeline(crang_graphics_device_t* device, crang
 			.depthClampEnable = VK_FALSE,
 			.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
 			.lineWidth = 1.0f,
-			.polygonMode = VK_POLYGON_MODE_FILL,
+			.polygonMode = polygonModeConversionTable[pipelineDesc->polygonMode],
 			.cullMode = VK_CULL_MODE_BACK_BIT
 		};
 
