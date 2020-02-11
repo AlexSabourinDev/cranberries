@@ -41,15 +41,15 @@ void cranpl_write_bmp(const char* fileName, uint8_t* pixels, uint32_t width, uin
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    switch(msg)
-    {
-        case WM_DESTROY:
-            PostQuitMessage(0);
-        break;
-        default:
-            return DefWindowProc(hwnd, msg, wParam, lParam);
-    }
-    return 0;
+	switch(msg)
+	{
+		case WM_DESTROY:
+			PostQuitMessage(0);
+		break;
+		default:
+			return DefWindowProc(hwnd, msg, wParam, lParam);
+	}
+	return 0;
 }
 
 void* cranpl_create_window(const char* windowName, uint32_t width, uint32_t height)
