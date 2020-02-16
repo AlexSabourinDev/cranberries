@@ -1,7 +1,11 @@
+// Links and things:
+// https://patapom.com/blog/BRDF/BRDF%20Models/
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <math.h>
+#include <float.h>
 
 #include "cranberry_platform.h"
 
@@ -10,31 +14,7 @@ void* memset(void* dst, int val, size_t size);
 
 const float PI = 3.14159265358979323846264338327f;
 
-typedef struct
-{
-	float x, y, z;
-} vec3;
-
-static vec3 vec3_mulf(vec3 l, float r)
-{
-	return (vec3) { .x = l.x * r, .y = l.y * r, .z = l.z * r };
-}
-
-static vec3 vec3_add(vec3 l, vec3 r)
-{
-	return (vec3) {.x = l.x + r.x, .y = l.y + r.y, .z = l.z + r.z};
-}
-
-static vec3 vec3_sub(vec3 l, vec3 r)
-{
-	return (vec3) {.x = l.x - r.x, .y = l.y - r.y, .z = l.z - r.z};
-}
-
-static float vec3_dot(vec3 l, vec3 r)
-{
-	return l.x * r.x + l.y * r.y + l.z * r.z;
-}
-
+// float math
 static float rcp(float f)
 {
 	return 1.0f / f;
@@ -55,14 +35,61 @@ static void quadratic(float a, float b, float c, float* out1, float* out2)
 	*out2 = (-b + d) * e;
 }
 
+static float randf01()
+{
+	return (float)rand() / (float)RAND_MAX;
+}
+
+// vector math
+typedef struct
+{
+	float x, y, z;
+} vec3;
+
+static vec3 vec3_mulf(vec3 l, float r)
+{
+	return (vec3) { .x = l.x * r, .y = l.y * r, .z = l.z * r };
+}
+
+static vec3 vec3_add(vec3 l, vec3 r)
+{
+	return (vec3) {.x = l.x + r.x, .y = l.y + r.y, .z = l.z + r.z};
+}
+
+static vec3 vec3_sub(vec3 l, vec3 r)
+{
+	return (vec3) {.x = l.x - r.x, .y = l.y - r.y, .z = l.z - r.z};
+}
+
+static vec3 vec3_mul(vec3 l, vec3 r)
+{
+	return (vec3) {.x = l.x * r.x, .y = l.y * r.y, .z = l.z * r.z};
+}
+
+static float vec3_dot(vec3 l, vec3 r)
+{
+	return l.x * r.x + l.y * r.y + l.z * r.z;
+}
+
+static vec3 vec3_lerp(vec3 l, vec3 r, float t)
+{
+	return vec3_add(vec3_mulf(l, 1.0f - t), vec3_mulf(r, t));
+}
+
+static vec3 vec3_normalized(vec3 v)
+{
+	return vec3_mulf(v, rsqrt(v.x * v.x + v.y * v.y + v.z * v.z));
+}
+
 static bool doesSphereRayIntersect(vec3 rayO, vec3 rayD, vec3 sphereO, float sphereR)
 {
 	vec3 sphereRaySpace = vec3_sub(sphereO, rayO);
-	float distanceToRaySqr = vec3_dot(sphereRaySpace,sphereRaySpace) - vec3_dot(sphereRaySpace, rayD) * vec3_dot(sphereRaySpace, rayD);
+	float projectedDistance = vec3_dot(sphereRaySpace, rayD);
+	float distanceToRaySqr = vec3_dot(sphereRaySpace,sphereRaySpace) - projectedDistance * projectedDistance;
 	return (distanceToRaySqr < sphereR * sphereR);
 }
 
-static vec3 sphereRayIntersect(vec3 rayO, vec3 rayD, vec3 sphereO, float sphereR)
+static float sphereRayIntersection(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 sphereO, float sphereR)
 {
 	// Calculate our intersection distance
 	// With the sphere equation: dot(P-O,P-O) = r^2
@@ -92,7 +119,75 @@ static vec3 sphereRayIntersect(vec3 rayO, vec3 rayD, vec3 sphereO, float sphereR
 
 	// Get our closest point
 	float d = d1 < d2 ? d1 : d2;
-	return vec3_add(vec3_mulf(rayD, d), rayO);
+	if (d > rayMin && d < rayMax)
+	{
+		return d;
+	}
+
+	return rayMax;
+}
+
+static vec3 randomInUnitSphere()
+{
+	vec3 p;
+	do
+	{
+		p = vec3_mulf((vec3) { randf01()-0.5f, randf01()-0.5f, randf01()-0.5f }, 2.0f);
+	} while (vec3_dot(p, p) <= 1.0f);
+
+	return p;
+}
+
+vec3 castScene(vec3 rayO, vec3 rayD)
+{
+	const float NoRayIntersection = FLT_MAX;
+
+	// TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
+	// Do we want to handle this some other way?
+	const float ReCastBias = 0.0001f;
+
+	vec3 sceneColor = { 0 };
+
+	// TODO: Refine our scene description
+	#define circleCount 2
+	vec3 circleOrigins[circleCount] = { {.x = 0.0f,.y = 0.0f,.z = 2.0f }, {.x = 0.0f,.y = -10.5f,.z = 2.0f} };
+	float circleRads[circleCount] = { 0.5f, 10.0f };
+
+	float closestDistance = NoRayIntersection;
+	float closestRadius = 0.0f;
+	vec3 closestCircle = { 0 };
+	for (uint32_t i = 0; i < circleCount; i++)
+	{
+		if (doesSphereRayIntersect(rayO, rayD, circleOrigins[i], circleRads[i]))
+		{
+			float intersectionDistance = sphereRayIntersection(rayO, rayD, ReCastBias, NoRayIntersection, circleOrigins[i], circleRads[i]);
+			// TODO: Do we want to handle tie breakers somehow?
+			if (intersectionDistance < closestDistance)
+			{
+				closestDistance = intersectionDistance;
+				closestRadius = circleRads[i];
+				closestCircle = circleOrigins[i];
+			}
+		}
+	}
+
+	if (closestDistance != NoRayIntersection)
+	{
+		vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, closestDistance));
+		vec3 surfacePoint = vec3_sub(intersectionPoint, closestCircle);
+		vec3 normal = vec3_mulf(surfacePoint, rcp(closestRadius));
+
+		vec3 spherePoint = vec3_add(intersectionPoint, normal);
+		spherePoint = vec3_add(normal, randomInUnitSphere());
+
+		vec3 sceneCast = castScene(intersectionPoint, spherePoint);
+
+		// TODO: lighting be like
+		return vec3_add(vec3_mulf(sceneCast, 0.5f), sceneColor);
+	}
+
+	rayD = vec3_normalized(rayD);
+	return vec3_lerp((vec3){0.5f, 0.7f, 1.0f}, (vec3){ 1.0f, 1.0f, 1.0f }, rayD.y * 0.5f + 0.5f);
 }
 
 int main()
@@ -101,12 +196,12 @@ int main()
 
 	// TODO: How do we want to express our camera?
 	// Currently simply using the near triangle.
-	float near = 1.0f, nearHeight = 1.0f, nearWidth = nearHeight * (float)imgWidth / (float)imgHeight;
+	float near = 1.0f, nearHeight = 2.0f, nearWidth = nearHeight * (float)imgWidth / (float)imgHeight;
 
 	vec3 origin = { 0 };
 	vec3 forward = { .x = 0.0f,.y = 0.0f,.z = 1.0f }, right = { .x = 1.0f,.y = 0.0f,.z = 0.0f }, up = { .x = 0.0f, .y = 1.0f, .z = 0.0f };
 
-	uint8_t* bitmap = malloc(imgWidth * imgHeight * imgStride);
+	float* hdrImage = malloc(imgWidth * imgHeight * imgStride * sizeof(float));
 
 	// Sample our scene for every pixel in the bitmap. (Could be upsampled if we wanted to)
 	float xStep = nearWidth / (float)imgWidth, yStep = nearHeight / (float)imgHeight;
@@ -130,30 +225,31 @@ int main()
 			// L = sqrt(near^2 + xOff^2 + yOff^2)
 			rayDir = vec3_mulf(rayDir, rsqrt(near * near + xOff * xOff + yOff * yOff));
 
-			// TODO: Refine our scene description
-			vec3 circleOrigin = { .x = 0.0f,.y = 0.0f,.z = 2.0f };
-			float circleRad = 0.5f;
+			vec3 sceneColor = castScene(origin, rayDir);
 
 			int32_t imgIdx = ((y + imgHeight / 2) * imgWidth + (x + imgWidth / 2)) * imgStride;
-			if (doesSphereRayIntersect(origin, rayDir, circleOrigin, circleRad))
-			{
-				vec3 intersectionPoint = sphereRayIntersect(origin, rayDir, circleOrigin, circleRad);
-
-				// Render the absolute normals of the sphere for now.
-				vec3 normal = vec3_mulf(vec3_sub(intersectionPoint, circleOrigin), rcp(circleRad));
-				bitmap[imgIdx + 0] = (uint8_t)fabs(255.0f * normal.x);
-				bitmap[imgIdx + 1] = (uint8_t)fabs(255.0f * normal.y);
-				bitmap[imgIdx + 2] = (uint8_t)fabs(255.0f * normal.z);
-				bitmap[imgIdx + 3] = 0xFF;
-			}
-			else
-			{
-				memset(bitmap + imgIdx, 0x00, imgStride);
-			}
+			hdrImage[imgIdx + 0] = sceneColor.x;
+			hdrImage[imgIdx + 1] = sceneColor.y;
+			hdrImage[imgIdx + 2] = sceneColor.z;
+			hdrImage[imgIdx + 3] = 1.0f;
 		}
 	}
 
-	cranpl_write_bmp("render.bmp", bitmap, imgWidth, imgHeight);
+	// Convert HDR to 8 bit bitmap
+	{
+		uint8_t* bitmap = malloc(imgWidth * imgHeight * imgStride);
+		for (int32_t i = 0; i < imgWidth * imgHeight * imgStride; i+=4)
+		{
+			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 2]));
+			bitmap[i + 1] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 1]));
+			bitmap[i + 2] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 0]));
+			bitmap[i + 3] = (uint8_t)(255.99f * hdrImage[i + 3]);
+		}
 
+		cranpl_write_bmp("render.bmp", bitmap, imgWidth, imgHeight);
+		free(bitmap);
+	}
+
+	free(hdrImage);
 	return 0;
 }
