@@ -1,5 +1,6 @@
 // Links and things:
 // https://patapom.com/blog/BRDF/BRDF%20Models/
+// https://www.realtimerendering.com/raytracing/Ray%20Tracing%20in%20a%20Weekend.pdf
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@
 
 // Forward decls
 void* memset(void* dst, int val, size_t size);
+void* memcpy(void* dst, void const* src, size_t size);
 
 const float PI = 3.14159265358979323846264338327f;
 
@@ -35,7 +37,7 @@ static void quadratic(float a, float b, float c, float* out1, float* out2)
 	*out2 = (-b + d) * e;
 }
 
-static float randf01()
+static float rand01f()
 {
 	return (float)rand() / (float)RAND_MAX;
 }
@@ -132,30 +134,42 @@ static vec3 randomInUnitSphere()
 	vec3 p;
 	do
 	{
-		p = vec3_mulf((vec3) { randf01()-0.5f, randf01()-0.5f, randf01()-0.5f }, 2.0f);
+		p = vec3_mulf((vec3) { rand01f()-0.5f, rand01f()-0.5f, rand01f()-0.5f }, 2.0f);
 	} while (vec3_dot(p, p) <= 1.0f);
 
 	return p;
 }
 
+static vec3 vec3_reflect(vec3 i, vec3 n)
+{
+	return vec3_sub(i, vec3_mulf(n, 2.0f * vec3_dot(i, n)));
+}
+
 vec3 castScene(vec3 rayO, vec3 rayD)
 {
+	typedef enum
+	{
+		lambert,
+		metal,
+		dielectric
+	} material;
+
 	const float NoRayIntersection = FLT_MAX;
 
 	// TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
 	// Do we want to handle this some other way?
 	const float ReCastBias = 0.0001f;
 
-	vec3 sceneColor = { 0 };
-
 	// TODO: Refine our scene description
 	#define circleCount 2
 	vec3 circleOrigins[circleCount] = { {.x = 0.0f,.y = 0.0f,.z = 2.0f }, {.x = 0.0f,.y = -10.5f,.z = 2.0f} };
 	float circleRads[circleCount] = { 0.5f, 10.0f };
+	material circleMaterials[circleCount] = { metal, lambert };
 
 	float closestDistance = NoRayIntersection;
 	float closestRadius = 0.0f;
 	vec3 closestCircle = { 0 };
+	material closestMaterial = 0;
 	for (uint32_t i = 0; i < circleCount; i++)
 	{
 		if (doesSphereRayIntersect(rayO, rayD, circleOrigins[i], circleRads[i]))
@@ -167,6 +181,7 @@ vec3 castScene(vec3 rayO, vec3 rayD)
 				closestDistance = intersectionDistance;
 				closestRadius = circleRads[i];
 				closestCircle = circleOrigins[i];
+				closestMaterial = circleMaterials[i];
 			}
 		}
 	}
@@ -177,13 +192,26 @@ vec3 castScene(vec3 rayO, vec3 rayD)
 		vec3 surfacePoint = vec3_sub(intersectionPoint, closestCircle);
 		vec3 normal = vec3_mulf(surfacePoint, rcp(closestRadius));
 
-		vec3 spherePoint = vec3_add(intersectionPoint, normal);
-		spherePoint = vec3_add(normal, randomInUnitSphere());
+		// TODO: real materials please
+		switch (closestMaterial)
+		{
+		case lambert:
+		{
+			vec3 spherePoint = vec3_add(intersectionPoint, normal);
+			spherePoint = vec3_add(normal, randomInUnitSphere());
+			vec3 sceneCast = castScene(intersectionPoint, spherePoint);
 
-		vec3 sceneCast = castScene(intersectionPoint, spherePoint);
+			return vec3_mul(sceneCast, vec3_mulf((vec3) { 0.8f, 0.5f, 0.9f }, rcp(PI)));
+		}
+		case metal:
+		{
+			vec3 sceneCast = castScene(intersectionPoint, vec3_reflect(rayD, normal));
+			return vec3_mul(sceneCast, (vec3) {0.5f, 0.8f, 0.8f});
+		}
+		}
 
 		// TODO: lighting be like
-		return vec3_add(vec3_mulf(sceneCast, 0.5f), sceneColor);
+		return (vec3) { 0 };
 	}
 
 	rayD = vec3_normalized(rayD);
@@ -192,11 +220,13 @@ vec3 castScene(vec3 rayO, vec3 rayD)
 
 int main()
 {
+	uint32_t samplesPerPixel = 4;
 	int32_t imgWidth = 2048, imgHeight = 1024, imgStride = 4;
+	int32_t halfImgWidth = imgWidth / 2, halgImgHeight = imgHeight / 2;
 
 	// TODO: How do we want to express our camera?
 	// Currently simply using the near triangle.
-	float near = 1.0f, nearHeight = 2.0f, nearWidth = nearHeight * (float)imgWidth / (float)imgHeight;
+	float near = 1.0f, nearHeight = 1.0f, nearWidth = nearHeight * (float)imgWidth / (float)imgHeight;
 
 	vec3 origin = { 0 };
 	vec3 forward = { .x = 0.0f,.y = 0.0f,.z = 1.0f }, right = { .x = 1.0f,.y = 0.0f,.z = 0.0f }, up = { .x = 0.0f, .y = 1.0f, .z = 0.0f };
@@ -205,29 +235,26 @@ int main()
 
 	// Sample our scene for every pixel in the bitmap. (Could be upsampled if we wanted to)
 	float xStep = nearWidth / (float)imgWidth, yStep = nearHeight / (float)imgHeight;
-	for (int32_t y = -imgHeight / 2; y < imgHeight / 2; y++)
+	for (int32_t y = -halgImgHeight; y < halgImgHeight; y++)
 	{
 		float yOff = yStep * (float)y;
-		for (int32_t x = -imgWidth / 2; x < imgWidth / 2; x++)
+		for (int32_t x = -halfImgWidth; x < halfImgWidth; x++)
 		{
 			float xOff = xStep * (float)x;
-			// Construct our ray as a vector going from our origin to our near plane
-			// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
-			vec3 rayDir = vec3_add(vec3_mulf(forward, near), vec3_add(vec3_mulf(right, xOff), vec3_mulf(up, yOff)));
 
-			// The length of our vector (L) is:
-			// L = sqrt(B^2 + yOff^2)
-			// B = the length of the hypothenuse of the base triangle formed by forward + right.
-			// B = sqrt(near^2 + xOff^2)
-			// Substitute
-			// L = sqrt(sqrt(near^2 + xOff^2)^2 + yOff^2)
-			// Simplify
-			// L = sqrt(near^2 + xOff^2 + yOff^2)
-			rayDir = vec3_mulf(rayDir, rsqrt(near * near + xOff * xOff + yOff * yOff));
+			vec3 sceneColor = { 0 };
+			for (uint32_t i = 0; i < samplesPerPixel; i++)
+			{
+				float randX = xOff + xStep * (rand01f() * 0.5f - 0.5f);
+				float randY = yOff + yStep * (rand01f() * 0.5f - 0.5f);
 
-			vec3 sceneColor = castScene(origin, rayDir);
+				// Construct our ray as a vector going from our origin to our near plane
+				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
+				vec3 rayDir = vec3_add(vec3_mulf(forward, near), vec3_add(vec3_mulf(right, randX), vec3_mulf(up, randY)));
+				sceneColor = vec3_add(sceneColor, vec3_mulf(castScene(origin, rayDir), rcp((float)samplesPerPixel)));
+			}
 
-			int32_t imgIdx = ((y + imgHeight / 2) * imgWidth + (x + imgWidth / 2)) * imgStride;
+			int32_t imgIdx = ((y + halgImgHeight) * imgWidth + (x + halfImgWidth)) * imgStride;
 			hdrImage[imgIdx + 0] = sceneColor.x;
 			hdrImage[imgIdx + 1] = sceneColor.y;
 			hdrImage[imgIdx + 2] = sceneColor.z;
@@ -235,10 +262,36 @@ int main()
 		}
 	}
 
+	// Image Space Effects
+	// Wibbly wobbly
+	/*{
+		float* copy = malloc(imgWidth * imgHeight * imgStride * sizeof(float));
+		memcpy(copy, hdrImage, imgWidth * imgHeight * imgStride * sizeof(float));
+
+		for (int32_t y = 0; y < imgHeight; y++)
+		{
+			float offset = sinf(((float)y / (float)imgHeight) * 20.0f) * 0.05f + 0.05f;
+			int32_t pixelOffset = (int32_t)(offset * (float)imgWidth);
+
+			for (int32_t x = 0; x < imgWidth; x++)
+			{
+				int32_t writeIndex = (y * imgWidth + x) * imgStride;
+				int32_t readIndex = (y * imgWidth + (x + pixelOffset) % imgWidth) * imgStride;
+
+				hdrImage[writeIndex + 0] = copy[readIndex + 0];
+				hdrImage[writeIndex + 1] = copy[readIndex + 1];
+				hdrImage[writeIndex + 2] = copy[readIndex + 2];
+				hdrImage[writeIndex + 3] = copy[readIndex + 3];
+			}
+		}
+
+		free(copy);
+	}*/
+
 	// Convert HDR to 8 bit bitmap
 	{
 		uint8_t* bitmap = malloc(imgWidth * imgHeight * imgStride);
-		for (int32_t i = 0; i < imgWidth * imgHeight * imgStride; i+=4)
+		for (int32_t i = 0; i < imgWidth * imgHeight * imgStride; i+=imgStride)
 		{
 			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 2]));
 			bitmap[i + 1] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 1]));
