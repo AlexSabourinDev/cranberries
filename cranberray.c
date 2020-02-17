@@ -8,6 +8,9 @@
 #include <math.h>
 #include <float.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include "cranberry_platform.h"
 
 // Forward decls
@@ -17,6 +20,11 @@ void* memcpy(void* dst, void const* src, size_t size);
 const float PI = 3.14159265358979323846264338327f;
 
 // float math
+static float minf(float l, float r)
+{
+	return l < r ? l : r;
+}
+
 static float rcp(float f)
 {
 	return 1.0f / f;
@@ -145,7 +153,37 @@ static vec3 vec3_reflect(vec3 i, vec3 n)
 	return vec3_sub(i, vec3_mulf(n, 2.0f * vec3_dot(i, n)));
 }
 
-vec3 castScene(vec3 rayO, vec3 rayD)
+// v is expected to be normalized
+// a is between 0 and 2 PI
+// t is between 0 and PI (0 being the bottom, PI being the top)
+static void vec3_to_spherical(vec3 v, float* a, float* t)
+{
+	v = vec3_normalized(v);
+	float azimuth = atan2f(v.z, v.x);
+	*a = (azimuth < 0.0f ? 2.0f * PI + azimuth : azimuth);
+	*t = acosf(v.y);
+}
+
+static vec3 sampleHDR(vec3 v, float* image, int32_t imgWidth, int32_t imgHeight, int32_t imgStride)
+{
+	float azimuth, theta;
+	vec3_to_spherical(v, &azimuth, &theta);
+
+	int32_t readY = (int32_t)(theta * rcp(PI) * (float)imgHeight);
+	int32_t readX = (int32_t)(azimuth * rcp(2.0f * PI) * (float)imgWidth);
+	int32_t readIndex = (readY * imgWidth + readX) * imgStride;
+
+	// TODO: Don't just clamp to 1, remap our image later on. For now this is fine.
+	vec3 color;
+	color.x = minf(image[readIndex + 0], 1.0f);
+	color.y = minf(image[readIndex + 1], 1.0f);
+	color.z = minf(image[readIndex + 2], 1.0f);
+	return color;
+}
+
+int backgroundWidth, backgroundHeight, backgroundStride;
+float* background;
+static vec3 castScene(vec3 rayO, vec3 rayD)
 {
 	typedef enum
 	{
@@ -215,14 +253,16 @@ vec3 castScene(vec3 rayO, vec3 rayD)
 	}
 
 	rayD = vec3_normalized(rayD);
-	return vec3_lerp((vec3){0.5f, 0.7f, 1.0f}, (vec3){ 1.0f, 1.0f, 1.0f }, rayD.y * 0.5f + 0.5f);
+	return sampleHDR(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
 }
 
 int main()
 {
+	background = stbi_loadf("background_4k.hdr", &backgroundWidth, &backgroundHeight, &backgroundStride, 0);
+
 	uint32_t samplesPerPixel = 4;
 	int32_t imgWidth = 2048, imgHeight = 1024, imgStride = 4;
-	int32_t halfImgWidth = imgWidth / 2, halgImgHeight = imgHeight / 2;
+	int32_t halfImgWidth = imgWidth / 2, halfImgHeight = imgHeight / 2;
 
 	// TODO: How do we want to express our camera?
 	// Currently simply using the near triangle.
@@ -235,7 +275,7 @@ int main()
 
 	// Sample our scene for every pixel in the bitmap. (Could be upsampled if we wanted to)
 	float xStep = nearWidth / (float)imgWidth, yStep = nearHeight / (float)imgHeight;
-	for (int32_t y = -halgImgHeight; y < halgImgHeight; y++)
+	for (int32_t y = -halfImgHeight; y < halfImgHeight; y++)
 	{
 		float yOff = yStep * (float)y;
 		for (int32_t x = -halfImgWidth; x < halfImgWidth; x++)
@@ -254,7 +294,7 @@ int main()
 				sceneColor = vec3_add(sceneColor, vec3_mulf(castScene(origin, rayDir), rcp((float)samplesPerPixel)));
 			}
 
-			int32_t imgIdx = ((y + halgImgHeight) * imgWidth + (x + halfImgWidth)) * imgStride;
+			int32_t imgIdx = ((y + halfImgHeight) * imgWidth + (x + halfImgWidth)) * imgStride;
 			hdrImage[imgIdx + 0] = sceneColor.x;
 			hdrImage[imgIdx + 1] = sceneColor.y;
 			hdrImage[imgIdx + 2] = sceneColor.z;
@@ -304,5 +344,6 @@ int main()
 	}
 
 	free(hdrImage);
+	stbi_image_free(background);
 	return 0;
 }
