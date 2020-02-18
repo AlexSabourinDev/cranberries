@@ -4,7 +4,7 @@
 #include <windows.h>
 #include <wingdi.h>
 
-void cranpl_write_bmp(const char* fileName, uint8_t* pixels, uint32_t width, uint32_t height)
+void cranpl_write_bmp(const char* __restrict fileName, uint8_t* __restrict pixels, uint32_t width, uint32_t height)
 {
 	const uint32_t stride = 4;
 
@@ -104,4 +104,14 @@ bool cranpl_tick_window(void* windowHandle)
 void cranpl_destroy_window(void* windowHandle)
 {
 	DestroyWindow(windowHandle);
+}
+
+uint64_t cranpl_timestamp_micro( void )
+{
+	LARGE_INTEGER frequency;
+	QueryPerformanceFrequency(&frequency);
+	LARGE_INTEGER time;
+	QueryPerformanceCounter(&time);
+	uint64_t microSeconds = (uint64_t)time.QuadPart * 1000000;
+	return microSeconds / (uint64_t)frequency.QuadPart;
 }
