@@ -406,7 +406,7 @@ static vec3 cast_scene(ray_scene_t* scene, vec3 rayO, vec3 rayD, uint32_t depth)
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	vec3 skybox = vec3_min(sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride), (vec3) {10.0f, 10.0f, 10.0f});
+	vec3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
 	renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	return skybox;
@@ -491,9 +491,9 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = UINT32_MAX,
-		.samplesPerPixel = 4,
-		.renderWidth = 2048,
-		.renderHeight = 1024
+		.samplesPerPixel = 1000,
+		.renderWidth = 1024,
+		.renderHeight = 768
 	};
 
 	uint64_t startTime = cranpl_timestamp_micro();
@@ -504,7 +504,6 @@ int main()
 	ray_scene_t scene;
 	generate_scene(&scene);
 
-	uint32_t samplesPerPixel = 4;
 	int32_t imgWidth = renderConfig.renderWidth, imgHeight = renderConfig.renderHeight, imgStride = 4;
 	int32_t halfImgWidth = imgWidth / 2, halfImgHeight = imgHeight / 2;
 
@@ -519,10 +518,24 @@ int main()
 
 	uint64_t renderStartTime = cranpl_timestamp_micro();
 
+	uint64_t totalIterationTime = 0;
 	// Sample our scene for every pixel in the bitmap. (Could be upsampled if we wanted to)
 	float xStep = nearWidth / (float)imgWidth, yStep = nearHeight / (float)imgHeight;
 	for (int32_t y = -halfImgHeight; y < halfImgHeight; y++)
 	{
+		// Progress data
+		uint64_t iterationStartTime = cranpl_timestamp_micro();
+		{
+			system("cls");
+			printf("Completed: %.2f%%\n", ((float)(y + halfImgHeight) / (float)imgHeight) * 100.0f);
+			if (totalIterationTime != 0)
+			{
+				// Use doubles, our value can be quite large until we divide.
+				float timeStep = micro_to_seconds(totalIterationTime) / (float)(y + halfImgHeight);
+				printf("Remaining Time: %.2f\n\n", timeStep * (imgHeight - (y + halfImgHeight)));
+			}
+		}
+
 		float yOff = yStep * (float)y;
 		for (int32_t x = -halfImgWidth; x < halfImgWidth; x++)
 		{
@@ -539,7 +552,7 @@ int main()
 				// Construct our ray as a vector going from our origin to our near plane
 				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
 				vec3 rayDir = vec3_add(vec3_mulf(forward, near), vec3_add(vec3_mulf(right, randX), vec3_mulf(up, randY)));
-				sceneColor = vec3_add(sceneColor, vec3_mulf(cast_scene(&scene, origin, rayDir, 0), rcp((float)samplesPerPixel)));
+				sceneColor = vec3_add(sceneColor, vec3_mulf(cast_scene(&scene, origin, rayDir, 0), rcp((float)renderConfig.samplesPerPixel)));
 			}
 
 			int32_t imgIdx = ((y + halfImgHeight) * imgWidth + (x + halfImgWidth)) * imgStride;
@@ -547,6 +560,11 @@ int main()
 			hdrImage[imgIdx + 1] = sceneColor.y;
 			hdrImage[imgIdx + 2] = sceneColor.z;
 			hdrImage[imgIdx + 3] = 1.0f;
+		}
+
+		// Progress data
+		{
+			totalIterationTime += cranpl_timestamp_micro() - iterationStartTime;
 		}
 	}
 
