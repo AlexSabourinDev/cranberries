@@ -9,10 +9,9 @@
 #include <float.h>
 #include <inttypes.h>
 #include <assert.h>
+#include <immintrin.h>
 
-#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-
 #include "cranberry_platform.h"
 
 struct
@@ -491,7 +490,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = UINT32_MAX,
-		.samplesPerPixel = 1000,
+		.samplesPerPixel = 10,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -611,6 +610,7 @@ int main()
 
 	// Print stats
 	{
+		system("cls");
 		printf("Total Time: %f\n", micro_to_seconds(renderStats.totalTime));
 		printf("\tScene Generation Time: %f [%f%%]\n", micro_to_seconds(renderStats.sceneGenerationTime), (float)renderStats.sceneGenerationTime / (float)renderStats.totalTime);
 		printf("\tRender Time: %f [%f%%]\n", micro_to_seconds(renderStats.renderTime), (float)renderStats.renderTime / (float)renderStats.totalTime);
