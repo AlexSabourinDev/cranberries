@@ -4,7 +4,7 @@
 #include <windows.h>
 #include <wingdi.h>
 
-void cranpl_write_bmp(const char* __restrict fileName, uint8_t* __restrict pixels, uint32_t width, uint32_t height)
+void cranpl_write_bmp(const char* restrict fileName, uint8_t* restrict pixels, uint32_t width, uint32_t height)
 {
 	const uint32_t stride = 4;
 

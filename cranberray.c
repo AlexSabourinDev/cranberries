@@ -77,7 +77,7 @@ static float rsqrt(float f)
 	return conv.f[0];
 }
 
-static bool quadratic(float a, float b, float c, float* __restrict out1, float* __restrict out2)
+static bool quadratic(float a, float b, float c, float* restrict out1, float* restrict out2)
 {
 	assert(out1 != out2);
 
@@ -224,7 +224,7 @@ static vec3 vec3_reflect(vec3 i, vec3 n)
 
 // a is between 0 and 2 PI
 // t is between 0 and PI (0 being the bottom, PI being the top)
-static void vec3_to_spherical(vec3 v, float* __restrict a, float* __restrict t)
+static void vec3_to_spherical(vec3 v, float* restrict a, float* restrict t)
 {
 	assert(a != t);
 
@@ -303,8 +303,8 @@ typedef struct
 // TODO: Refine our scene description
 typedef struct
 {
-	void* __restrict materials[material_count];
-	void* __restrict renderables[renderable_count];
+	void* restrict materials[material_count];
+	void* restrict renderables[renderable_count];
 
 	struct
 	{
@@ -312,11 +312,11 @@ typedef struct
 		uint32_t count;
 	} instances;
 
-	void* __restrict bvh; // TODO: BVH!
+	void* restrict bvh; // TODO: BVH!
 } ray_scene_t;
 
 int backgroundWidth, backgroundHeight, backgroundStride;
-float* __restrict background;
+float* restrict background;
 static vec3 cast_scene(ray_scene_t* scene, vec3 rayO, vec3 rayD, uint32_t depth)
 {
 	if (depth >= renderConfig.maxDepth)
@@ -513,7 +513,7 @@ int main()
 	vec3 origin = { 0.0f, 0.0f, 0.0f };
 	vec3 forward = { .x = 0.0f,.y = 0.0f,.z = 1.0f }, right = { .x = 1.0f,.y = 0.0f,.z = 0.0f }, up = { .x = 0.0f, .y = 1.0f, .z = 0.0f };
 
-	float* __restrict hdrImage = malloc(imgWidth * imgHeight * imgStride * sizeof(float));
+	float* restrict hdrImage = malloc(imgWidth * imgHeight * imgStride * sizeof(float));
 
 	uint64_t renderStartTime = cranpl_timestamp_micro();
 
@@ -589,7 +589,7 @@ int main()
 
 	// Convert HDR to 8 bit bitmap
 	{
-		uint8_t* __restrict bitmap = malloc(imgWidth * imgHeight * imgStride);
+		uint8_t* restrict bitmap = malloc(imgWidth * imgHeight * imgStride);
 		for (int32_t i = 0; i < imgWidth * imgHeight * imgStride; i+=imgStride)
 		{
 			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 2]));
