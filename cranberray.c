@@ -22,6 +22,7 @@ struct
 	uint64_t sceneGenerationTime;
 	uint64_t renderTime;
 	uint64_t intersectionTime;
+	uint64_t bvhTraversalTime;
 	uint64_t skyboxTime;
 	uint64_t imageSpaceTime;
 } renderStats;
@@ -122,9 +123,19 @@ static vec3 vec3_add(vec3 l, vec3 r)
 	return (vec3) {.x = l.x + r.x, .y = l.y + r.y, .z = l.z + r.z};
 }
 
+static vec3 vec3_addf(vec3 l, float r)
+{
+	return (vec3) {.x = l.x + r, .y = l.y + r, .z = l.z + r};
+}
+
 static vec3 vec3_sub(vec3 l, vec3 r)
 {
 	return (vec3) {.x = l.x - r.x, .y = l.y - r.y, .z = l.z - r.z};
+}
+
+static vec3 vec3_subf(vec3 l, float r)
+{
+	return (vec3) {.x = l.x - r, .y = l.y - r, .z = l.z - r};
 }
 
 static vec3 vec3_mul(vec3 l, vec3 r)
@@ -157,7 +168,18 @@ static vec3 vec3_min(vec3 v, vec3 m)
 	return (vec3){fminf(v.x, m.x), fminf(v.y, m.y), fminf(v.z, m.z)};
 }
 
-static bool doesSphereRayIntersect(vec3 rayO, vec3 rayD, vec3 sphereO, float sphereR)
+static vec3 vec3_max(vec3 v, vec3 m)
+{
+	return (vec3){fmaxf(v.x, m.x), fmaxf(v.y, m.y), fmaxf(v.z, m.z)};
+}
+
+static vec3 vec3_rcp(vec3 v)
+{
+	// TODO: consider SSE
+	return (vec3) { rcp(v.x), rcp(v.y), rcp(v.z) };
+}
+
+static bool sphere_does_ray_intersect(vec3 rayO, vec3 rayD, vec3 sphereO, float sphereR)
 {
 	vec3 sphereRaySpace = vec3_sub(sphereO, rayO);
 	float projectedDistance = vec3_dot(sphereRaySpace, rayD);
@@ -165,7 +187,7 @@ static bool doesSphereRayIntersect(vec3 rayO, vec3 rayD, vec3 sphereO, float sph
 	return (distanceToRaySqr < sphereR * sphereR);
 }
 
-static float sphereRayIntersection(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 sphereO, float sphereR)
+static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 sphereO, float sphereR)
 {
 	// Calculate our intersection distance
 	// With the sphere equation: dot(P-O,P-O) = r^2
@@ -206,7 +228,7 @@ static float sphereRayIntersection(vec3 rayO, vec3 rayD, float rayMin, float ray
 	return rayMax;
 }
 
-static vec3 randomInUnitSphere()
+static vec3 sphere_random()
 {
 	vec3 p;
 	do
@@ -249,6 +271,27 @@ static vec3 sample_hdr(vec3 v, float* image, int32_t imgWidth, int32_t imgHeight
 	color.y = image[readIndex + 1];
 	color.z = image[readIndex + 2];
 	return color;
+}
+
+typedef struct
+{
+	vec3 min;
+	vec3 max;
+} aabb;
+
+// Source: https://medium.com/@bromanz/another-view-on-the-classic-ray-aabb-intersection-algorithm-for-bvh-traversal-41125138b525
+bool aabb_does_ray_intersect(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 aabbMin, vec3 aabbMax)
+{
+	vec3 invD = vec3_rcp(rayD);
+	vec3 t0s = vec3_mul(vec3_sub(aabbMin, rayO), invD);
+	vec3 t1s = vec3_mul(vec3_sub(aabbMax, rayO), invD);
+
+	vec3 tsmaller = vec3_min(t0s, t1s);
+	vec3 tbigger  = vec3_max(t0s, t1s);
+ 
+	float tmin = fmaxf(rayMin, fmaxf(tsmaller.x, fmaxf(tsmaller.y, tsmaller.z)));
+	float tmax = fminf(rayMax, fminf(tbigger.x, fminf(tbigger.y, tbigger.z)));
+	return (tmin < tmax);
 }
 
 typedef enum
@@ -303,6 +346,28 @@ typedef struct
 // TODO: Refine our scene description
 typedef struct
 {
+	aabb bound;
+
+	union
+	{
+		struct
+		{
+			uint32_t left;
+			uint32_t right;
+		} jumps;
+
+		uint32_t instance;
+	} indices;
+	bool isLeaf;
+} bvh_node_t;
+
+typedef struct
+{
+	bvh_node_t* nodes;
+} bvh_t;
+
+typedef struct
+{
 	void* restrict materials[material_count];
 	void* restrict renderables[renderable_count];
 
@@ -312,106 +377,183 @@ typedef struct
 		uint32_t count;
 	} instances;
 
-	void* restrict bvh; // TODO: BVH!
+	bvh_t bvh; // TODO: BVH!
 } ray_scene_t;
 
-int backgroundWidth, backgroundHeight, backgroundStride;
-float* restrict background;
-static vec3 cast_scene(ray_scene_t* scene, vec3 rayO, vec3 rayD, uint32_t depth)
+typedef struct
 {
-	if (depth >= renderConfig.maxDepth)
+	aabb bound;
+	uint32_t instanceIndex;
+} instance_aabb_pair_t;
+
+static int instance_aabb_sort_min_x(const void* l, const void* r)
+{
+	const instance_aabb_pair_t* left = (const instance_aabb_pair_t*)l;
+	const instance_aabb_pair_t* right = (const instance_aabb_pair_t*)r;
+
+	// If left is greater than right, result is > 0 - left goes after right
+	// If right is greater than left, result is < 0 - right goes after left
+	// If equal, well they're equivalent
+	return (int)(left->bound.min.x - right->bound.min.x);
+}
+
+static int instance_aabb_sort_min_y(const void* l, const void* r)
+{
+	const instance_aabb_pair_t* left = (const instance_aabb_pair_t*)l;
+	const instance_aabb_pair_t* right = (const instance_aabb_pair_t*)r;
+
+	// If left is greater than right, result is > 0 - left goes after right
+	// If right is greater than left, result is < 0 - right goes after left
+	// If equal, well they're equivalent
+	return (int)(left->bound.min.y - right->bound.min.y);
+}
+
+static int instance_aabb_sort_min_z(const void* l, const void* r)
+{
+	const instance_aabb_pair_t* left = (const instance_aabb_pair_t*)l;
+	const instance_aabb_pair_t* right = (const instance_aabb_pair_t*)r;
+
+	// If left is greater than right, result is > 0 - left goes after right
+	// If right is greater than left, result is < 0 - right goes after left
+	// If equal, well they're equivalent
+	return (int)(left->bound.min.z - right->bound.min.z);
+}
+
+static void build_bvh(ray_scene_t* scene)
+{
+	uint32_t leafCount = scene->instances.count;
+	instance_aabb_pair_t* leafs = malloc(sizeof(instance_aabb_pair_t) * leafCount);
+	for (uint32_t i = 0; i < leafCount; i++)
 	{
-		return (vec3) { 0 };
+		vec3 pos = scene->instances.data[i].pos;
+		renderable_index_t renderableIndex = scene->instances.data[i].renderableIndex;
+
+		leafs[i].instanceIndex = i;
+		switch (renderableIndex.typeIndex)
+		{
+		case renderable_sphere:
+		{
+			float rad = ((sphere_t*)scene->renderables[renderableIndex.dataIndex])->rad;
+			leafs[i].bound.min = vec3_subf(pos, rad);
+			leafs[i].bound.max = vec3_addf(pos, rad);
+		}
+		break;
+		default:
+			assert(false);
+			break;
+		}
 	}
 
-	renderStats.rayCount++;
+	int(*sortFuncs[3])(const void* l, const void* r) = { instance_aabb_sort_min_x, instance_aabb_sort_min_y, instance_aabb_sort_min_z };
 
-	const float NoRayIntersection = FLT_MAX;
-
-	// TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
-	// Do we want to handle this some other way?
-	const float ReCastBias = 0.0001f;
-
-	uint32_t closestInstanceIndex = 0;
-	float closestDistance = NoRayIntersection;
-
-	// TODO: Traverse our BVH instead
-	// TODO: Gather list of candidate BVHs
-	// TODO: Sort list of instances by type
-	// TODO: find closest intersection in candidates
-	// TODO: ?!?!?
-	uint64_t intersectionStartTime = cranpl_timestamp_micro();
-	for (uint32_t i = 0; i < scene->instances.count; i++)
+	struct
 	{
-		// TODO: Add support for other shapes
-		vec3 instancePos = scene->instances.data[i].pos;
-		renderable_index_t renderableIndex = scene->instances.data[i].renderableIndex;
-		assert(renderableIndex.typeIndex == renderable_sphere);
-		sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
+		instance_aabb_pair_t* start;
+		uint32_t count;
+		uint32_t* parentIndex;
+	} bvhWorkgroup[100];
+	uint32_t workgroupQueueEnd = 1;
 
-		if (doesSphereRayIntersect(rayO, rayD, instancePos, sphere.rad))
+	bvhWorkgroup[0].start = leafs;
+	bvhWorkgroup[0].count = leafCount;
+	bvhWorkgroup[0].parentIndex = NULL;
+
+	uint32_t bvhWriteIter = 0;
+	static bvh_node_t builtBVH[1000]; // Alot-ish, just for now
+	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % 100) // TODO: constant for workgroup size
+	{
+		instance_aabb_pair_t* start = bvhWorkgroup[workgroupIter].start;
+		uint32_t count = bvhWorkgroup[workgroupIter].count;
+
+		if (bvhWorkgroup[workgroupIter].parentIndex != NULL)
 		{
-			float intersectionDistance = sphereRayIntersection(rayO, rayD, ReCastBias, NoRayIntersection, instancePos, sphere.rad);
-			// TODO: Do we want to handle tie breakers somehow?
-			if (intersectionDistance < closestDistance)
+			*(bvhWorkgroup[workgroupIter].parentIndex) = bvhWriteIter;
+		}
+
+		aabb bounds = start[0].bound;
+		for (uint32_t i = 1; i < count; i++)
+		{
+			bounds.min = vec3_min(start[i].bound.min, bounds.min);
+			bounds.max = vec3_max(start[i].bound.max, bounds.max);
+		}
+
+		bool isLeaf = (count == 1);
+		builtBVH[bvhWriteIter] = (bvh_node_t)
+		{
+			.bound = bounds,
+			.indices.instance = start[0].instanceIndex,
+			.isLeaf = isLeaf,
+		};
+
+		if (!isLeaf)
+		{
+			// TODO: Since we're doing all the iteration work in the sort, maybe we could also do the partitioning in the sort?
+			uint32_t axis = rand() % 3;
+			qsort(start, count, sizeof(instance_aabb_pair_t), sortFuncs[axis]);
+
+			bvhWorkgroup[workgroupQueueEnd].start = start;
+			bvhWorkgroup[workgroupQueueEnd].count = count / 2;
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.left;
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % 100; // TODO: Constant for workgroup size
+			assert(workgroupQueueEnd != workgroupIter);
+
+			bvhWorkgroup[workgroupQueueEnd].start = start + count / 2;
+			bvhWorkgroup[workgroupQueueEnd].count = count - count / 2;
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.right;
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % 100; // TODO: Constant for workgroup size
+			assert(workgroupQueueEnd != workgroupIter);
+		}
+
+		bvhWriteIter++;
+	}
+
+	free(leafs);
+
+	scene->bvh = (bvh_t)
+	{
+		.nodes = builtBVH
+	};
+}
+
+static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, float rayMax, uint32_t* instanceCandidates, uint32_t maxInstances)
+{
+	uint64_t traversalStartTime = cranpl_timestamp_micro();
+
+	uint32_t instanceIter = 0;
+
+	uint32_t testQueue[1000]; // TODO: Currently we just allow 1000 stack pushes. Fix this!
+	uint32_t testQueueSize = 1;
+
+	testQueue[0] = 0;
+	for (uint32_t testQueueIter = 0; (testQueueIter - testQueueSize) > 0; testQueueIter++)
+	{
+		uint32_t nodeIndex = testQueue[testQueueIter];
+
+		if (aabb_does_ray_intersect(rayO, rayD, rayMin, rayMax, bvh->nodes[nodeIndex].bound.min, bvh->nodes[nodeIndex].bound.max))
+		{
+			// All our leaves are packed at the end of the 
+			bool isLeaf = bvh->nodes[nodeIndex].isLeaf;
+			if (isLeaf)
 			{
-				closestInstanceIndex = i;
-				closestDistance = intersectionDistance;
+				instanceCandidates[instanceIter] = bvh->nodes[nodeIndex].indices.instance;
+				instanceIter++;
+				assert(instanceIter <= maxInstances);
+			}
+			else
+			{
+				testQueue[testQueueSize] = bvh->nodes[nodeIndex].indices.jumps.left;
+				testQueueSize++;
+				testQueue[testQueueSize] = bvh->nodes[nodeIndex].indices.jumps.right;
+				testQueueSize++;
 			}
 		}
 	}
-	renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
 
-	if (closestDistance != NoRayIntersection)
-	{
-		vec3 instancePos = scene->instances.data[closestInstanceIndex].pos;
-		material_index_t materialIndex = scene->instances.data[closestInstanceIndex].materialIndex;
-		renderable_index_t renderableIndex = scene->instances.data[closestInstanceIndex].renderableIndex;
-		// TODO: Still only handling spheres
-		sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
-
-		vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, closestDistance));
-		vec3 surfacePoint = vec3_sub(intersectionPoint, instancePos);
-		vec3 normal = vec3_mulf(surfacePoint, rcp(sphere.rad));
-
-		// TODO: real materials please
-		switch (materialIndex.typeIndex)
-		{
-		case material_lambert:
-		{
-			material_lambert_t lambertData = ((material_lambert_t*)scene->materials[material_lambert])[materialIndex.dataIndex];
-
-			vec3 spherePoint = vec3_add(intersectionPoint, normal);
-			spherePoint = vec3_add(normal, randomInUnitSphere());
-			vec3 sceneCast = cast_scene(scene, intersectionPoint, spherePoint, depth+1);
-
-			sceneCast = vec3_mulf(sceneCast, vec3_dot(spherePoint, normal));
-			return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
-		}
-		case material_metal:
-		{
-			vec3 castDir = vec3_reflect(rayD, normal);
-			vec3 sceneCast = cast_scene(scene, intersectionPoint, castDir, depth+1);
-
-			return sceneCast;
-		}
-		default:
-			assert(false); // missing type!
-			break;
-		}
-
-		// TODO: lighting be like
-		return (vec3) { 0 };
-	}
-
-	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	vec3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
-	renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
-
-	return skybox;
+	renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
+	return instanceIter;
 }
 
-void generate_scene(ray_scene_t* scene)
+static void generate_scene(ray_scene_t* scene)
 {
 	uint64_t startTime = cranpl_timestamp_micro();
 
@@ -482,7 +624,109 @@ void generate_scene(ray_scene_t* scene)
 		}
 	};
 
+	build_bvh(scene);
 	renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
+}
+
+int backgroundWidth, backgroundHeight, backgroundStride;
+float* restrict background;
+static vec3 cast_scene(ray_scene_t* scene, vec3 rayO, vec3 rayD, uint32_t depth)
+{
+	if (depth >= renderConfig.maxDepth)
+	{
+		return (vec3) { 0 };
+	}
+
+	renderStats.rayCount++;
+
+	const float NoRayIntersection = FLT_MAX;
+
+	// TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
+	// Do we want to handle this some other way?
+	const float ReCastBias = 0.0001f;
+
+	uint32_t closestInstanceIndex = 0;
+	float closestDistance = NoRayIntersection;
+
+	// TODO: Traverse our BVH instead
+	// TODO: Gather list of candidate BVHs
+	// TODO: Sort list of instances by type
+	// TODO: find closest intersection in candidates
+	// TODO: ?!?!?
+	uint64_t intersectionStartTime = cranpl_timestamp_micro();
+
+	uint32_t candidates[100]; // TODO: Max candidates of 100?
+	uint32_t candidateCount = traverse_bvh(&scene->bvh, rayO, rayD, ReCastBias, NoRayIntersection, candidates, 100);
+	for (uint32_t i = 0; i < candidateCount; i++)
+	{
+		// TODO: Add support for other shapes
+		uint32_t candidateIndex = candidates[i];
+
+		vec3 instancePos = scene->instances.data[candidateIndex].pos;
+		renderable_index_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
+		assert(renderableIndex.typeIndex == renderable_sphere);
+		sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
+
+		if (sphere_does_ray_intersect(rayO, rayD, instancePos, sphere.rad))
+		{
+			float intersectionDistance = sphere_ray_intersection(rayO, rayD, ReCastBias, NoRayIntersection, instancePos, sphere.rad);
+			// TODO: Do we want to handle tie breakers somehow?
+			if (intersectionDistance < closestDistance)
+			{
+				closestInstanceIndex = candidateIndex;
+				closestDistance = intersectionDistance;
+			}
+		}
+	}
+	renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
+
+	if (closestDistance != NoRayIntersection)
+	{
+		vec3 instancePos = scene->instances.data[closestInstanceIndex].pos;
+		material_index_t materialIndex = scene->instances.data[closestInstanceIndex].materialIndex;
+		renderable_index_t renderableIndex = scene->instances.data[closestInstanceIndex].renderableIndex;
+		// TODO: Still only handling spheres
+		sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
+
+		vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, closestDistance));
+		vec3 surfacePoint = vec3_sub(intersectionPoint, instancePos);
+		vec3 normal = vec3_mulf(surfacePoint, rcp(sphere.rad));
+
+		// TODO: real materials please
+		switch (materialIndex.typeIndex)
+		{
+		case material_lambert:
+		{
+			material_lambert_t lambertData = ((material_lambert_t*)scene->materials[material_lambert])[materialIndex.dataIndex];
+
+			vec3 spherePoint = vec3_add(intersectionPoint, normal);
+			spherePoint = vec3_add(normal, sphere_random());
+			vec3 sceneCast = cast_scene(scene, intersectionPoint, spherePoint, depth+1);
+
+			sceneCast = vec3_mulf(sceneCast, vec3_dot(spherePoint, normal));
+			return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
+		}
+		case material_metal:
+		{
+			vec3 castDir = vec3_reflect(rayD, normal);
+			vec3 sceneCast = cast_scene(scene, intersectionPoint, castDir, depth+1);
+
+			return sceneCast;
+		}
+		default:
+			assert(false); // missing type!
+			break;
+		}
+
+		// TODO: lighting be like
+		return (vec3) { 0 };
+	}
+
+	uint64_t skyboxStartTime = cranpl_timestamp_micro();
+	vec3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
+	renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
+
+	return skybox;
 }
 
 int main()
@@ -490,9 +734,9 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = UINT32_MAX,
-		.samplesPerPixel = 10,
-		.renderWidth = 1024,
-		.renderHeight = 768
+		.samplesPerPixel = 4,
+		.renderWidth = 400,
+		.renderHeight = 200
 	};
 
 	uint64_t startTime = cranpl_timestamp_micro();
@@ -615,13 +859,15 @@ int main()
 		printf("\tScene Generation Time: %f [%f%%]\n", micro_to_seconds(renderStats.sceneGenerationTime), (float)renderStats.sceneGenerationTime / (float)renderStats.totalTime);
 		printf("\tRender Time: %f [%f%%]\n", micro_to_seconds(renderStats.renderTime), (float)renderStats.renderTime / (float)renderStats.totalTime);
 		printf("\t\tIntersection Time: %f [%f%%]\n", micro_to_seconds(renderStats.intersectionTime), (float)renderStats.intersectionTime / (float)renderStats.renderTime);
+		printf("\t\t\tBVH Traversal Time: %f [%f%%]\n", micro_to_seconds(renderStats.bvhTraversalTime), (float)renderStats.bvhTraversalTime / (float)renderStats.intersectionTime);
 		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(renderStats.skyboxTime), (float)renderStats.skyboxTime / (float)renderStats.renderTime);
 		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(renderStats.imageSpaceTime), (float)renderStats.imageSpaceTime / (float)renderStats.totalTime);
 		printf("\n");
+		printf("MRays/seconds: %f\n", (float)renderStats.rayCount / micro_to_seconds(renderStats.renderTime) / 1000000.0f);
 		printf("Rays Fired: %" PRIu64 "\n", renderStats.rayCount);
 		printf("\tCamera Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.primaryRayCount, (float)renderStats.primaryRayCount / (float)renderStats.rayCount);
 		printf("\tBounce Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.rayCount - renderStats.primaryRayCount, (float)(renderStats.rayCount - renderStats.primaryRayCount) / (float)renderStats.rayCount);
-	
+
 		system("pause");
 	}
 	return 0;
