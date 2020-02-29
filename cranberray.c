@@ -2,6 +2,8 @@
 // https://patapom.com/blog/BRDF/BRDF%20Models/
 // https://www.realtimerendering.com/raytracing/Ray%20Tracing%20in%20a%20Weekend.pdf
 
+// Standard: Z is up
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -35,6 +37,11 @@ typedef struct
 	uint32_t renderHeight;
 } render_config_t;
 render_config_t renderConfig;
+
+typedef struct
+{
+	uint32_t randomSeed;
+} render_context_t;
 
 static float micro_to_seconds(uint64_t time)
 {
@@ -97,9 +104,19 @@ static bool quadratic(float a, float b, float c, float* restrict out1, float* re
 	return true;
 }
 
-static float rand01f()
+float rand01f( uint32_t *seed )
 {
-	return (float)rand() / (float)RAND_MAX;
+	// http://www.iquilezles.org/www/articles/sfrand/sfrand.htm
+	assert(seed[0] != 0);
+	union
+	{
+		float f;
+		uint32_t i;
+	} res;
+
+	seed[0] *= 16807;
+	res.i = ((((unsigned int)seed[0])>>9 ) | 0x3f800000);
+	return res.f - 1.0f;
 }
 
 static float rgb_to_luminance(float r, float g, float b)
@@ -148,9 +165,24 @@ static float vec3_dot(vec3 l, vec3 r)
 	return l.x * r.x + l.y * r.y + l.z * r.z;
 }
 
+static vec3 vec3_cross(vec3 l, vec3 r)
+{
+	return (vec3)
+	{
+		.x = l.y*l.z - l.z*r.y,
+		.y = l.z*r.x - l.x*r.z,
+		.z = l.x*r.y - l.y*r.x
+	};
+}
+
 static vec3 vec3_lerp(vec3 l, vec3 r, float t)
 {
 	return vec3_add(vec3_mulf(l, 1.0f - t), vec3_mulf(r, t));
+}
+
+static float vec3_length(vec3 v)
+{
+	return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
 static float vec3_rlength(vec3 v)
@@ -177,6 +209,55 @@ static vec3 vec3_rcp(vec3 v)
 {
 	// TODO: consider SSE
 	return (vec3) { rcp(v.x), rcp(v.y), rcp(v.z) };
+}
+
+typedef struct
+{
+	vec3 i, j, k;
+} mat3;
+
+static mat3 mat3_from_basis(vec3 i, vec3 j, vec3 k)
+{
+	assert(vec3_length(i) < 1.01f && vec3_length(i) > 0.99f);
+	assert(vec3_length(j) < 1.01f && vec3_length(j) > 0.99f);
+	assert(vec3_length(k) < 1.01f && vec3_length(k) > 0.99f);
+	return (mat3)
+	{
+		.i = i,
+		.j = j,
+		.k = k
+	};
+}
+
+static mat3 mat3_basis_from_normal(vec3 n)
+{
+	// Frisvad ONB from https://backend.orbit.dtu.dk/ws/portalfiles/portal/126824972/onb_frisvad_jgt2012_v2.pdf
+	// revised from Pixar https://graphics.pixar.com/library/OrthonormalB/paper.pdf#page=2&zoom=auto,-233,561
+	float sign = copysignf(1.0f, n.z);
+	float a = -rcp(sign + n.z);
+	float b = -n.x*n.y*a;
+	vec3 i = (vec3) { 1.0f + sign * n.x*n.x*a, sign * b, -sign * n.x };
+	vec3 j = (vec3) { b, sign + n.y*n.y*a, -n.y };
+
+	return mat3_from_basis(i, j, n);
+}
+
+static vec3 mat3_mul_vec3(mat3 m, vec3 v)
+{
+	vec3 vx = (vec3) { v.x, v.x, v.x };
+	vec3 vy = (vec3) { v.y, v.y, v.y };
+	vec3 vz = (vec3) { v.z, v.z, v.z };
+
+	vec3 rx = vec3_mul(vx, m.i);
+	vec3 ry = vec3_mul(vy, m.j);
+	vec3 rz = vec3_mul(vz, m.k);
+
+	return vec3_add(vec3_add(rx, ry), rz);
+}
+
+static vec3 mat3_rotate_vec3(mat3 m, vec3 v)
+{
+	return mat3_mul_vec3(m, v);
 }
 
 static bool sphere_does_ray_intersect(vec3 rayO, vec3 rayD, vec3 sphereO, float sphereR)
@@ -228,12 +309,12 @@ static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float r
 	return rayMax;
 }
 
-static vec3 sphere_random()
+static vec3 sphere_random(uint32_t* seed)
 {
 	vec3 p;
 	do
 	{
-		p = vec3_mulf((vec3) { rand01f()-0.5f, rand01f()-0.5f, rand01f()-0.5f }, 2.0f);
+		p = vec3_mulf((vec3) { rand01f(seed)-0.5f, rand01f(seed)-0.5f, rand01f(seed)-0.5f }, 2.0f);
 	} while (vec3_dot(p, p) <= 1.0f);
 
 	return p;
@@ -251,9 +332,16 @@ static void vec3_to_spherical(vec3 v, float* restrict a, float* restrict t)
 	assert(a != t);
 
 	float rlenght = vec3_rlength(v);
-	float azimuth = atan2f(v.z, v.x);
+	float azimuth = atan2f(v.y, v.x);
 	*a = (azimuth < 0.0f ? TAO + azimuth : azimuth);
-	*t = acosf(v.y * rlenght);
+	*t = acosf(v.z * rlenght);
+}
+
+// theta is between 0 and 2PI (horizontal plane)
+// phi is between 0 and PI (vertical plane)
+static vec3 vec3_from_spherical(float theta, float phi, float radius)
+{
+	return (vec3) { cosf(theta) * sinf(phi) * radius, sinf(theta) * sinf(phi) * radius, radius * cosf(phi) };
 }
 
 static vec3 sample_hdr(vec3 v, float* image, int32_t imgWidth, int32_t imgHeight, int32_t imgStride)
@@ -279,10 +367,44 @@ typedef struct
 	vec3 max;
 } aabb;
 
-// Source: https://medium.com/@bromanz/another-view-on-the-classic-ray-aabb-intersection-algorithm-for-bvh-traversal-41125138b525
-bool aabb_does_ray_intersect(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 aabbMin, vec3 aabbMax)
+static bool aabb_does_ray_intersect_sse(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 aabbMin, vec3 aabbMax)
 {
-	vec3 invD = vec3_rcp(rayD);
+	// Wasting 25% of vector space, do we want to do lanes? This is currently just easier.
+	__m128 vrayO = _mm_loadu_ps(&rayO.x);
+	__m128 vrayD = _mm_loadu_ps(&rayD.x);
+	__m128 vmin = _mm_loadu_ps(&aabbMin.x);
+	__m128 vmax = _mm_loadu_ps(&aabbMax.x);
+	__m128 vrayMax = _mm_set_ps1(rayMax);
+	__m128 vrayMin = _mm_set_ps1(rayMin);
+
+	__m128 invD = _mm_rcp_ps(vrayD);
+	__m128 t0s = _mm_mul_ps(_mm_sub_ps(vmin, vrayO), invD);
+	__m128 t1s = _mm_mul_ps(_mm_sub_ps(vmax, vrayO), invD);
+
+	__m128 tsmaller = _mm_min_ps(t0s, t1s);
+	// Our fourth element is bad, we need to overwrite it
+	tsmaller = _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(2, 2, 1, 0));
+
+	__m128 tbigger = _mm_max_ps(t0s, t1s);
+	tbigger = _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(2, 2, 1, 1));
+
+	tsmaller = _mm_max_ps(tsmaller, _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(2, 1, 0, 3)));
+	tsmaller = _mm_max_ps(tsmaller, _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(1, 0, 3, 2)));
+	vrayMin = _mm_max_ps(vrayMin, tsmaller);
+
+	tbigger = _mm_min_ps(tbigger, _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(2, 1, 0, 3)));
+	tbigger = _mm_min_ps(tbigger, _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(1, 0, 3, 2)));
+	vrayMax = _mm_min_ps(vrayMax, tbigger);
+
+	return _mm_movemask_ps(_mm_cmplt_ps(vrayMin, vrayMax));
+}
+
+// Source: https://medium.com/@bromanz/another-view-on-the-classic-ray-aabb-intersection-algorithm-for-bvh-traversal-41125138b525
+static bool aabb_does_ray_intersect(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 aabbMin, vec3 aabbMax)
+{
+	return aabb_does_ray_intersect_sse(rayO, rayD, rayMin, rayMax, aabbMin, aabbMax);
+
+	/*vec3 invD = vec3_rcp(rayD);
 	vec3 t0s = vec3_mul(vec3_sub(aabbMin, rayO), invD);
 	vec3 t1s = vec3_mul(vec3_sub(aabbMax, rayO), invD);
 
@@ -291,7 +413,7 @@ bool aabb_does_ray_intersect(vec3 rayO, vec3 rayD, float rayMin, float rayMax, v
  
 	float tmin = fmaxf(rayMin, fmaxf(tsmaller.x, fmaxf(tsmaller.y, tsmaller.z)));
 	float tmax = fminf(rayMax, fminf(tbigger.x, fminf(tbigger.y, tbigger.z)));
-	return (tmin < tmax);
+	return (tmin < tmax);*/
 }
 
 typedef enum
@@ -419,7 +541,7 @@ static int instance_aabb_sort_min_z(const void* l, const void* r)
 	return (int)(left->bound.min.z - right->bound.min.z);
 }
 
-static void build_bvh(ray_scene_t* scene)
+static void build_bvh(render_context_t* context, ray_scene_t* scene)
 {
 	uint32_t leafCount = scene->instances.count;
 	instance_aabb_pair_t* leafs = malloc(sizeof(instance_aabb_pair_t) * leafCount);
@@ -488,7 +610,7 @@ static void build_bvh(ray_scene_t* scene)
 		if (!isLeaf)
 		{
 			// TODO: Since we're doing all the iteration work in the sort, maybe we could also do the partitioning in the sort?
-			uint32_t axis = rand() % 3;
+			uint32_t axis = (uint32_t)(rand01f(&context->randomSeed)*3.0f);
 			qsort(start, count, sizeof(instance_aabb_pair_t), sortFuncs[axis]);
 
 			bvhWorkgroup[workgroupQueueEnd].start = start;
@@ -553,60 +675,25 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 	return instanceIter;
 }
 
-static void generate_scene(ray_scene_t* scene)
+static void generate_scene(render_context_t* context, ray_scene_t* scene)
 {
 	uint64_t startTime = cranpl_timestamp_micro();
 
-	static instance_t instances[90];
-	static sphere_t baseSphere = { .rad = 0.05f };
+	static instance_t instances[1];
+	static sphere_t baseSphere = { .rad = 0.2f };
 
-	static material_lambert_t lambert = { .color = { 0.8f, 0.5f, 0.9f } };
+	static material_lambert_t lambert = { .color = { 0.5f, 0.8f, 1.0f } };
 	static material_metal_t metal = { 0 };
 
-	for (uint32_t i = 0; i < 48; i++)
+	for (uint32_t i = 0; i < 1; i++)
 	{
-		float t = (float)i / (float)48;
 		instances[i] = (instance_t)
 		{
-			.pos = { .x = cosf(t * TAO), .y = sinf(t * TAO), .z = 2.0f },
-			.materialIndex = { .dataIndex = 0,.typeIndex = i % 2 },
+			.pos = { 0 },
+			.materialIndex = { .dataIndex = 0,.typeIndex = 0 },
 			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_sphere, }
 		};
 	}
-
-	for (uint32_t i = 0; i < 24; i++)
-	{
-		float t = (float)i / (float)24;
-		instances[i + 48] = (instance_t)
-		{
-			.pos = { .x = cosf(t * TAO) * 0.75f, .y = sinf(t * TAO) * 0.75f, .z = 2.0f },
-			.materialIndex = { .dataIndex = 0,.typeIndex = (i + 1) % 2 },
-			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_sphere, }
-		};
-	}
-
-	for (uint32_t i = 0; i < 12; i++)
-	{
-		float t = (float)i / (float)12;
-		instances[i + 72] = (instance_t)
-		{
-			.pos = { .x = cosf(t * TAO) * 0.5f, .y = sinf(t * TAO) * 0.5f, .z = 2.0f },
-			.materialIndex = { .dataIndex = 0,.typeIndex = i % 2 },
-			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_sphere, }
-		};
-	}
-
-	for (uint32_t i = 0; i < 6; i++)
-	{
-		float t = (float)i / (float)6;
-		instances[i + 84] = (instance_t)
-		{
-			.pos = { .x = cosf(t * TAO) * 0.25f, .y = sinf(t * TAO) * 0.25f, .z = 2.0f },
-			.materialIndex = { .dataIndex = 0,.typeIndex = (i + 1) % 2 },
-			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_sphere, }
-		};
-	}
-
 
 	// Output our scene
 	*scene = (ray_scene_t)
@@ -614,7 +701,7 @@ static void generate_scene(ray_scene_t* scene)
 		.instances =
 		{
 			.data = instances,
-			.count = 90
+			.count = 1
 		},
 		.renderables[renderable_sphere] = &baseSphere,
 		.materials =
@@ -624,13 +711,13 @@ static void generate_scene(ray_scene_t* scene)
 		}
 	};
 
-	build_bvh(scene);
+	build_bvh(context, scene);
 	renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
 }
 
 int backgroundWidth, backgroundHeight, backgroundStride;
 float* restrict background;
-static vec3 cast_scene(ray_scene_t* scene, vec3 rayO, vec3 rayD, uint32_t depth)
+static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO, vec3 rayD, uint32_t depth)
 {
 	if (depth >= renderConfig.maxDepth)
 	{
@@ -643,13 +730,13 @@ static vec3 cast_scene(ray_scene_t* scene, vec3 rayO, vec3 rayD, uint32_t depth)
 
 	// TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
 	// Do we want to handle this some other way?
-	const float ReCastBias = 0.0001f;
+	const float ReCastBias = 0.01f;
 
 	uint32_t closestInstanceIndex = 0;
 	float closestDistance = NoRayIntersection;
 
-	// TODO: Traverse our BVH instead
-	// TODO: Gather list of candidate BVHs
+	// TODO: Traverse our BVH instead - Done
+	// TODO: Gather list of candidate BVHs - Done
 	// TODO: Sort list of instances by type
 	// TODO: find closest intersection in candidates
 	// TODO: ?!?!?
@@ -699,17 +786,19 @@ static vec3 cast_scene(ray_scene_t* scene, vec3 rayO, vec3 rayD, uint32_t depth)
 		{
 			material_lambert_t lambertData = ((material_lambert_t*)scene->materials[material_lambert])[materialIndex.dataIndex];
 
-			vec3 spherePoint = vec3_add(intersectionPoint, normal);
-			spherePoint = vec3_add(normal, sphere_random());
-			vec3 sceneCast = cast_scene(scene, intersectionPoint, spherePoint, depth+1);
+			vec3 spherePoint = vec3_add(normal, sphere_random(&context->randomSeed));
+			vec3 result = cast_scene(context, scene, intersectionPoint, spherePoint, depth+1);
 
-			sceneCast = vec3_mulf(sceneCast, vec3_dot(spherePoint, normal));
+			float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(spherePoint), normal));
+			assert(lambertCosine <= 1.05f);
+			vec3 sceneCast = vec3_mulf(result, lambertCosine);
+
 			return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
 		}
 		case material_metal:
 		{
 			vec3 castDir = vec3_reflect(rayD, normal);
-			vec3 sceneCast = cast_scene(scene, intersectionPoint, castDir, depth+1);
+			vec3 sceneCast = cast_scene(context, scene, intersectionPoint, castDir, depth+1);
 
 			return sceneCast;
 		}
@@ -734,18 +823,22 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = UINT32_MAX,
-		.samplesPerPixel = 4,
+		.samplesPerPixel = 100,
 		.renderWidth = 400,
 		.renderHeight = 200
 	};
 
+	render_context_t renderContext =
+	{
+		.randomSeed = 12,
+	};
+
 	uint64_t startTime = cranpl_timestamp_micro();
-	srand(0);
 
 	background = stbi_loadf("background_4k.hdr", &backgroundWidth, &backgroundHeight, &backgroundStride, 0);
 
 	ray_scene_t scene;
-	generate_scene(&scene);
+	generate_scene(&renderContext, &scene);
 
 	int32_t imgWidth = renderConfig.renderWidth, imgHeight = renderConfig.renderHeight, imgStride = 4;
 	int32_t halfImgWidth = imgWidth / 2, halfImgHeight = imgHeight / 2;
@@ -754,8 +847,8 @@ int main()
 	// Currently simply using the near triangle.
 	float near = 1.0f, nearHeight = 1.0f, nearWidth = nearHeight * (float)imgWidth / (float)imgHeight;
 
-	vec3 origin = { 0.0f, 0.0f, 0.0f };
-	vec3 forward = { .x = 0.0f,.y = 0.0f,.z = 1.0f }, right = { .x = 1.0f,.y = 0.0f,.z = 0.0f }, up = { .x = 0.0f, .y = 1.0f, .z = 0.0f };
+	vec3 origin = { 0.0f, -1.0f, 0.0f };
+	vec3 forward = { .x = 0.0f,.y = 1.0f,.z = 0.0f }, right = { .x = 1.0f,.y = 0.0f,.z = 0.0f }, up = { .x = 0.0f, .y = 0.0f, .z = 1.0f };
 
 	float* restrict hdrImage = malloc(imgWidth * imgHeight * imgStride * sizeof(float));
 
@@ -789,13 +882,13 @@ int main()
 			{
 				renderStats.primaryRayCount++;
 
-				float randX = xOff + xStep * (rand01f() * 0.5f - 0.5f);
-				float randY = yOff + yStep * (rand01f() * 0.5f - 0.5f);
+				float randX = xOff + xStep * (rand01f(&renderContext.randomSeed) * 0.5f - 0.5f);
+				float randY = yOff + yStep * (rand01f(&renderContext.randomSeed) * 0.5f - 0.5f);
 
 				// Construct our ray as a vector going from our origin to our near plane
 				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
 				vec3 rayDir = vec3_add(vec3_mulf(forward, near), vec3_add(vec3_mulf(right, randX), vec3_mulf(up, randY)));
-				sceneColor = vec3_add(sceneColor, vec3_mulf(cast_scene(&scene, origin, rayDir, 0), rcp((float)renderConfig.samplesPerPixel)));
+				sceneColor = vec3_add(sceneColor, vec3_mulf(cast_scene(&renderContext, &scene, origin, rayDir, 0), rcp((float)renderConfig.samplesPerPixel)));
 			}
 
 			int32_t imgIdx = ((y + halfImgHeight) * imgWidth + (x + halfImgWidth)) * imgStride;
