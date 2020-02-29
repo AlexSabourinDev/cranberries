@@ -40,7 +40,7 @@ render_config_t renderConfig;
 
 typedef struct
 {
-	uint32_t randomSeed;
+	int32_t randomSeed;
 } render_context_t;
 
 static float micro_to_seconds(uint64_t time)
@@ -104,19 +104,27 @@ static bool quadratic(float a, float b, float c, float* restrict out1, float* re
 	return true;
 }
 
-float rand01f( uint32_t *seed )
+static float random01f(int32_t* seed)
 {
+	assert(*seed != 0);
+
 	// http://www.iquilezles.org/www/articles/sfrand/sfrand.htm
-	assert(seed[0] != 0);
 	union
 	{
 		float f;
-		uint32_t i;
+		int32_t i;
 	} res;
 
-	seed[0] *= 16807;
-	res.i = ((((unsigned int)seed[0])>>9 ) | 0x3f800000);
+	*seed *= 16807;
+	uint32_t randomNumber = *seed;
+	res.i = ((randomNumber>>9) | 0x3f800000);
 	return res.f - 1.0f;
+}
+
+static uint32_t randomRange(int32_t* seed, uint32_t min, uint32_t max)
+{
+	float result = random01f(seed) * (float)(max - min);
+	return (uint32_t)result + min;
 }
 
 static float rgb_to_luminance(float r, float g, float b)
@@ -309,12 +317,12 @@ static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float r
 	return rayMax;
 }
 
-static vec3 sphere_random(uint32_t* seed)
+static vec3 sphere_random(int32_t* seed)
 {
 	vec3 p;
 	do
 	{
-		p = vec3_mulf((vec3) { rand01f(seed)-0.5f, rand01f(seed)-0.5f, rand01f(seed)-0.5f }, 2.0f);
+		p = vec3_mulf((vec3) { random01f(seed)-0.5f, random01f(seed)-0.5f, random01f(seed)-0.5f }, 2.0f);
 	} while (vec3_dot(p, p) <= 1.0f);
 
 	return p;
@@ -573,7 +581,7 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 		instance_aabb_pair_t* start;
 		uint32_t count;
 		uint32_t* parentIndex;
-	} bvhWorkgroup[100];
+	} bvhWorkgroup[1000];
 	uint32_t workgroupQueueEnd = 1;
 
 	bvhWorkgroup[0].start = leafs;
@@ -581,8 +589,8 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 	bvhWorkgroup[0].parentIndex = NULL;
 
 	uint32_t bvhWriteIter = 0;
-	static bvh_node_t builtBVH[1000]; // Alot-ish, just for now
-	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % 100) // TODO: constant for workgroup size
+	static bvh_node_t builtBVH[10000]; // Alot-ish, just for now
+	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % 1000) // TODO: constant for workgroup size
 	{
 		instance_aabb_pair_t* start = bvhWorkgroup[workgroupIter].start;
 		uint32_t count = bvhWorkgroup[workgroupIter].count;
@@ -610,23 +618,24 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 		if (!isLeaf)
 		{
 			// TODO: Since we're doing all the iteration work in the sort, maybe we could also do the partitioning in the sort?
-			uint32_t axis = (uint32_t)(rand01f(&context->randomSeed)*3.0f);
+			uint32_t axis = randomRange(&context->randomSeed, 0, 3);
 			qsort(start, count, sizeof(instance_aabb_pair_t), sortFuncs[axis]);
 
 			bvhWorkgroup[workgroupQueueEnd].start = start;
 			bvhWorkgroup[workgroupQueueEnd].count = count / 2;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.left;
-			workgroupQueueEnd = (workgroupQueueEnd + 1) % 100; // TODO: Constant for workgroup size
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % 1000; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
 
 			bvhWorkgroup[workgroupQueueEnd].start = start + count / 2;
 			bvhWorkgroup[workgroupQueueEnd].count = count - count / 2;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.right;
-			workgroupQueueEnd = (workgroupQueueEnd + 1) % 100; // TODO: Constant for workgroup size
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % 1000; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
 		}
 
 		bvhWriteIter++;
+		assert(bvhWriteIter < 10000);
 	}
 
 	free(leafs);
@@ -643,7 +652,7 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 
 	uint32_t instanceIter = 0;
 
-	uint32_t testQueue[1000]; // TODO: Currently we just allow 1000 stack pushes. Fix this!
+	uint32_t testQueue[10000]; // TODO: Currently we just allow 1000 stack pushes. Fix this!
 	uint32_t testQueueSize = 1;
 
 	testQueue[0] = 0;
@@ -667,6 +676,8 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 				testQueueSize++;
 				testQueue[testQueueSize] = bvh->nodes[nodeIndex].indices.jumps.right;
 				testQueueSize++;
+
+				assert(testQueueSize < 10000);
 			}
 		}
 	}
@@ -679,18 +690,18 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 {
 	uint64_t startTime = cranpl_timestamp_micro();
 
-	static instance_t instances[1];
-	static sphere_t baseSphere = { .rad = 0.2f };
+	static instance_t instances[1000];
+	static sphere_t baseSphere = { .rad = 0.02f };
 
 	static material_lambert_t lambert = { .color = { 0.5f, 0.8f, 1.0f } };
 	static material_metal_t metal = { 0 };
 
-	for (uint32_t i = 0; i < 1; i++)
+	for (uint32_t i = 0; i < 1000; i++)
 	{
 		instances[i] = (instance_t)
 		{
-			.pos = { 0 },
-			.materialIndex = { .dataIndex = 0,.typeIndex = 0 },
+			.pos = { random01f(&context->randomSeed) * 2.0f - 1.0f, random01f(&context->randomSeed) * 2.0f - 1.0f, random01f(&context->randomSeed) * 2.0f - 1.0f },
+			.materialIndex = { .dataIndex = 0,.typeIndex = randomRange(&context->randomSeed, 0, 2) },
 			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_sphere, }
 		};
 	}
@@ -701,7 +712,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		.instances =
 		{
 			.data = instances,
-			.count = 1
+			.count = 1000
 		},
 		.renderables[renderable_sphere] = &baseSphere,
 		.materials =
@@ -742,8 +753,8 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 	// TODO: ?!?!?
 	uint64_t intersectionStartTime = cranpl_timestamp_micro();
 
-	uint32_t candidates[100]; // TODO: Max candidates of 100?
-	uint32_t candidateCount = traverse_bvh(&scene->bvh, rayO, rayD, ReCastBias, NoRayIntersection, candidates, 100);
+	uint32_t candidates[1000]; // TODO: Max candidates of 100?
+	uint32_t candidateCount = traverse_bvh(&scene->bvh, rayO, rayD, ReCastBias, NoRayIntersection, candidates, 1000);
 	for (uint32_t i = 0; i < candidateCount; i++)
 	{
 		// TODO: Add support for other shapes
@@ -790,7 +801,6 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 			vec3 result = cast_scene(context, scene, intersectionPoint, spherePoint, depth+1);
 
 			float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(spherePoint), normal));
-			assert(lambertCosine <= 1.05f);
 			vec3 sceneCast = vec3_mulf(result, lambertCosine);
 
 			return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
@@ -823,14 +833,14 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = UINT32_MAX,
-		.samplesPerPixel = 100,
-		.renderWidth = 400,
-		.renderHeight = 200
+		.samplesPerPixel = 1000,
+		.renderWidth = 2048,
+		.renderHeight = 1024
 	};
 
 	render_context_t renderContext =
 	{
-		.randomSeed = 12,
+		.randomSeed = 10346425,
 	};
 
 	uint64_t startTime = cranpl_timestamp_micro();
@@ -847,7 +857,7 @@ int main()
 	// Currently simply using the near triangle.
 	float near = 1.0f, nearHeight = 1.0f, nearWidth = nearHeight * (float)imgWidth / (float)imgHeight;
 
-	vec3 origin = { 0.0f, -1.0f, 0.0f };
+	vec3 origin = { 0.0f, -2.0f, 0.0f };
 	vec3 forward = { .x = 0.0f,.y = 1.0f,.z = 0.0f }, right = { .x = 1.0f,.y = 0.0f,.z = 0.0f }, up = { .x = 0.0f, .y = 0.0f, .z = 1.0f };
 
 	float* restrict hdrImage = malloc(imgWidth * imgHeight * imgStride * sizeof(float));
@@ -882,8 +892,8 @@ int main()
 			{
 				renderStats.primaryRayCount++;
 
-				float randX = xOff + xStep * (rand01f(&renderContext.randomSeed) * 0.5f - 0.5f);
-				float randY = yOff + yStep * (rand01f(&renderContext.randomSeed) * 0.5f - 0.5f);
+				float randX = xOff + xStep * (random01f(&renderContext.randomSeed) * 0.5f - 0.5f);
+				float randY = yOff + yStep * (random01f(&renderContext.randomSeed) * 0.5f - 0.5f);
 
 				// Construct our ray as a vector going from our origin to our near plane
 				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
