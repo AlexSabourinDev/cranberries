@@ -25,6 +25,8 @@ struct
 	uint64_t renderTime;
 	uint64_t intersectionTime;
 	uint64_t bvhTraversalTime;
+	uint64_t bvhHitCount;
+	uint64_t bvhMissCount;
 	uint64_t skyboxTime;
 	uint64_t imageSpaceTime;
 } renderStats;
@@ -41,6 +43,7 @@ render_config_t renderConfig;
 typedef struct
 {
 	int32_t randomSeed;
+	uint32_t depth;
 } render_context_t;
 
 static float micro_to_seconds(uint64_t time)
@@ -215,8 +218,16 @@ static vec3 vec3_max(vec3 v, vec3 m)
 
 static vec3 vec3_rcp(vec3 v)
 {
-	// TODO: consider SSE
-	return (vec3) { rcp(v.x), rcp(v.y), rcp(v.z) };
+	union
+	{
+		__m128 sse;
+		float f[4];
+	} conv;
+
+	conv.sse = _mm_rcp_ss(_mm_loadu_ps(&v.x));
+	return (vec3) { conv.f[0], conv.f[1], conv.f[2] };
+
+	// return (vec3) { rcp(v.x), rcp(v.y), rcp(v.z) };
 }
 
 typedef struct
@@ -427,7 +438,7 @@ static bool aabb_does_ray_intersect(vec3 rayO, vec3 rayD, float rayMin, float ra
 typedef enum
 {
 	material_lambert,
-	material_metal,
+	material_mirror,
 	material_count
 } material_type_e;
 
@@ -438,8 +449,8 @@ typedef struct
 
 typedef struct
 {
-	uint8_t tempData; // TODO: Fill with real metalic data
-} material_metal_t;
+	vec3 color;
+} material_mirror_t;
 
 typedef struct
 {
@@ -516,10 +527,27 @@ typedef struct
 	uint32_t instanceIndex;
 } instance_aabb_pair_t;
 
-static int instance_aabb_sort_min_x(const void* l, const void* r)
+typedef struct
 {
-	const instance_aabb_pair_t* left = (const instance_aabb_pair_t*)l;
-	const instance_aabb_pair_t* right = (const instance_aabb_pair_t*)r;
+	vec3 surface;
+	vec3 normal;
+	vec3 viewDir;
+} shader_inputs_t;
+
+typedef vec3(material_shader_t)(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs);
+
+static material_shader_t lambert;
+static material_shader_t mirror;
+material_shader_t* shaders[material_count] =
+{
+	lambert,
+	mirror
+};
+
+static int instance_aabb_sort_min_x(const void* restrict l, const void* restrict r)
+{
+	const instance_aabb_pair_t* restrict left = (const instance_aabb_pair_t*)l;
+	const instance_aabb_pair_t* restrict right = (const instance_aabb_pair_t*)r;
 
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
@@ -527,10 +555,10 @@ static int instance_aabb_sort_min_x(const void* l, const void* r)
 	return (int)(left->bound.min.x - right->bound.min.x);
 }
 
-static int instance_aabb_sort_min_y(const void* l, const void* r)
+static int instance_aabb_sort_min_y(const void* restrict l, const void* restrict r)
 {
-	const instance_aabb_pair_t* left = (const instance_aabb_pair_t*)l;
-	const instance_aabb_pair_t* right = (const instance_aabb_pair_t*)r;
+	const instance_aabb_pair_t* restrict left = (const instance_aabb_pair_t* restrict)l;
+	const instance_aabb_pair_t* restrict right = (const instance_aabb_pair_t* restrict)r;
 
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
@@ -538,10 +566,10 @@ static int instance_aabb_sort_min_y(const void* l, const void* r)
 	return (int)(left->bound.min.y - right->bound.min.y);
 }
 
-static int instance_aabb_sort_min_z(const void* l, const void* r)
+static int instance_aabb_sort_min_z(const void* restrict l, const void* restrict r)
 {
-	const instance_aabb_pair_t* left = (const instance_aabb_pair_t*)l;
-	const instance_aabb_pair_t* right = (const instance_aabb_pair_t*)r;
+	const instance_aabb_pair_t* left = (const instance_aabb_pair_t* restrict)l;
+	const instance_aabb_pair_t* right = (const instance_aabb_pair_t* restrict)r;
 
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
@@ -574,7 +602,7 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 		}
 	}
 
-	int(*sortFuncs[3])(const void* l, const void* r) = { instance_aabb_sort_min_x, instance_aabb_sort_min_y, instance_aabb_sort_min_z };
+	int(*sortFuncs[3])(const void* restrict l, const void* restrict r) = { instance_aabb_sort_min_x, instance_aabb_sort_min_y, instance_aabb_sort_min_z };
 
 	struct
 	{
@@ -662,6 +690,8 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 
 		if (aabb_does_ray_intersect(rayO, rayD, rayMin, rayMax, bvh->nodes[nodeIndex].bound.min, bvh->nodes[nodeIndex].bound.max))
 		{
+			renderStats.bvhHitCount++;
+
 			// All our leaves are packed at the end of the 
 			bool isLeaf = bvh->nodes[nodeIndex].isLeaf;
 			if (isLeaf)
@@ -680,6 +710,10 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 				assert(testQueueSize < 10000);
 			}
 		}
+		else
+		{
+			renderStats.bvhMissCount++;
+		}
 	}
 
 	renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
@@ -694,7 +728,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	static sphere_t baseSphere = { .rad = 0.02f };
 
 	static material_lambert_t lambert = { .color = { 0.5f, 0.8f, 1.0f } };
-	static material_metal_t metal = { 0 };
+	static material_mirror_t mirror = { .color = { 0.8f, 0.5f, 0.1f } };
 
 	for (uint32_t i = 0; i < 1000; i++)
 	{
@@ -718,7 +752,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		.materials =
 		{
 			[material_lambert] = &lambert,
-			[material_metal] = &metal
+			[material_mirror] = &mirror
 		}
 	};
 
@@ -728,9 +762,10 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 int backgroundWidth, backgroundHeight, backgroundStride;
 float* restrict background;
-static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO, vec3 rayD, uint32_t depth)
+static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO, vec3 rayD)
 {
-	if (depth >= renderConfig.maxDepth)
+	context->depth++;
+	if (context->depth >= renderConfig.maxDepth)
 	{
 		return (vec3) { 0 };
 	}
@@ -790,42 +825,46 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 		vec3 surfacePoint = vec3_sub(intersectionPoint, instancePos);
 		vec3 normal = vec3_mulf(surfacePoint, rcp(sphere.rad));
 
-		// TODO: real materials please
-		switch (materialIndex.typeIndex)
-		{
-		case material_lambert:
-		{
-			material_lambert_t lambertData = ((material_lambert_t*)scene->materials[material_lambert])[materialIndex.dataIndex];
-
-			vec3 spherePoint = vec3_add(normal, sphere_random(&context->randomSeed));
-			vec3 result = cast_scene(context, scene, intersectionPoint, spherePoint, depth+1);
-
-			float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(spherePoint), normal));
-			vec3 sceneCast = vec3_mulf(result, lambertCosine);
-
-			return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
-		}
-		case material_metal:
-		{
-			vec3 castDir = vec3_reflect(rayD, normal);
-			vec3 sceneCast = cast_scene(context, scene, intersectionPoint, castDir, depth+1);
-
-			return sceneCast;
-		}
-		default:
-			assert(false); // missing type!
-			break;
-		}
-
-		// TODO: lighting be like
-		return (vec3) { 0 };
+		return shaders[materialIndex.typeIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
+			(shader_inputs_t)
+			{
+				.surface = intersectionPoint,
+				.normal = normal,
+				.viewDir = rayD
+			});
 	}
+
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
 	vec3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
 	renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
+	context->depth--;
 	return skybox;
+}
+
+static vec3 lambert(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
+{
+	material_lambert_t lambertData = ((const material_lambert_t* restrict)materialData)[materialIndex];
+
+	vec3 randomDir = vec3_add(inputs.normal, sphere_random(&context->randomSeed));
+	// TODO: Consider iteration instead of recursion
+	vec3 result = cast_scene(context, scene, inputs.surface, randomDir);
+
+	float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(randomDir), inputs.normal));
+	vec3 sceneCast = vec3_mulf(result, lambertCosine);
+
+	return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
+}
+
+static vec3 mirror(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
+{
+	material_mirror_t mirrorData = ((const material_mirror_t* restrict)materialData)[materialIndex];
+
+	vec3 castDir = vec3_reflect(inputs.viewDir, inputs.normal);
+	vec3 sceneCast = cast_scene(context, scene, inputs.surface, castDir);
+
+	return vec3_mul(sceneCast, mirrorData.color);
 }
 
 int main()
@@ -833,9 +872,9 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = UINT32_MAX,
-		.samplesPerPixel = 1000,
-		.renderWidth = 2048,
-		.renderHeight = 1024
+		.samplesPerPixel = 1,
+		.renderWidth = 400,
+		.renderHeight = 200
 	};
 
 	render_context_t renderContext =
@@ -898,8 +937,11 @@ int main()
 				// Construct our ray as a vector going from our origin to our near plane
 				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
 				vec3 rayDir = vec3_add(vec3_mulf(forward, near), vec3_add(vec3_mulf(right, randX), vec3_mulf(up, randY)));
-				sceneColor = vec3_add(sceneColor, vec3_mulf(cast_scene(&renderContext, &scene, origin, rayDir, 0), rcp((float)renderConfig.samplesPerPixel)));
+				// TODO: Do we want to scale for averae in the loop or outside the loop?
+				// With too many SPP, the sceneColor might get too significant.
+				sceneColor = vec3_add(sceneColor, cast_scene(&renderContext, &scene, origin, rayDir));
 			}
+			sceneColor = vec3_mulf(sceneColor, rcp((float)renderConfig.samplesPerPixel));
 
 			int32_t imgIdx = ((y + halfImgHeight) * imgWidth + (x + halfImgWidth)) * imgStride;
 			hdrImage[imgIdx + 0] = sceneColor.x;
@@ -963,6 +1005,9 @@ int main()
 		printf("\tRender Time: %f [%f%%]\n", micro_to_seconds(renderStats.renderTime), (float)renderStats.renderTime / (float)renderStats.totalTime);
 		printf("\t\tIntersection Time: %f [%f%%]\n", micro_to_seconds(renderStats.intersectionTime), (float)renderStats.intersectionTime / (float)renderStats.renderTime);
 		printf("\t\t\tBVH Traversal Time: %f [%f%%]\n", micro_to_seconds(renderStats.bvhTraversalTime), (float)renderStats.bvhTraversalTime / (float)renderStats.intersectionTime);
+		printf("\t\t\t\tBVH Tests: %" PRIu64 "\n", renderStats.bvhHitCount + renderStats.bvhMissCount);
+		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhHitCount, (float)renderStats.bvhHitCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount));
+		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhMissCount, (float)renderStats.bvhMissCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount));
 		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(renderStats.skyboxTime), (float)renderStats.skyboxTime / (float)renderStats.renderTime);
 		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(renderStats.imageSpaceTime), (float)renderStats.imageSpaceTime / (float)renderStats.totalTime);
 		printf("\n");
