@@ -26,7 +26,11 @@ struct
 	uint64_t intersectionTime;
 	uint64_t bvhTraversalTime;
 	uint64_t bvhHitCount;
+	uint64_t bvhLeafHitCount;
 	uint64_t bvhMissCount;
+	uint64_t bvhRealHitCount;
+	uint64_t bvhRealMissCount;
+	uint64_t bvhNodeCount;
 	uint64_t skyboxTime;
 	uint64_t imageSpaceTime;
 } renderStats;
@@ -649,14 +653,26 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 			uint32_t axis = randomRange(&context->randomSeed, 0, 3);
 			qsort(start, count, sizeof(instance_aabb_pair_t), sortFuncs[axis]);
 
+			float boundsCenter = ((&bounds.max.x)[axis] - (&bounds.min.x)[axis]) * 0.5f;
+			uint32_t centerIndex = count / 2;
+			for (uint32_t i = 0; i < count; i++)
+			{
+				float centroid = ((&start[i].bound.max.x)[axis] - (&start[i].bound.min.x)[axis]) * 0.5f;
+				if (centroid > boundsCenter)
+				{
+					centerIndex = i;
+					break;
+				}
+			}
+
 			bvhWorkgroup[workgroupQueueEnd].start = start;
-			bvhWorkgroup[workgroupQueueEnd].count = count / 2;
+			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.left;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % 1000; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
 
-			bvhWorkgroup[workgroupQueueEnd].start = start + count / 2;
-			bvhWorkgroup[workgroupQueueEnd].count = count - count / 2;
+			bvhWorkgroup[workgroupQueueEnd].start = start + centerIndex;
+			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.right;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % 1000; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
@@ -668,6 +684,7 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 
 	free(leafs);
 
+	renderStats.bvhNodeCount = bvhWriteIter;
 	scene->bvh = (bvh_t)
 	{
 		.nodes = builtBVH
@@ -696,6 +713,8 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 			bool isLeaf = bvh->nodes[nodeIndex].isLeaf;
 			if (isLeaf)
 			{
+				renderStats.bvhLeafHitCount++;
+
 				instanceCandidates[instanceIter] = bvh->nodes[nodeIndex].indices.instance;
 				instanceIter++;
 				assert(instanceIter <= maxInstances);
@@ -800,15 +819,21 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 		assert(renderableIndex.typeIndex == renderable_sphere);
 		sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
 
-		if (sphere_does_ray_intersect(rayO, rayD, instancePos, sphere.rad))
+		float intersectionDistance = sphere_ray_intersection(rayO, rayD, ReCastBias, NoRayIntersection, instancePos, sphere.rad);
+		if (intersectionDistance == NoRayIntersection)
 		{
-			float intersectionDistance = sphere_ray_intersection(rayO, rayD, ReCastBias, NoRayIntersection, instancePos, sphere.rad);
-			// TODO: Do we want to handle tie breakers somehow?
-			if (intersectionDistance < closestDistance)
-			{
-				closestInstanceIndex = candidateIndex;
-				closestDistance = intersectionDistance;
-			}
+			renderStats.bvhRealHitCount++;
+		}
+		else
+		{
+			renderStats.bvhRealMissCount++;
+		}
+
+		// TODO: Do we want to handle tie breakers somehow?
+		if (intersectionDistance < closestDistance)
+		{
+			closestInstanceIndex = candidateIndex;
+			closestDistance = intersectionDistance;
 		}
 	}
 	renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
@@ -1007,6 +1032,9 @@ int main()
 		printf("\t\t\tBVH Traversal Time: %f [%f%%]\n", micro_to_seconds(renderStats.bvhTraversalTime), (float)renderStats.bvhTraversalTime / (float)renderStats.intersectionTime);
 		printf("\t\t\t\tBVH Tests: %" PRIu64 "\n", renderStats.bvhHitCount + renderStats.bvhMissCount);
 		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhHitCount, (float)renderStats.bvhHitCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount));
+		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhLeafHitCount, (float)renderStats.bvhLeafHitCount/(float)renderStats.bvhHitCount);
+		printf("\t\t\t\t\t\t\tBVH Real Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhRealHitCount, (float)renderStats.bvhRealHitCount/(float)renderStats.bvhLeafHitCount);
+		printf("\t\t\t\t\t\t\tBVH Real Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhRealMissCount, (float)renderStats.bvhRealMissCount/(float)renderStats.bvhLeafHitCount);
 		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhMissCount, (float)renderStats.bvhMissCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount));
 		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(renderStats.skyboxTime), (float)renderStats.skyboxTime / (float)renderStats.renderTime);
 		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(renderStats.imageSpaceTime), (float)renderStats.imageSpaceTime / (float)renderStats.totalTime);
@@ -1015,6 +1043,9 @@ int main()
 		printf("Rays Fired: %" PRIu64 "\n", renderStats.rayCount);
 		printf("\tCamera Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.primaryRayCount, (float)renderStats.primaryRayCount / (float)renderStats.rayCount);
 		printf("\tBounce Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.rayCount - renderStats.primaryRayCount, (float)(renderStats.rayCount - renderStats.primaryRayCount) / (float)renderStats.rayCount);
+		printf("\n");
+		printf("BVH\n");
+		printf("\tBVH Node Count: %" PRIu64 "\n", renderStats.bvhNodeCount);
 
 		system("pause");
 	}
