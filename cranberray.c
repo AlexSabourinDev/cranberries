@@ -228,7 +228,7 @@ static vec3 vec3_rcp(vec3 v)
 		float f[4];
 	} conv;
 
-	conv.sse = _mm_rcp_ss(_mm_loadu_ps(&v.x));
+	conv.sse = _mm_rcp_ps(_mm_loadu_ps(&v.x));
 	return (vec3) { conv.f[0], conv.f[1], conv.f[2] };
 
 	// return (vec3) { rcp(v.x), rcp(v.y), rcp(v.z) };
@@ -409,7 +409,7 @@ static bool aabb_does_ray_intersect_sse(vec3 rayO, vec3 rayD, float rayMin, floa
 	tsmaller = _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(2, 2, 1, 0));
 
 	__m128 tbigger = _mm_max_ps(t0s, t1s);
-	tbigger = _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(2, 2, 1, 1));
+	tbigger = _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(2, 2, 1, 0));
 
 	tsmaller = _mm_max_ps(tsmaller, _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(2, 1, 0, 3)));
 	tsmaller = _mm_max_ps(tsmaller, _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(1, 0, 3, 2)));
@@ -540,12 +540,12 @@ typedef struct
 
 typedef vec3(material_shader_t)(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs);
 
-static material_shader_t lambert;
-static material_shader_t mirror;
+static material_shader_t shader_lambert;
+static material_shader_t shader_mirror;
 material_shader_t* shaders[material_count] =
 {
-	lambert,
-	mirror
+	shader_lambert,
+	shader_mirror
 };
 
 static int instance_aabb_sort_min_x(const void* restrict l, const void* restrict r)
@@ -746,15 +746,15 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	static instance_t instances[1000];
 	static sphere_t baseSphere = { .rad = 0.02f };
 
-	static material_lambert_t lambert = { .color = { 0.5f, 0.8f, 1.0f } };
-	static material_mirror_t mirror = { .color = { 0.8f, 0.5f, 0.1f } };
+	static material_lambert_t lamberts[2] = { {.color = { 0.5f, 0.8f, 1.0f } },  {.color = { 0.8f, 0.5f, 1.0f } } };
+	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 0.5f, 0.1f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
 
 	for (uint32_t i = 0; i < 1000; i++)
 	{
 		instances[i] = (instance_t)
 		{
 			.pos = { random01f(&context->randomSeed) * 2.0f - 1.0f, random01f(&context->randomSeed) * 2.0f - 1.0f, random01f(&context->randomSeed) * 2.0f - 1.0f },
-			.materialIndex = { .dataIndex = 0,.typeIndex = randomRange(&context->randomSeed, 0, 2) },
+			.materialIndex = { .dataIndex = (uint16_t)randomRange(&context->randomSeed, 0, 2),.typeIndex = randomRange(&context->randomSeed, 0, 2) },
 			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_sphere, }
 		};
 	}
@@ -770,8 +770,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		.renderables[renderable_sphere] = &baseSphere,
 		.materials =
 		{
-			[material_lambert] = &lambert,
-			[material_mirror] = &mirror
+			[material_lambert] = lamberts,
+			[material_mirror] = mirrors
 		}
 	};
 
@@ -820,7 +820,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 		sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
 
 		float intersectionDistance = sphere_ray_intersection(rayO, rayD, ReCastBias, NoRayIntersection, instancePos, sphere.rad);
-		if (intersectionDistance == NoRayIntersection)
+		if (intersectionDistance != NoRayIntersection)
 		{
 			renderStats.bvhRealHitCount++;
 		}
@@ -868,7 +868,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 	return skybox;
 }
 
-static vec3 lambert(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
+static vec3 shader_lambert(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
 {
 	material_lambert_t lambertData = ((const material_lambert_t* restrict)materialData)[materialIndex];
 
@@ -882,7 +882,7 @@ static vec3 lambert(const void* restrict materialData, uint32_t materialIndex, r
 	return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
 }
 
-static vec3 mirror(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
+static vec3 shader_mirror(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
 {
 	material_mirror_t mirrorData = ((const material_mirror_t* restrict)materialData)[materialIndex];
 
@@ -897,9 +897,9 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = UINT32_MAX,
-		.samplesPerPixel = 1,
-		.renderWidth = 400,
-		.renderHeight = 200
+		.samplesPerPixel = 10,
+		.renderWidth = 2048,
+		.renderHeight = 1024
 	};
 
 	render_context_t renderContext =
@@ -975,10 +975,7 @@ int main()
 			hdrImage[imgIdx + 3] = 1.0f;
 		}
 
-		// Progress data
-		{
-			totalIterationTime += cranpl_timestamp_micro() - iterationStartTime;
-		}
+		totalIterationTime += cranpl_timestamp_micro() - iterationStartTime;
 	}
 
 	renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime);
@@ -1026,23 +1023,23 @@ int main()
 	{
 		system("cls");
 		printf("Total Time: %f\n", micro_to_seconds(renderStats.totalTime));
-		printf("\tScene Generation Time: %f [%f%%]\n", micro_to_seconds(renderStats.sceneGenerationTime), (float)renderStats.sceneGenerationTime / (float)renderStats.totalTime);
-		printf("\tRender Time: %f [%f%%]\n", micro_to_seconds(renderStats.renderTime), (float)renderStats.renderTime / (float)renderStats.totalTime);
-		printf("\t\tIntersection Time: %f [%f%%]\n", micro_to_seconds(renderStats.intersectionTime), (float)renderStats.intersectionTime / (float)renderStats.renderTime);
-		printf("\t\t\tBVH Traversal Time: %f [%f%%]\n", micro_to_seconds(renderStats.bvhTraversalTime), (float)renderStats.bvhTraversalTime / (float)renderStats.intersectionTime);
+		printf("\tScene Generation Time: %f [%f%%]\n", micro_to_seconds(renderStats.sceneGenerationTime), (float)renderStats.sceneGenerationTime / (float)renderStats.totalTime * 100.0f);
+		printf("\tRender Time: %f [%f%%]\n", micro_to_seconds(renderStats.renderTime), (float)renderStats.renderTime / (float)renderStats.totalTime * 100.0f);
+		printf("\t\tIntersection Time: %f [%f%%]\n", micro_to_seconds(renderStats.intersectionTime), (float)renderStats.intersectionTime / (float)renderStats.renderTime * 100.0f);
+		printf("\t\t\tBVH Traversal Time: %f [%f%%]\n", micro_to_seconds(renderStats.bvhTraversalTime), (float)renderStats.bvhTraversalTime / (float)renderStats.intersectionTime * 100.0f);
 		printf("\t\t\t\tBVH Tests: %" PRIu64 "\n", renderStats.bvhHitCount + renderStats.bvhMissCount);
-		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhHitCount, (float)renderStats.bvhHitCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount));
-		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhLeafHitCount, (float)renderStats.bvhLeafHitCount/(float)renderStats.bvhHitCount);
-		printf("\t\t\t\t\t\t\tBVH Real Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhRealHitCount, (float)renderStats.bvhRealHitCount/(float)renderStats.bvhLeafHitCount);
-		printf("\t\t\t\t\t\t\tBVH Real Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhRealMissCount, (float)renderStats.bvhRealMissCount/(float)renderStats.bvhLeafHitCount);
-		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhMissCount, (float)renderStats.bvhMissCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount));
-		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(renderStats.skyboxTime), (float)renderStats.skyboxTime / (float)renderStats.renderTime);
-		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(renderStats.imageSpaceTime), (float)renderStats.imageSpaceTime / (float)renderStats.totalTime);
+		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhHitCount, (float)renderStats.bvhHitCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount) * 100.0f);
+		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhLeafHitCount, (float)renderStats.bvhLeafHitCount/(float)renderStats.bvhHitCount * 100.0f);
+		printf("\t\t\t\t\t\t\tBVH Real Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhRealHitCount, (float)renderStats.bvhRealHitCount/(float)renderStats.bvhLeafHitCount * 100.0f);
+		printf("\t\t\t\t\t\t\tBVH Real Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhRealMissCount, (float)renderStats.bvhRealMissCount/(float)renderStats.bvhLeafHitCount * 100.0f);
+		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhMissCount, (float)renderStats.bvhMissCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount) * 100.0f);
+		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(renderStats.skyboxTime), (float)renderStats.skyboxTime / (float)renderStats.renderTime * 100.0f);
+		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(renderStats.imageSpaceTime), (float)renderStats.imageSpaceTime / (float)renderStats.totalTime * 100.0f);
 		printf("\n");
 		printf("MRays/seconds: %f\n", (float)renderStats.rayCount / micro_to_seconds(renderStats.renderTime) / 1000000.0f);
 		printf("Rays Fired: %" PRIu64 "\n", renderStats.rayCount);
-		printf("\tCamera Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.primaryRayCount, (float)renderStats.primaryRayCount / (float)renderStats.rayCount);
-		printf("\tBounce Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.rayCount - renderStats.primaryRayCount, (float)(renderStats.rayCount - renderStats.primaryRayCount) / (float)renderStats.rayCount);
+		printf("\tCamera Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.primaryRayCount, (float)renderStats.primaryRayCount / (float)renderStats.rayCount * 100.0f);
+		printf("\tBounce Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.rayCount - renderStats.primaryRayCount, (float)(renderStats.rayCount - renderStats.primaryRayCount) / (float)renderStats.rayCount * 100.0f);
 		printf("\n");
 		printf("BVH\n");
 		printf("\tBVH Node Count: %" PRIu64 "\n", renderStats.bvhNodeCount);
