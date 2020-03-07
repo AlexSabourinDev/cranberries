@@ -52,7 +52,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 	return 0;
 }
 
-void* cran_restrict cranpl_create_window(char const* windowName, uint32_t width, uint32_t height)
+void* cran_restrict cranpl_create_window(char const* cran_restrict windowName, uint32_t width, uint32_t height)
 {
 	HINSTANCE hinstance = GetModuleHandle(NULL);
 	RegisterClass(&(WNDCLASS)
@@ -78,7 +78,7 @@ void* cran_restrict cranpl_create_window(char const* windowName, uint32_t width,
 	return hwnd;
 }
 
-bool cranpl_tick_window(void* windowHandle)
+bool cranpl_tick_window(void* cran_restrict windowHandle)
 {
 	(void)windowHandle;
 
@@ -101,7 +101,7 @@ bool cranpl_tick_window(void* windowHandle)
 	return isDone;
 }
 
-void cranpl_destroy_window(void* windowHandle)
+void cranpl_destroy_window(void* cran_restrict windowHandle)
 {
 	DestroyWindow(windowHandle);
 }
