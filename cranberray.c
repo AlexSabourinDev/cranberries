@@ -11,10 +11,12 @@
 #include <float.h>
 #include <inttypes.h>
 #include <assert.h>
+#include <string.h>
 #include <immintrin.h>
 
 #include "stb_image.h"
 #include "cranberry_platform.h"
+#include "cranberry_loader.h"
 
 struct
 {
@@ -55,10 +57,6 @@ static float micro_to_seconds(uint64_t time)
 	return (float)time / 1000000.0f;
 }
 
-// Forward decls
-void* memset(void* dst, int val, size_t size);
-void* memcpy(void* dst, void const* src, size_t size);
-
 #define _PI_VAL 3.14159265358979323846264338327f
 const float PI = _PI_VAL;
 const float TAO = _PI_VAL * 2.0f;
@@ -92,7 +90,7 @@ static float rsqrt(float f)
 	return conv.f[0];
 }
 
-static bool quadratic(float a, float b, float c, float* restrict out1, float* restrict out2)
+static bool quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2)
 {
 	assert(out1 != out2);
 
@@ -350,7 +348,7 @@ static vec3 vec3_reflect(vec3 i, vec3 n)
 
 // a is between 0 and 2 PI
 // t is between 0 and PI (0 being the bottom, PI being the top)
-static void vec3_to_spherical(vec3 v, float* restrict a, float* restrict t)
+static void vec3_to_spherical(vec3 v, float* cran_restrict a, float* cran_restrict t)
 {
 	assert(a != t);
 
@@ -513,8 +511,8 @@ typedef struct
 
 typedef struct
 {
-	void* restrict materials[material_count];
-	void* restrict renderables[renderable_count];
+	void* cran_restrict materials[material_count];
+	void* cran_restrict renderables[renderable_count];
 
 	struct
 	{
@@ -538,7 +536,7 @@ typedef struct
 	vec3 viewDir;
 } shader_inputs_t;
 
-typedef vec3(material_shader_t)(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs);
+typedef vec3(material_shader_t)(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs);
 
 static material_shader_t shader_lambert;
 static material_shader_t shader_mirror;
@@ -548,10 +546,10 @@ material_shader_t* shaders[material_count] =
 	shader_mirror
 };
 
-static int instance_aabb_sort_min_x(const void* restrict l, const void* restrict r)
+static int instance_aabb_sort_min_x(const void* cran_restrict l, const void* cran_restrict r)
 {
-	const instance_aabb_pair_t* restrict left = (const instance_aabb_pair_t*)l;
-	const instance_aabb_pair_t* restrict right = (const instance_aabb_pair_t*)r;
+	const instance_aabb_pair_t* cran_restrict left = (const instance_aabb_pair_t*)l;
+	const instance_aabb_pair_t* cran_restrict right = (const instance_aabb_pair_t*)r;
 
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
@@ -559,10 +557,10 @@ static int instance_aabb_sort_min_x(const void* restrict l, const void* restrict
 	return (int)(left->bound.min.x - right->bound.min.x);
 }
 
-static int instance_aabb_sort_min_y(const void* restrict l, const void* restrict r)
+static int instance_aabb_sort_min_y(const void* cran_restrict l, const void* cran_restrict r)
 {
-	const instance_aabb_pair_t* restrict left = (const instance_aabb_pair_t* restrict)l;
-	const instance_aabb_pair_t* restrict right = (const instance_aabb_pair_t* restrict)r;
+	const instance_aabb_pair_t* cran_restrict left = (const instance_aabb_pair_t* cran_restrict)l;
+	const instance_aabb_pair_t* cran_restrict right = (const instance_aabb_pair_t* cran_restrict)r;
 
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
@@ -570,10 +568,10 @@ static int instance_aabb_sort_min_y(const void* restrict l, const void* restrict
 	return (int)(left->bound.min.y - right->bound.min.y);
 }
 
-static int instance_aabb_sort_min_z(const void* restrict l, const void* restrict r)
+static int instance_aabb_sort_min_z(const void* cran_restrict l, const void* cran_restrict r)
 {
-	const instance_aabb_pair_t* left = (const instance_aabb_pair_t* restrict)l;
-	const instance_aabb_pair_t* right = (const instance_aabb_pair_t* restrict)r;
+	const instance_aabb_pair_t* left = (const instance_aabb_pair_t* cran_restrict)l;
+	const instance_aabb_pair_t* right = (const instance_aabb_pair_t* cran_restrict)r;
 
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
@@ -606,7 +604,7 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 		}
 	}
 
-	int(*sortFuncs[3])(const void* restrict l, const void* restrict r) = { instance_aabb_sort_min_x, instance_aabb_sort_min_y, instance_aabb_sort_min_z };
+	int(*sortFuncs[3])(const void* cran_restrict l, const void* cran_restrict r) = { instance_aabb_sort_min_x, instance_aabb_sort_min_y, instance_aabb_sort_min_z };
 
 	struct
 	{
@@ -780,7 +778,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 }
 
 int backgroundWidth, backgroundHeight, backgroundStride;
-float* restrict background;
+float* cran_restrict background;
 static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO, vec3 rayD)
 {
 	context->depth++;
@@ -868,9 +866,9 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 	return skybox;
 }
 
-static vec3 shader_lambert(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
+static vec3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
 {
-	material_lambert_t lambertData = ((const material_lambert_t* restrict)materialData)[materialIndex];
+	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 
 	vec3 randomDir = vec3_add(inputs.normal, sphere_random(&context->randomSeed));
 	// TODO: Consider iteration instead of recursion
@@ -882,9 +880,9 @@ static vec3 shader_lambert(const void* restrict materialData, uint32_t materialI
 	return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
 }
 
-static vec3 shader_mirror(const void* restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
+static vec3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
 {
-	material_mirror_t mirrorData = ((const material_mirror_t* restrict)materialData)[materialIndex];
+	material_mirror_t mirrorData = ((const material_mirror_t* cran_restrict)materialData)[materialIndex];
 
 	vec3 castDir = vec3_reflect(inputs.viewDir, inputs.normal);
 	vec3 sceneCast = cast_scene(context, scene, inputs.surface, castDir);
@@ -924,7 +922,7 @@ int main()
 	vec3 origin = { 0.0f, -2.0f, 0.0f };
 	vec3 forward = { .x = 0.0f,.y = 1.0f,.z = 0.0f }, right = { .x = 1.0f,.y = 0.0f,.z = 0.0f }, up = { .x = 0.0f, .y = 0.0f, .z = 1.0f };
 
-	float* restrict hdrImage = malloc(imgWidth * imgHeight * imgStride * sizeof(float));
+	float* cran_restrict hdrImage = malloc(imgWidth * imgHeight * imgStride * sizeof(float));
 
 	uint64_t renderStartTime = cranpl_timestamp_micro();
 
@@ -962,7 +960,7 @@ int main()
 				// Construct our ray as a vector going from our origin to our near plane
 				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
 				vec3 rayDir = vec3_add(vec3_mulf(forward, near), vec3_add(vec3_mulf(right, randX), vec3_mulf(up, randY)));
-				// TODO: Do we want to scale for averae in the loop or outside the loop?
+				// TODO: Do we want to scale for average in the loop or outside the loop?
 				// With too many SPP, the sceneColor might get too significant.
 				sceneColor = vec3_add(sceneColor, cast_scene(&renderContext, &scene, origin, rayDir));
 			}
@@ -1000,7 +998,7 @@ int main()
 
 	// Convert HDR to 8 bit bitmap
 	{
-		uint8_t* restrict bitmap = malloc(imgWidth * imgHeight * imgStride);
+		uint8_t* cran_restrict bitmap = malloc(imgWidth * imgHeight * imgStride);
 		for (int32_t i = 0; i < imgWidth * imgHeight * imgStride; i+=imgStride)
 		{
 			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 2]));

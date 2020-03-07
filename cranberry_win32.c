@@ -4,9 +4,9 @@
 #include <windows.h>
 #include <wingdi.h>
 
-void cranpl_write_bmp(const char* restrict fileName, uint8_t* restrict pixels, uint32_t width, uint32_t height)
+void cranpl_write_bmp(char const* cran_restrict fileName, uint8_t* cran_restrict pixels, uint32_t width, uint32_t height)
 {
-	const uint32_t stride = 4;
+	uint32_t const stride = 4;
 
 	BITMAPFILEHEADER fileHeader = 
 	{
@@ -52,7 +52,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 	return 0;
 }
 
-void* cranpl_create_window(const char* windowName, uint32_t width, uint32_t height)
+void* cran_restrict cranpl_create_window(char const* windowName, uint32_t width, uint32_t height)
 {
 	HINSTANCE hinstance = GetModuleHandle(NULL);
 	RegisterClass(&(WNDCLASS)
@@ -114,4 +114,38 @@ uint64_t cranpl_timestamp_micro( void )
 	QueryPerformanceCounter(&time);
 	uint64_t microSeconds = (uint64_t)time.QuadPart * 1000000;
 	return microSeconds / (uint64_t)frequency.QuadPart;
+}
+
+cranpl_file_map_t cranpl_map_file(char const* cran_restrict fileName)
+{
+	HANDLE fileHandle = CreateFile(fileName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (fileHandle == INVALID_HANDLE_VALUE)
+	{
+		return (cranpl_file_map_t){ 0 };
+	}
+
+	HANDLE fileMappingHandle = CreateFileMappingA(fileHandle, NULL, PAGE_READONLY, 0, 0, NULL);
+	if (fileMappingHandle == NULL)
+	{
+		CloseHandle(fileHandle);
+		return (cranpl_file_map_t){ 0 };
+	}
+
+	LPVOID map = MapViewOfFile(fileMappingHandle, FILE_MAP_READ, 0, 0, 0);
+	if (map == NULL)
+	{
+		CloseHandle(fileMappingHandle);
+		CloseHandle(fileHandle);
+		return (cranpl_file_map_t){ 0 };
+	}
+
+	uint64_t fileSize = GetFileSize(fileHandle, NULL);
+	return (cranpl_file_map_t) { ._handle1 = fileHandle, ._handle2 = fileMappingHandle, .fileData = map, .fileSize = fileSize };
+}
+
+void cranpl_unmap_file(cranpl_file_map_t fileMap)
+{
+	UnmapViewOfFile(fileMap.fileData);
+	CloseHandle(fileMap._handle2);
+	CloseHandle(fileMap._handle1);
 }
