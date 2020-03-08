@@ -5,7 +5,7 @@
 #include <ctype.h>
 #include <assert.h>
 
-cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath)
+cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
 {
 	cranpl_file_map_t fileMap = cranpl_map_file(filepath);
 
@@ -83,19 +83,39 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath)
 					break;
 				case 'n':
 				case 'N':
-					fileIter += 2;
-					for (uint32_t i = 0; i < 3; i++)
 					{
-						normals[normalIndex++] = strtof(fileIter, &fileIter);
+						fileIter += 2;
+
+						uint32_t startingIndex = normalIndex;
+						for (uint32_t i = 0; i < 3; i++)
+						{
+							normals[normalIndex++] = strtof(fileIter, &fileIter);
+						}
+
+						if (flags & cranl_flip_yz)
+						{
+							float temp = normals[startingIndex + 1];
+							normals[startingIndex + 1] = normals[startingIndex + 2];
+							normals[startingIndex + 2] = temp;
+						}
 					}
 					break;
 				default:
 					if (isblank(fileIter[1]))
 					{
 						fileIter += 1;
+
+						uint32_t startingIndex = vertexIndex;
 						for (uint32_t i = 0; i < 3; i++)
 						{
 							vertices[vertexIndex++] = strtof(fileIter, &fileIter);
+						}
+
+						if (flags & cranl_flip_yz)
+						{
+							float temp = vertices[startingIndex + 1];
+							vertices[startingIndex + 1] = vertices[startingIndex + 2];
+							vertices[startingIndex + 2] = temp;
 						}
 					}
 					break;
@@ -104,17 +124,36 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath)
 
 			case 'f':
 			case 'F':
-				fileIter += 1;
-				for (uint32_t i = 0; i < 3; i++)
 				{
-					int32_t vertex = strtol(fileIter, &fileIter, 10);
-					int32_t uv = strtol(fileIter + 1, &fileIter, 10);
-					int32_t normal = strtol(fileIter + 1, &fileIter, 10);
+					fileIter += 1;
 
-					vertexIndices[faceIndex] = vertex > 0 ? (vertex - 1) * 3 : vertexIndex + vertex * 3;
-					uvIndices[faceIndex] = uv > 0 ? (uv - 1) * 2 : uvIndex + uv * 2;
-					normalIndices[faceIndex] = normal > 0 ? (normal - 1) * 3 : normalIndex + normal * 3;
-					faceIndex++;
+					uint32_t startingIndex = faceIndex;
+					for (uint32_t i = 0; i < 3; i++)
+					{
+						int32_t vertex = strtol(fileIter, &fileIter, 10);
+						int32_t uv = strtol(fileIter + 1, &fileIter, 10);
+						int32_t normal = strtol(fileIter + 1, &fileIter, 10);
+
+						vertexIndices[faceIndex] = vertex > 0 ? (vertex - 1) : vertexIndex / 3 + vertex;
+						uvIndices[faceIndex] = uv > 0 ? (uv - 1) : uvIndex / 2 + uv;
+						normalIndices[faceIndex] = normal > 0 ? (normal - 1) : normalIndex / 3 + normal;
+						faceIndex++;
+					}
+
+					if (flags & cranl_flip_yz)
+					{
+						uint32_t temp = vertexIndices[startingIndex + 1];
+						vertexIndices[startingIndex + 1] = vertexIndices[startingIndex + 2];
+						vertexIndices[startingIndex + 2] = temp;
+
+						temp = uvIndices[startingIndex + 1];
+						uvIndices[startingIndex + 1] = uvIndices[startingIndex + 2];
+						uvIndices[startingIndex + 2] = temp;
+
+						temp = normalIndices[startingIndex + 1];
+						normalIndices[startingIndex + 1] = normalIndices[startingIndex + 2];
+						normalIndices[startingIndex + 2] = temp;
+					}
 				}
 				break;
 			}
@@ -123,10 +162,10 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath)
 
 	cranpl_unmap_file(fileMap);
 
-	assert(vertexCount == vertexIndex);
-	assert(uvCount == uvIndex);
-	assert(normalCount == normalIndex);
-	assert(faceCount == faceIndex);
+	assert(vertexCount == vertexIndex / 3);
+	assert(uvCount == uvIndex / 2);
+	assert(normalCount == normalIndex / 3);
+	assert(faceCount == faceIndex / 3);
 	return (cranl_mesh_t)
 	{
 		.vertices = 

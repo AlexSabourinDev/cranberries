@@ -182,7 +182,7 @@ static vec3 vec3_cross(vec3 l, vec3 r)
 {
 	return (vec3)
 	{
-		.x = l.y*l.z - l.z*r.y,
+		.x = l.y*r.z - l.z*r.y,
 		.y = l.z*r.x - l.x*r.z,
 		.z = l.x*r.y - l.y*r.x
 	};
@@ -281,15 +281,14 @@ static vec3 mat3_rotate_vec3(mat3 m, vec3 v)
 	return mat3_mul_vec3(m, v);
 }
 
-static bool sphere_does_ray_intersect(vec3 rayO, vec3 rayD, vec3 sphereO, float sphereR)
+static bool sphere_does_ray_intersect(vec3 rayO, vec3 rayD, float sphereR)
 {
-	vec3 sphereRaySpace = vec3_sub(sphereO, rayO);
-	float projectedDistance = vec3_dot(sphereRaySpace, rayD);
-	float distanceToRaySqr = vec3_dot(sphereRaySpace,sphereRaySpace) - projectedDistance * projectedDistance;
+	float projectedDistance = -vec3_dot(rayO, rayD);
+	float distanceToRaySqr = vec3_dot(rayO,rayO) - projectedDistance * projectedDistance;
 	return (distanceToRaySqr < sphereR * sphereR);
 }
 
-static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 sphereO, float sphereR)
+static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float rayMax, float sphereR)
 {
 	// Calculate our intersection distance
 	// With the sphere equation: dot(P-O,P-O) = r^2
@@ -309,7 +308,7 @@ static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float r
 	// a = (Cx^2+Cy^2), b = (2*Cx*Dx + 2*Cy*Dy), c = (Dx^2 + Dy^2 - r^2)
 	// d^2 * a + d * b + c = 0
 	// Solve for d
-	vec3 raySphereSpace = vec3_sub(rayO, sphereO);
+	vec3 raySphereSpace = rayO;
 	float a = rayD.x * rayD.x + rayD.y * rayD.y + rayD.z * rayD.z;
 	float b = 2.0f * rayD.x * raySphereSpace.x + 2.0f * rayD.y * raySphereSpace.y + 2.0f * rayD.z * raySphereSpace.z;
 	float c = raySphereSpace.x * raySphereSpace.x + raySphereSpace.y * raySphereSpace.y + raySphereSpace.z * raySphereSpace.z - sphereR * sphereR;
@@ -325,6 +324,45 @@ static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float r
 	if (d > rayMin && d < rayMax)
 	{
 		return d;
+	}
+
+	return rayMax;
+}
+
+static float triangle_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 A, vec3 B, vec3 C, float* out_u, float* out_v, float* out_w)
+{
+	// Source: https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-rendering-a-triangle/moller-trumbore-ray-triangle-intersection
+	vec3 e1 = vec3_sub(B, A);
+	vec3 e2 = vec3_sub(C, A);
+	vec3 p = vec3_cross(rayD, e2);
+	float d = vec3_dot(e1, p);
+	if (d < FLT_EPSILON)
+	{
+		return rayMax;
+	}
+
+	float invD = rcp(d);
+	vec3 tv = vec3_sub(rayO, A);
+	float v = vec3_dot(tv, p) * invD;
+	if (v < 0.0f || v > 1.0f)
+	{
+		return rayMax;
+	}
+
+	vec3 q = vec3_cross(tv, e1);
+	float w = vec3_dot(rayD, q) * invD;
+	if (w < 0.0f || v + w > 1.0f)
+	{
+		return rayMax;
+	}
+
+	float t = vec3_dot(e2, q) * invD;
+	if (t > rayMin && t < rayMax)
+	{
+		*out_u = 1.0f - v - w;
+		*out_v = v;
+		*out_w = w;
+		return t;
 	}
 
 	return rayMax;
@@ -464,6 +502,7 @@ static_assert(material_count < 255, "Only 255 renderable types are supported.");
 typedef enum
 {
 	renderable_sphere,
+	renderable_mesh,
 	renderable_count
 } renderable_type_e;
 
@@ -478,6 +517,11 @@ typedef struct
 {
 	float rad;
 } sphere_t;
+
+typedef struct
+{
+	cranl_mesh_t data;
+} mesh_t;
 
 typedef struct
 {
@@ -593,9 +637,23 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 		{
 		case renderable_sphere:
 		{
-			float rad = ((sphere_t*)scene->renderables[renderableIndex.dataIndex])->rad;
+			float rad = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex].rad;
 			leafs[i].bound.min = vec3_subf(pos, rad);
 			leafs[i].bound.max = vec3_addf(pos, rad);
+		}
+		break;
+		case renderable_mesh:
+		{
+			mesh_t* mesh = ((mesh_t*)scene->renderables[renderable_mesh]);
+			for (uint32_t vert = 0; vert < mesh->data.vertices.count; vert++)
+			{
+				// TODO: type pun here
+				vec3 vertex;
+				memcpy(&vertex, mesh->data.vertices.data + vert * 3, sizeof(vec3));
+
+				leafs[i].bound.min = vec3_min(leafs[i].bound.min, vertex);
+				leafs[i].bound.max = vec3_max(leafs[i].bound.max, vertex);
+			}
 		}
 		break;
 		default:
@@ -741,19 +799,22 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 {
 	uint64_t startTime = cranpl_timestamp_micro();
 
-	static instance_t instances[1000];
+	static instance_t instances[1];
 	static sphere_t baseSphere = { .rad = 0.02f };
 
-	static material_lambert_t lamberts[2] = { {.color = { 0.5f, 0.8f, 1.0f } },  {.color = { 0.8f, 0.5f, 1.0f } } };
-	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 0.5f, 0.1f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
+	static mesh_t mesh;
+	mesh.data = cranl_obj_load("mori_knob.obj", cranl_flip_yz);
 
-	for (uint32_t i = 0; i < 1000; i++)
+	static material_lambert_t lamberts[2] = { {.color = { 0.5f, 0.8f, 1.0f } },  {.color = { 0.8f, 0.5f, 1.0f } } };
+	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
+
+	for (uint32_t i = 0; i < 1; i++)
 	{
 		instances[i] = (instance_t)
 		{
-			.pos = { random01f(&context->randomSeed) * 2.0f - 1.0f, random01f(&context->randomSeed) * 2.0f - 1.0f, random01f(&context->randomSeed) * 2.0f - 1.0f },
-			.materialIndex = { .dataIndex = (uint16_t)randomRange(&context->randomSeed, 0, 2),.typeIndex = randomRange(&context->randomSeed, 0, 2) },
-			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_sphere, }
+			.pos = { 0.0f, 0.0f, 0.0f },
+			.materialIndex = { .dataIndex = 0,.typeIndex = material_mirror },
+			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_mesh, }
 		};
 	}
 
@@ -763,9 +824,13 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		.instances =
 		{
 			.data = instances,
-			.count = 1000
+			.count = 1
 		},
-		.renderables[renderable_sphere] = &baseSphere,
+		.renderables =
+		{
+			[renderable_sphere] = &baseSphere,
+			[renderable_mesh] = &mesh
+		},
 		.materials =
 		{
 			[material_lambert] = lamberts,
@@ -784,6 +849,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 	context->depth++;
 	if (context->depth >= renderConfig.maxDepth)
 	{
+		context->depth--;
 		return (vec3) { 0 };
 	}
 
@@ -795,8 +861,13 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 	// Do we want to handle this some other way?
 	const float ReCastBias = 0.01f;
 
-	uint32_t closestInstanceIndex = 0;
-	float closestDistance = NoRayIntersection;
+	struct
+	{
+		uint32_t instanceIndex;
+		float distance;
+		vec3 normal;
+	} closestHitInfo = { 0 };
+	closestHitInfo.distance = NoRayIntersection;
 
 	// TODO: Traverse our BVH instead - Done
 	// TODO: Gather list of candidate BVHs - Done
@@ -805,7 +876,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 	// TODO: ?!?!?
 	uint64_t intersectionStartTime = cranpl_timestamp_micro();
 
-	uint32_t candidates[1000]; // TODO: Max candidates of 100?
+	uint32_t candidates[1000]; // TODO: Max candidates of 1000?
 	uint32_t candidateCount = traverse_bvh(&scene->bvh, rayO, rayD, ReCastBias, NoRayIntersection, candidates, 1000);
 	for (uint32_t i = 0; i < candidateCount; i++)
 	{
@@ -814,10 +885,67 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 
 		vec3 instancePos = scene->instances.data[candidateIndex].pos;
 		renderable_index_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
-		assert(renderableIndex.typeIndex == renderable_sphere);
-		sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
 
-		float intersectionDistance = sphere_ray_intersection(rayO, rayD, ReCastBias, NoRayIntersection, instancePos, sphere.rad);
+		vec3 rayInstanceO = vec3_sub(rayO,instancePos);
+
+		float intersectionDistance = 0.0f;
+		switch (renderableIndex.typeIndex)
+		{
+		case renderable_sphere:
+		{
+			sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
+			intersectionDistance = sphere_ray_intersection(rayInstanceO, rayD, ReCastBias, NoRayIntersection, sphere.rad);
+
+			// TODO: Do we want to handle tie breakers somehow?
+			if (intersectionDistance < closestHitInfo.distance)
+			{
+				closestHitInfo.instanceIndex = candidateIndex;
+				closestHitInfo.distance = intersectionDistance;
+
+				vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, intersectionDistance));
+				vec3 surfacePoint = vec3_sub(intersectionPoint, instancePos);
+				closestHitInfo.normal = vec3_mulf(surfacePoint, rcp(sphere.rad));
+			}
+		}
+		break;
+		case renderable_mesh:
+		{
+			mesh_t* mesh = &((mesh_t*)scene->renderables[renderable_mesh])[renderableIndex.dataIndex];
+
+			for (uint32_t faceIndex = 0; faceIndex < mesh->data.faces.count; faceIndex++)
+			{
+				uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
+				uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
+				uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
+
+				vec3 vertA, vertB, vertC;
+				memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(vec3));
+				memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(vec3));
+				memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(vec3));
+
+				float u, v, w;
+				intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, ReCastBias, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
+				if (intersectionDistance < closestHitInfo.distance)
+				{
+					closestHitInfo.instanceIndex = candidateIndex;
+					closestHitInfo.distance = intersectionDistance;
+
+					uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
+					uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
+					uint32_t normalIndexC = mesh->data.faces.normalIndices[faceIndex * 3 + 2];
+					vec3 normalA, normalB, normalC;
+					memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(vec3));
+					memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(vec3));
+					memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(vec3));
+
+					// TOOD: Fix normal interpolation
+					closestHitInfo.normal = vec3_add(vec3_add(vec3_mulf(normalA, u), vec3_mulf(normalB, v)), vec3_mulf(normalC, w));
+				}
+			}
+		}
+		break;
+		}
+		
 		if (intersectionDistance != NoRayIntersection)
 		{
 			renderStats.bvhRealHitCount++;
@@ -826,35 +954,23 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 		{
 			renderStats.bvhRealMissCount++;
 		}
-
-		// TODO: Do we want to handle tie breakers somehow?
-		if (intersectionDistance < closestDistance)
-		{
-			closestInstanceIndex = candidateIndex;
-			closestDistance = intersectionDistance;
-		}
 	}
 	renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
 
-	if (closestDistance != NoRayIntersection)
+	if (closestHitInfo.distance != NoRayIntersection)
 	{
-		vec3 instancePos = scene->instances.data[closestInstanceIndex].pos;
-		material_index_t materialIndex = scene->instances.data[closestInstanceIndex].materialIndex;
-		renderable_index_t renderableIndex = scene->instances.data[closestInstanceIndex].renderableIndex;
-		// TODO: Still only handling spheres
-		sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
+		material_index_t materialIndex = scene->instances.data[closestHitInfo.instanceIndex].materialIndex;
+		vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, closestHitInfo.distance));
 
-		vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, closestDistance));
-		vec3 surfacePoint = vec3_sub(intersectionPoint, instancePos);
-		vec3 normal = vec3_mulf(surfacePoint, rcp(sphere.rad));
-
-		return shaders[materialIndex.typeIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
+		vec3 light = shaders[materialIndex.typeIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
 			(shader_inputs_t)
 			{
 				.surface = intersectionPoint,
-				.normal = normal,
+				.normal = closestHitInfo.normal,
 				.viewDir = rayD
 			});
+		context->depth--;
+		return light;
 	}
 
 
@@ -894,10 +1010,10 @@ int main()
 {
 	renderConfig = (render_config_t)
 	{
-		.maxDepth = UINT32_MAX,
+		.maxDepth = 99,
 		.samplesPerPixel = 10,
-		.renderWidth = 2048,
-		.renderHeight = 1024
+		.renderWidth = 1024,
+		.renderHeight = 728
 	};
 
 	render_context_t renderContext =

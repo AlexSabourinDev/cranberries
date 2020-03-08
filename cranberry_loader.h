@@ -37,5 +37,10 @@ typedef struct
 	} faces;
 } cranl_mesh_t;
 
-cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath);
+enum
+{
+	cranl_flip_yz = 0x01
+};
+
+cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags);
 void cranl_obj_free(cranl_mesh_t const* mesh);
