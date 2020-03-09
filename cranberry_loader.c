@@ -1,6 +1,8 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include "cranberry_loader.h"
 #include "cranberry_platform.h"
 
+#include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <assert.h>
@@ -16,6 +18,7 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
 	uint32_t normalCount = 0;
 	uint32_t uvCount = 0;
 	uint32_t faceCount = 0;
+	uint32_t materialCount = 0;
 	for (char const* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter++)
 	{
 		if (fileIter == fileStart || fileIter[-1] == '\n')
@@ -47,6 +50,14 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
 			case 'F':
 				faceCount++;
 				break;
+			default:
+				{
+					if(memcmp(fileIter, "usemtl", strlen("usemtl")) == 0)
+					{
+						materialCount++;
+					}
+				}
+				break;
 			}
 		}
 	}
@@ -57,12 +68,14 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
 	uint32_t* cran_restrict vertexIndices = (uint32_t* cran_restrict)malloc(sizeof(uint32_t) * faceCount * 3);
 	uint32_t* cran_restrict normalIndices = (uint32_t* cran_restrict)malloc(sizeof(uint32_t) * faceCount * 3);
 	uint32_t* cran_restrict uvIndices = (uint32_t* cran_restrict)malloc(sizeof(uint32_t) * faceCount * 3);
+	uint32_t* cran_restrict materialBoundaries = (uint32_t* cran_restrict)malloc(sizeof(uint32_t) * materialCount * 3);
+	char** cran_restrict materialNames = (char** cran_restrict)malloc(sizeof(char*) * materialCount * 3);
 
 	uint32_t vertexIndex = 0;
 	uint32_t normalIndex = 0;
 	uint32_t uvIndex = 0;
-
 	uint32_t faceIndex = 0;
+	uint32_t materialIndex = 0;
 	for (char* fileIter = fileStart; fileIter != fileEnd; fileIter++)
 	{
 		if (fileIter == fileStart || fileIter[-1] == '\n')
@@ -156,6 +169,25 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
 					}
 				}
 				break;
+			default:
+				{
+					if(memcmp(fileIter, "usemtl", strlen("usemtl")) == 0)
+					{
+						char const* materialName = fileIter + strlen("usemtl") + 1;
+						char const* materialNameEnd = strstr(materialName, " ");
+						assert(materialNameEnd != NULL);
+
+						materialBoundaries[materialIndex] = faceIndex / 3;
+
+						uint64_t nameLength = (materialNameEnd - materialName);
+						materialNames[materialIndex] = malloc(nameLength + 1);
+						memcpy(materialNames[materialIndex], materialName, nameLength);
+						materialNames[materialIndex][nameLength] = '\0';
+
+						materialIndex++;
+					}
+				}
+				break;
 			}
 		}
 	}
@@ -189,6 +221,12 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
 			.normalIndices = normalIndices,
 			.uvIndices = uvIndices,
 			.count = faceCount
+		},
+		.materials =
+		{
+			.materialBoundaries = materialBoundaries,
+			.materialNames = materialNames,
+			.count = materialCount
 		}
 	};
 }
@@ -201,4 +239,11 @@ void cranl_obj_free(cranl_mesh_t const* mesh)
 	free(mesh->faces.vertexIndices);
 	free(mesh->faces.normalIndices);
 	free(mesh->faces.uvIndices);
+	free(mesh->materials.materialBoundaries);
+
+	for (uint32_t i = 0; i < mesh->materials.count; i++)
+	{
+		free(mesh->materials.materialNames[i]);
+	}
+	free(mesh->materials.materialNames);
 }

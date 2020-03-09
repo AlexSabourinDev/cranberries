@@ -550,7 +550,7 @@ typedef struct
 typedef struct
 {
 	vec3 pos;
-	material_index_t materialIndex;
+	material_index_t* materialIndices;
 	renderable_index_t renderableIndex;
 } instance_t;
 
@@ -812,17 +812,20 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		free(leafs);
 	}
 
-
-
 	static material_lambert_t lamberts[2] = { {.color = { 0.5f, 0.8f, 1.0f } },  {.color = { 0.8f, 0.5f, 1.0f } } };
 	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
 
+	static material_index_t materialIndices[] = 
+	{
+		{.dataIndex = 0,.typeIndex = material_mirror },
+		{.dataIndex = 0,.typeIndex = material_lambert }
+	};
 	for (uint32_t i = 0; i < 1; i++)
 	{
 		instances[i] = (instance_t)
 		{
 			.pos = { 0.0f, 0.0f, 0.0f },
-			.materialIndex = { .dataIndex = 0,.typeIndex = material_lambert },
+			.materialIndices = materialIndices,
 			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_mesh, }
 		};
 	}
@@ -914,9 +917,9 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 
 	struct
 	{
-		uint32_t instanceIndex;
 		float distance;
 		vec3 normal;
+		material_index_t materialIndex;
 	} closestHitInfo = { 0 };
 	closestHitInfo.distance = NoRayIntersection;
 
@@ -936,6 +939,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 
 		vec3 instancePos = scene->instances.data[candidateIndex].pos;
 		renderable_index_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
+		material_index_t* materialIndices = scene->instances.data[candidateIndex].materialIndices;
 
 		vec3 rayInstanceO = vec3_sub(rayO,instancePos);
 
@@ -950,12 +954,12 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 			// TODO: Do we want to handle tie breakers somehow?
 			if (intersectionDistance < closestHitInfo.distance)
 			{
-				closestHitInfo.instanceIndex = candidateIndex;
 				closestHitInfo.distance = intersectionDistance;
 
 				vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, intersectionDistance));
 				vec3 surfacePoint = vec3_sub(intersectionPoint, instancePos);
 				closestHitInfo.normal = vec3_mulf(surfacePoint, rcp(sphere.rad));
+				closestHitInfo.materialIndex = materialIndices[0];
 
 				renderStats.bvhRealHitCount++;
 			}
@@ -988,7 +992,16 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 				intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, ReCastBias, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
 				if (intersectionDistance < closestHitInfo.distance)
 				{
-					closestHitInfo.instanceIndex = candidateIndex;
+					uint32_t materialIndex = 0;
+					for (; materialIndex < mesh->data.materials.count; materialIndex++)
+					{
+						if (faceIndex < mesh->data.materials.materialBoundaries[materialIndex])
+						{
+							break;
+						}
+					}
+					closestHitInfo.materialIndex = materialIndices[materialIndex - 1];
+
 					closestHitInfo.distance = intersectionDistance;
 
 					uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
@@ -1016,7 +1029,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 
 	if (closestHitInfo.distance != NoRayIntersection)
 	{
-		material_index_t materialIndex = scene->instances.data[closestHitInfo.instanceIndex].materialIndex;
+		material_index_t materialIndex = closestHitInfo.materialIndex;
 		vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, closestHitInfo.distance));
 
 		vec3 light = shaders[materialIndex.typeIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
@@ -1068,7 +1081,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 1000,
+		.samplesPerPixel = 10,
 		.renderWidth = 1024,
 		.renderHeight = 728
 	};

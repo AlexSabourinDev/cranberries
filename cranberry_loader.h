@@ -35,6 +35,13 @@ typedef struct
 		uint32_t* cran_restrict uvIndices;
 		uint32_t count;
 	} faces;
+
+	struct
+	{
+		uint32_t* cran_restrict materialBoundaries;
+		char** cran_restrict materialNames;
+		uint32_t count;
+	} materials;
 } cranl_mesh_t;
 
 enum
