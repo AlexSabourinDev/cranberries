@@ -475,6 +475,29 @@ static bool aabb_does_ray_intersect(vec3 rayO, vec3 rayD, float rayMin, float ra
 	return (tmin < tmax);*/
 }
 
+// TODO: Refine our scene description
+typedef struct
+{
+	aabb bound;
+
+	union
+	{
+		struct
+		{
+			uint32_t left;
+			uint32_t right;
+		} jumps;
+
+		uint32_t index;
+	} indices;
+	bool isLeaf;
+} bvh_node_t;
+
+typedef struct
+{
+	bvh_node_t* nodes;
+} bvh_t;
+
 typedef enum
 {
 	material_lambert,
@@ -521,6 +544,7 @@ typedef struct
 typedef struct
 {
 	cranl_mesh_t data;
+	bvh_t bvh;
 } mesh_t;
 
 typedef struct
@@ -529,29 +553,6 @@ typedef struct
 	material_index_t materialIndex;
 	renderable_index_t renderableIndex;
 } instance_t;
-
-// TODO: Refine our scene description
-typedef struct
-{
-	aabb bound;
-
-	union
-	{
-		struct
-		{
-			uint32_t left;
-			uint32_t right;
-		} jumps;
-
-		uint32_t instance;
-	} indices;
-	bool isLeaf;
-} bvh_node_t;
-
-typedef struct
-{
-	bvh_node_t* nodes;
-} bvh_t;
 
 typedef struct
 {
@@ -570,8 +571,8 @@ typedef struct
 typedef struct
 {
 	aabb bound;
-	uint32_t instanceIndex;
-} instance_aabb_pair_t;
+	uint32_t index;
+} index_aabb_pair_t;
 
 typedef struct
 {
@@ -590,10 +591,10 @@ material_shader_t* shaders[material_count] =
 	shader_mirror
 };
 
-static int instance_aabb_sort_min_x(const void* cran_restrict l, const void* cran_restrict r)
+static int index_aabb_sort_min_x(const void* cran_restrict l, const void* cran_restrict r)
 {
-	const instance_aabb_pair_t* cran_restrict left = (const instance_aabb_pair_t*)l;
-	const instance_aabb_pair_t* cran_restrict right = (const instance_aabb_pair_t*)r;
+	const index_aabb_pair_t* cran_restrict left = (const index_aabb_pair_t*)l;
+	const index_aabb_pair_t* cran_restrict right = (const index_aabb_pair_t*)r;
 
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
@@ -601,10 +602,10 @@ static int instance_aabb_sort_min_x(const void* cran_restrict l, const void* cra
 	return (int)(left->bound.min.x - right->bound.min.x);
 }
 
-static int instance_aabb_sort_min_y(const void* cran_restrict l, const void* cran_restrict r)
+static int index_aabb_sort_min_y(const void* cran_restrict l, const void* cran_restrict r)
 {
-	const instance_aabb_pair_t* cran_restrict left = (const instance_aabb_pair_t* cran_restrict)l;
-	const instance_aabb_pair_t* cran_restrict right = (const instance_aabb_pair_t* cran_restrict)r;
+	const index_aabb_pair_t* cran_restrict left = (const index_aabb_pair_t* cran_restrict)l;
+	const index_aabb_pair_t* cran_restrict right = (const index_aabb_pair_t* cran_restrict)r;
 
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
@@ -612,10 +613,10 @@ static int instance_aabb_sort_min_y(const void* cran_restrict l, const void* cra
 	return (int)(left->bound.min.y - right->bound.min.y);
 }
 
-static int instance_aabb_sort_min_z(const void* cran_restrict l, const void* cran_restrict r)
+static int index_aabb_sort_min_z(const void* cran_restrict l, const void* cran_restrict r)
 {
-	const instance_aabb_pair_t* left = (const instance_aabb_pair_t* cran_restrict)l;
-	const instance_aabb_pair_t* right = (const instance_aabb_pair_t* cran_restrict)r;
+	const index_aabb_pair_t* left = (const index_aabb_pair_t* cran_restrict)l;
+	const index_aabb_pair_t* right = (const index_aabb_pair_t* cran_restrict)r;
 
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
@@ -623,53 +624,16 @@ static int instance_aabb_sort_min_z(const void* cran_restrict l, const void* cra
 	return (int)(left->bound.min.z - right->bound.min.z);
 }
 
-static void build_bvh(render_context_t* context, ray_scene_t* scene)
+static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint32_t leafCount)
 {
-	uint32_t leafCount = scene->instances.count;
-	instance_aabb_pair_t* leafs = malloc(sizeof(instance_aabb_pair_t) * leafCount);
-	for (uint32_t i = 0; i < leafCount; i++)
-	{
-		vec3 pos = scene->instances.data[i].pos;
-		renderable_index_t renderableIndex = scene->instances.data[i].renderableIndex;
-
-		leafs[i].instanceIndex = i;
-		switch (renderableIndex.typeIndex)
-		{
-		case renderable_sphere:
-		{
-			float rad = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex].rad;
-			leafs[i].bound.min = vec3_subf(pos, rad);
-			leafs[i].bound.max = vec3_addf(pos, rad);
-		}
-		break;
-		case renderable_mesh:
-		{
-			mesh_t* mesh = ((mesh_t*)scene->renderables[renderable_mesh]);
-			for (uint32_t vert = 0; vert < mesh->data.vertices.count; vert++)
-			{
-				// TODO: type pun here
-				vec3 vertex;
-				memcpy(&vertex, mesh->data.vertices.data + vert * 3, sizeof(vec3));
-
-				leafs[i].bound.min = vec3_min(leafs[i].bound.min, vertex);
-				leafs[i].bound.max = vec3_max(leafs[i].bound.max, vertex);
-			}
-		}
-		break;
-		default:
-			assert(false);
-			break;
-		}
-	}
-
-	int(*sortFuncs[3])(const void* cran_restrict l, const void* cran_restrict r) = { instance_aabb_sort_min_x, instance_aabb_sort_min_y, instance_aabb_sort_min_z };
+	int(*sortFuncs[3])(const void* cran_restrict l, const void* cran_restrict r) = { index_aabb_sort_min_x, index_aabb_sort_min_y, index_aabb_sort_min_z };
 
 	struct
 	{
-		instance_aabb_pair_t* start;
+		index_aabb_pair_t* start;
 		uint32_t count;
 		uint32_t* parentIndex;
-	} bvhWorkgroup[1000];
+	} bvhWorkgroup[10000];
 	uint32_t workgroupQueueEnd = 1;
 
 	bvhWorkgroup[0].start = leafs;
@@ -677,10 +641,10 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 	bvhWorkgroup[0].parentIndex = NULL;
 
 	uint32_t bvhWriteIter = 0;
-	static bvh_node_t builtBVH[10000]; // Alot-ish, just for now
-	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % 1000) // TODO: constant for workgroup size
+	bvh_node_t* builtBVH = malloc(sizeof(bvh_node_t) * 100000); // TODO: Actually get an accurate size?/Release this memory.
+	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % 10000) // TODO: constant for workgroup size
 	{
-		instance_aabb_pair_t* start = bvhWorkgroup[workgroupIter].start;
+		index_aabb_pair_t* start = bvhWorkgroup[workgroupIter].start;
 		uint32_t count = bvhWorkgroup[workgroupIter].count;
 
 		if (bvhWorkgroup[workgroupIter].parentIndex != NULL)
@@ -699,7 +663,7 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 		builtBVH[bvhWriteIter] = (bvh_node_t)
 		{
 			.bound = bounds,
-			.indices.instance = start[0].instanceIndex,
+			.indices.index = start[0].index,
 			.isLeaf = isLeaf,
 		};
 
@@ -707,7 +671,7 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 		{
 			// TODO: Since we're doing all the iteration work in the sort, maybe we could also do the partitioning in the sort?
 			uint32_t axis = randomRange(&context->randomSeed, 0, 3);
-			qsort(start, count, sizeof(instance_aabb_pair_t), sortFuncs[axis]);
+			qsort(start, count, sizeof(index_aabb_pair_t), sortFuncs[axis]);
 
 			float boundsCenter = ((&bounds.max.x)[axis] - (&bounds.min.x)[axis]) * 0.5f;
 			uint32_t centerIndex = count / 2;
@@ -724,34 +688,32 @@ static void build_bvh(render_context_t* context, ray_scene_t* scene)
 			bvhWorkgroup[workgroupQueueEnd].start = start;
 			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.left;
-			workgroupQueueEnd = (workgroupQueueEnd + 1) % 1000; // TODO: Constant for workgroup size
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % 10000; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
 
 			bvhWorkgroup[workgroupQueueEnd].start = start + centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.right;
-			workgroupQueueEnd = (workgroupQueueEnd + 1) % 1000; // TODO: Constant for workgroup size
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % 10000; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
 		}
 
 		bvhWriteIter++;
-		assert(bvhWriteIter < 10000);
+		assert(bvhWriteIter < 100000);
 	}
 
-	free(leafs);
-
 	renderStats.bvhNodeCount = bvhWriteIter;
-	scene->bvh = (bvh_t)
+	return (bvh_t)
 	{
 		.nodes = builtBVH
 	};
 }
 
-static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, float rayMax, uint32_t* instanceCandidates, uint32_t maxInstances)
+static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, float rayMax, uint32_t* candidates, uint32_t maxInstances)
 {
 	uint64_t traversalStartTime = cranpl_timestamp_micro();
 
-	uint32_t instanceIter = 0;
+	uint32_t iter = 0;
 
 	uint32_t testQueue[10000]; // TODO: Currently we just allow 1000 stack pushes. Fix this!
 	uint32_t testQueueSize = 1;
@@ -771,9 +733,9 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 			{
 				renderStats.bvhLeafHitCount++;
 
-				instanceCandidates[instanceIter] = bvh->nodes[nodeIndex].indices.instance;
-				instanceIter++;
-				assert(instanceIter <= maxInstances);
+				candidates[iter] = bvh->nodes[nodeIndex].indices.index;
+				iter++;
+				assert(iter <= maxInstances);
 			}
 			else
 			{
@@ -792,7 +754,7 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 	}
 
 	renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
-	return instanceIter;
+	return iter;
 }
 
 static void generate_scene(render_context_t* context, ray_scene_t* scene)
@@ -803,7 +765,54 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	static sphere_t baseSphere = { .rad = 0.02f };
 
 	static mesh_t mesh;
-	mesh.data = cranl_obj_load("mori_knob.obj", cranl_flip_yz);
+
+	// Mesh
+	{
+		mesh.data = cranl_obj_load("mori_knob.obj", cranl_flip_yz);
+		uint32_t meshLeafCount = mesh.data.faces.count;
+		index_aabb_pair_t* leafs = malloc(sizeof(index_aabb_pair_t) * meshLeafCount);
+
+		for (uint32_t i = 0; i < meshLeafCount; i++)
+		{
+			leafs[i].index = i;
+
+			uint32_t vertIndexA = mesh.data.faces.vertexIndices[i * 3 + 0];
+			uint32_t vertIndexB = mesh.data.faces.vertexIndices[i * 3 + 1];
+			uint32_t vertIndexC = mesh.data.faces.vertexIndices[i * 3 + 2];
+
+			vec3 vertA, vertB, vertC;
+			memcpy(&vertA, mesh.data.vertices.data + vertIndexA * 3, sizeof(vec3));
+			memcpy(&vertB, mesh.data.vertices.data + vertIndexB * 3, sizeof(vec3));
+			memcpy(&vertC, mesh.data.vertices.data + vertIndexC * 3, sizeof(vec3));
+
+			leafs[i].bound.min = vec3_min(vec3_min(vertA, vertB), vertC);
+			leafs[i].bound.max = vec3_max(vec3_max(vertA, vertB), vertC);
+
+			// If our bounds have no volume, add a surrounding shell
+			if (fabsf(leafs[i].bound.max.x - leafs[i].bound.min.x) < FLT_EPSILON)
+			{
+				leafs[i].bound.max.x += 0.001f;
+				leafs[i].bound.min.x -= 0.001f;
+			}
+
+			if (fabsf(leafs[i].bound.max.y - leafs[i].bound.min.y) < FLT_EPSILON)
+			{
+				leafs[i].bound.max.y += 0.001f;
+				leafs[i].bound.min.y -= 0.001f;
+			}
+
+			if (fabsf(leafs[i].bound.max.z - leafs[i].bound.min.z) < FLT_EPSILON)
+			{
+				leafs[i].bound.max.z += 0.001f;
+				leafs[i].bound.min.z -= 0.001f;
+			}
+		}
+
+		mesh.bvh = build_bvh(context, leafs, meshLeafCount);
+		free(leafs);
+	}
+
+
 
 	static material_lambert_t lamberts[2] = { {.color = { 0.5f, 0.8f, 1.0f } },  {.color = { 0.8f, 0.5f, 1.0f } } };
 	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
@@ -813,7 +822,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		instances[i] = (instance_t)
 		{
 			.pos = { 0.0f, 0.0f, 0.0f },
-			.materialIndex = { .dataIndex = 0,.typeIndex = material_mirror },
+			.materialIndex = { .dataIndex = 0,.typeIndex = material_lambert },
 			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_mesh, }
 		};
 	}
@@ -838,7 +847,49 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		}
 	};
 
-	build_bvh(context, scene);
+	// BVH
+	{
+		uint32_t leafCount = scene->instances.count;
+		index_aabb_pair_t* leafs = malloc(sizeof(index_aabb_pair_t) * leafCount);
+		for (uint32_t i = 0; i < leafCount; i++)
+		{
+			vec3 pos = scene->instances.data[i].pos;
+			renderable_index_t renderableIndex = scene->instances.data[i].renderableIndex;
+
+			leafs[i].index = i;
+			switch (renderableIndex.typeIndex)
+			{
+			case renderable_sphere:
+			{
+				float rad = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex].rad;
+				leafs[i].bound.min = vec3_subf(pos, rad);
+				leafs[i].bound.max = vec3_addf(pos, rad);
+			}
+			break;
+			case renderable_mesh:
+			{
+				mesh_t* meshData = ((mesh_t*)scene->renderables[renderable_mesh]);
+				for (uint32_t vert = 0; vert < meshData->data.vertices.count; vert++)
+				{
+					// TODO: type pun here
+					vec3 vertex;
+					memcpy(&vertex, meshData->data.vertices.data + vert * 3, sizeof(vec3));
+
+					leafs[i].bound.min = vec3_min(leafs[i].bound.min, vec3_add(vertex, pos));
+					leafs[i].bound.max = vec3_max(leafs[i].bound.max, vec3_add(vertex, pos));
+				}
+			}
+			break;
+			default:
+				assert(false);
+				break;
+			}
+		}
+
+		scene->bvh = build_bvh(context, leafs, leafCount);
+		free(leafs);
+	}
+
 	renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
 }
 
@@ -905,6 +956,12 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 				vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, intersectionDistance));
 				vec3 surfacePoint = vec3_sub(intersectionPoint, instancePos);
 				closestHitInfo.normal = vec3_mulf(surfacePoint, rcp(sphere.rad));
+
+				renderStats.bvhRealHitCount++;
+			}
+			else
+			{
+				renderStats.bvhRealMissCount++;
 			}
 		}
 		break;
@@ -912,8 +969,12 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 		{
 			mesh_t* mesh = &((mesh_t*)scene->renderables[renderable_mesh])[renderableIndex.dataIndex];
 
-			for (uint32_t faceIndex = 0; faceIndex < mesh->data.faces.count; faceIndex++)
+			uint32_t meshCandidates[1000]; // TODO:
+			uint32_t meshCandidateCount = traverse_bvh(&mesh->bvh, rayO, rayD, ReCastBias, NoRayIntersection, meshCandidates, 1000);
+			for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
 			{
+				uint32_t faceIndex = meshCandidates[faceCandidate];
+
 				uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
 				uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
 				uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
@@ -938,21 +999,17 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 					memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(vec3));
 					memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(vec3));
 
-					// TOOD: Fix normal interpolation
 					closestHitInfo.normal = vec3_add(vec3_add(vec3_mulf(normalA, u), vec3_mulf(normalB, v)), vec3_mulf(normalC, w));
+
+					renderStats.bvhRealHitCount++;
+				}
+				else
+				{
+					renderStats.bvhRealMissCount++;
 				}
 			}
 		}
 		break;
-		}
-		
-		if (intersectionDistance != NoRayIntersection)
-		{
-			renderStats.bvhRealHitCount++;
-		}
-		else
-		{
-			renderStats.bvhRealMissCount++;
 		}
 	}
 	renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
@@ -1011,7 +1068,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 1000,
 		.renderWidth = 1024,
 		.renderHeight = 728
 	};
