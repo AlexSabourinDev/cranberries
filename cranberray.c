@@ -522,42 +522,28 @@ typedef struct
 } material_index_t;
 static_assert(material_count < 255, "Only 255 renderable types are supported.");
 
-typedef enum
-{
-	renderable_sphere,
-	renderable_mesh,
-	renderable_count
-} renderable_type_e;
-
 typedef struct
 {
 	uint16_t dataIndex;
-	renderable_type_e typeIndex;
 } renderable_index_t;
-static_assert(renderable_count < 255, "Only 255 renderable types are supported.");
-
-typedef struct
-{
-	float rad;
-} sphere_t;
 
 typedef struct
 {
 	cranl_mesh_t data;
 	bvh_t bvh;
+	material_index_t* materialIndices;
 } mesh_t;
 
 typedef struct
 {
 	vec3 pos;
-	material_index_t* materialIndices;
-	renderable_index_t renderableIndex;
+	uint32_t renderableIndex;
 } instance_t;
 
 typedef struct
 {
 	void* cran_restrict materials[material_count];
-	void* cran_restrict renderables[renderable_count];
+	mesh_t* cran_restrict renderables;
 
 	struct
 	{
@@ -761,9 +747,16 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 {
 	uint64_t startTime = cranpl_timestamp_micro();
 
-	static instance_t instances[1];
-	static sphere_t baseSphere = { .rad = 0.02f };
+	static material_lambert_t lamberts[2] = { {.color = { 0.5f, 0.8f, 1.0f } },  {.color = { 0.8f, 0.5f, 1.0f } } };
+	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
 
+	static material_index_t materialIndices[] = 
+	{
+		{.dataIndex = 0,.typeIndex = material_mirror },
+		{.dataIndex = 0,.typeIndex = material_lambert }
+	};
+
+	static instance_t instances[1];
 	static mesh_t mesh;
 
 	// Mesh
@@ -811,22 +804,14 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		mesh.bvh = build_bvh(context, leafs, meshLeafCount);
 		free(leafs);
 	}
+	mesh.materialIndices = materialIndices;
 
-	static material_lambert_t lamberts[2] = { {.color = { 0.5f, 0.8f, 1.0f } },  {.color = { 0.8f, 0.5f, 1.0f } } };
-	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
-
-	static material_index_t materialIndices[] = 
-	{
-		{.dataIndex = 0,.typeIndex = material_mirror },
-		{.dataIndex = 0,.typeIndex = material_lambert }
-	};
 	for (uint32_t i = 0; i < 1; i++)
 	{
 		instances[i] = (instance_t)
 		{
 			.pos = { 0.0f, 0.0f, 0.0f },
-			.materialIndices = materialIndices,
-			.renderableIndex = { .dataIndex = 0, .typeIndex = renderable_mesh, }
+			.renderableIndex = 0
 		};
 	}
 
@@ -838,11 +823,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			.data = instances,
 			.count = 1
 		},
-		.renderables =
-		{
-			[renderable_sphere] = &baseSphere,
-			[renderable_mesh] = &mesh
-		},
+		.renderables = &mesh,
 		.materials =
 		{
 			[material_lambert] = lamberts,
@@ -857,35 +838,19 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		for (uint32_t i = 0; i < leafCount; i++)
 		{
 			vec3 pos = scene->instances.data[i].pos;
-			renderable_index_t renderableIndex = scene->instances.data[i].renderableIndex;
+			uint32_t renderableIndex = scene->instances.data[i].renderableIndex;
 
 			leafs[i].index = i;
-			switch (renderableIndex.typeIndex)
-			{
-			case renderable_sphere:
-			{
-				float rad = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex].rad;
-				leafs[i].bound.min = vec3_subf(pos, rad);
-				leafs[i].bound.max = vec3_addf(pos, rad);
-			}
-			break;
-			case renderable_mesh:
-			{
-				mesh_t* meshData = ((mesh_t*)scene->renderables[renderable_mesh]);
-				for (uint32_t vert = 0; vert < meshData->data.vertices.count; vert++)
-				{
-					// TODO: type pun here
-					vec3 vertex;
-					memcpy(&vertex, meshData->data.vertices.data + vert * 3, sizeof(vec3));
 
-					leafs[i].bound.min = vec3_min(leafs[i].bound.min, vec3_add(vertex, pos));
-					leafs[i].bound.max = vec3_max(leafs[i].bound.max, vec3_add(vertex, pos));
-				}
-			}
-			break;
-			default:
-				assert(false);
-				break;
+			mesh_t* meshData = &scene->renderables[renderableIndex];
+			for (uint32_t vert = 0; vert < meshData->data.vertices.count; vert++)
+			{
+				// TODO: type pun here
+				vec3 vertex;
+				memcpy(&vertex, meshData->data.vertices.data + vert * 3, sizeof(vec3));
+
+				leafs[i].bound.min = vec3_min(leafs[i].bound.min, vec3_add(vertex, pos));
+				leafs[i].bound.max = vec3_max(leafs[i].bound.max, vec3_add(vertex, pos));
 			}
 		}
 
@@ -934,32 +899,58 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 	uint32_t candidateCount = traverse_bvh(&scene->bvh, rayO, rayD, ReCastBias, NoRayIntersection, candidates, 1000);
 	for (uint32_t i = 0; i < candidateCount; i++)
 	{
-		// TODO: Add support for other shapes
 		uint32_t candidateIndex = candidates[i];
 
 		vec3 instancePos = scene->instances.data[candidateIndex].pos;
-		renderable_index_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
-		material_index_t* materialIndices = scene->instances.data[candidateIndex].materialIndices;
+		uint32_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
 
-		vec3 rayInstanceO = vec3_sub(rayO,instancePos);
+		vec3 rayInstanceO = vec3_sub(rayO, instancePos);
 
 		float intersectionDistance = 0.0f;
-		switch (renderableIndex.typeIndex)
-		{
-		case renderable_sphere:
-		{
-			sphere_t sphere = ((sphere_t*)scene->renderables[renderable_sphere])[renderableIndex.dataIndex];
-			intersectionDistance = sphere_ray_intersection(rayInstanceO, rayD, ReCastBias, NoRayIntersection, sphere.rad);
 
-			// TODO: Do we want to handle tie breakers somehow?
+		mesh_t* mesh = &scene->renderables[renderableIndex];
+		material_index_t* materialIndices = mesh->materialIndices;
+
+		uint32_t meshCandidates[1000]; // TODO:
+		uint32_t meshCandidateCount = traverse_bvh(&mesh->bvh, rayO, rayD, ReCastBias, NoRayIntersection, meshCandidates, 1000);
+		for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
+		{
+			uint32_t faceIndex = meshCandidates[faceCandidate];
+
+			uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
+			uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
+			uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
+
+			vec3 vertA, vertB, vertC;
+			memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(vec3));
+			memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(vec3));
+			memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(vec3));
+
+			float u, v, w;
+			intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, ReCastBias, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
 			if (intersectionDistance < closestHitInfo.distance)
 			{
+				uint32_t materialIndex = 0;
+				for (; materialIndex < mesh->data.materials.count; materialIndex++)
+				{
+					if (faceIndex < mesh->data.materials.materialBoundaries[materialIndex])
+					{
+						break;
+					}
+				}
+				closestHitInfo.materialIndex = materialIndices[materialIndex - 1];
+
 				closestHitInfo.distance = intersectionDistance;
 
-				vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, intersectionDistance));
-				vec3 surfacePoint = vec3_sub(intersectionPoint, instancePos);
-				closestHitInfo.normal = vec3_mulf(surfacePoint, rcp(sphere.rad));
-				closestHitInfo.materialIndex = materialIndices[0];
+				uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
+				uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
+				uint32_t normalIndexC = mesh->data.faces.normalIndices[faceIndex * 3 + 2];
+				vec3 normalA, normalB, normalC;
+				memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(vec3));
+				memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(vec3));
+				memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(vec3));
+
+				closestHitInfo.normal = vec3_add(vec3_add(vec3_mulf(normalA, u), vec3_mulf(normalB, v)), vec3_mulf(normalC, w));
 
 				renderStats.bvhRealHitCount++;
 			}
@@ -967,62 +958,6 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 			{
 				renderStats.bvhRealMissCount++;
 			}
-		}
-		break;
-		case renderable_mesh:
-		{
-			mesh_t* mesh = &((mesh_t*)scene->renderables[renderable_mesh])[renderableIndex.dataIndex];
-
-			uint32_t meshCandidates[1000]; // TODO:
-			uint32_t meshCandidateCount = traverse_bvh(&mesh->bvh, rayO, rayD, ReCastBias, NoRayIntersection, meshCandidates, 1000);
-			for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
-			{
-				uint32_t faceIndex = meshCandidates[faceCandidate];
-
-				uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
-				uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
-				uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
-
-				vec3 vertA, vertB, vertC;
-				memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(vec3));
-				memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(vec3));
-				memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(vec3));
-
-				float u, v, w;
-				intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, ReCastBias, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
-				if (intersectionDistance < closestHitInfo.distance)
-				{
-					uint32_t materialIndex = 0;
-					for (; materialIndex < mesh->data.materials.count; materialIndex++)
-					{
-						if (faceIndex < mesh->data.materials.materialBoundaries[materialIndex])
-						{
-							break;
-						}
-					}
-					closestHitInfo.materialIndex = materialIndices[materialIndex - 1];
-
-					closestHitInfo.distance = intersectionDistance;
-
-					uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
-					uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
-					uint32_t normalIndexC = mesh->data.faces.normalIndices[faceIndex * 3 + 2];
-					vec3 normalA, normalB, normalC;
-					memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(vec3));
-					memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(vec3));
-					memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(vec3));
-
-					closestHitInfo.normal = vec3_add(vec3_add(vec3_mulf(normalA, u), vec3_mulf(normalB, v)), vec3_mulf(normalC, w));
-
-					renderStats.bvhRealHitCount++;
-				}
-				else
-				{
-					renderStats.bvhRealMissCount++;
-				}
-			}
-		}
-		break;
 		}
 	}
 	renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
