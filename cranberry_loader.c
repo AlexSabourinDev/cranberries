@@ -174,7 +174,9 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
 					if(memcmp(fileIter, "usemtl", strlen("usemtl")) == 0)
 					{
 						char const* materialName = fileIter + strlen("usemtl") + 1;
-						char const* materialNameEnd = strstr(materialName, " ");
+
+						char const* materialNameEnd = materialName;
+						for (; !isblank(materialNameEnd[0]); materialNameEnd++);
 						assert(materialNameEnd != NULL);
 
 						materialBoundaries[materialIndex] = faceIndex / 3;
