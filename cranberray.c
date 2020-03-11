@@ -615,8 +615,6 @@ static uint32_t aabb_does_ray_intersect_lanes(vec3 rayO, vec3 rayD, float rayMin
 // TODO: Refine our scene description
 typedef struct
 {
-	aabb bound;
-
 	union
 	{
 		struct
@@ -628,11 +626,12 @@ typedef struct
 		uint32_t index;
 	} indices;
 	bool isLeaf;
-} bvh_node_t;
+} bvh_jump_t;
 
 typedef struct
 {
-	bvh_node_t* nodes;
+	aabb* bounds;
+	bvh_jump_t* jumps;
 } bvh_t;
 
 typedef enum
@@ -764,7 +763,12 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	bvhWorkgroup[0].parentIndex = NULL;
 
 	uint32_t bvhWriteIter = 0;
-	bvh_node_t* builtBVH = malloc(sizeof(bvh_node_t) * 100000); // TODO: Actually get an accurate size?/Release this memory.
+	bvh_t builtBVH =
+	{
+		.bounds = malloc(sizeof(aabb) * 100000), // TODO: Actually get an accurate size?/Release this memory.
+		.jumps = malloc(sizeof(bvh_jump_t) * 100000),
+	};
+
 	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % 10000) // TODO: constant for workgroup size
 	{
 		index_aabb_pair_t* start = bvhWorkgroup[workgroupIter].start;
@@ -783,11 +787,11 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		}
 
 		bool isLeaf = (count == 1);
-		builtBVH[bvhWriteIter] = (bvh_node_t)
+		builtBVH.bounds[bvhWriteIter] = bounds;
+		builtBVH.jumps[bvhWriteIter] = (bvh_jump_t)
 		{
-			.bound = bounds,
 			.indices.index = start[0].index,
-			.isLeaf = isLeaf,
+			.isLeaf = isLeaf
 		};
 
 		if (!isLeaf)
@@ -810,13 +814,13 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 			bvhWorkgroup[workgroupQueueEnd].start = start;
 			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
-			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.left;
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH.jumps[bvhWriteIter].indices.jumps.left;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % 10000; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
 
 			bvhWorkgroup[workgroupQueueEnd].start = start + centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
-			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH[bvhWriteIter].indices.jumps.right;
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH.jumps[bvhWriteIter].indices.jumps.right;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % 10000; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
 		}
@@ -826,10 +830,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	}
 
 	renderStats.bvhNodeCount = bvhWriteIter;
-	return (bvh_t)
-	{
-		.nodes = builtBVH
-	};
+	return builtBVH;
 }
 
 static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, float rayMax, uint32_t* candidates, uint32_t maxInstances)
@@ -852,8 +853,8 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 		for (uint32_t i = 0; i < activeLaneCount; i++)
 		{
 			uint32_t nodeIndex = testQueue[testQueueIter + i];
-			vec3_lanes_set(&boundMins, bvh->nodes[nodeIndex].bound.min, i);
-			vec3_lanes_set(&boundMaxs, bvh->nodes[nodeIndex].bound.max, i);
+			vec3_lanes_set(&boundMins, bvh->bounds[nodeIndex].min, i);
+			vec3_lanes_set(&boundMaxs, bvh->bounds[nodeIndex].max, i);
 		}
 
 		uint32_t intersections = aabb_does_ray_intersect_lanes(rayO, rayD, rayMin, rayMax, boundMins, boundMaxs);
@@ -868,20 +869,20 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 					renderStats.bvhHitCount++;
 
 					// All our leaves are packed at the end of the 
-					bool isLeaf = bvh->nodes[nodeIndex].isLeaf;
+					bool isLeaf = bvh->jumps[nodeIndex].isLeaf;
 					if (isLeaf)
 					{
 						renderStats.bvhLeafHitCount++;
 
-						candidates[iter] = bvh->nodes[nodeIndex].indices.index;
+						candidates[iter] = bvh->jumps[nodeIndex].indices.index;
 						iter++;
 						assert(iter <= maxInstances);
 					}
 					else
 					{
-						testQueue[testQueueSize] = bvh->nodes[nodeIndex].indices.jumps.left;
+						testQueue[testQueueSize] = bvh->jumps[nodeIndex].indices.jumps.left;
 						testQueueSize++;
-						testQueue[testQueueSize] = bvh->nodes[nodeIndex].indices.jumps.right;
+						testQueue[testQueueSize] = bvh->jumps[nodeIndex].indices.jumps.right;
 						testQueueSize++;
 
 						assert(testQueueSize < 10000);
