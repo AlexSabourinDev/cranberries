@@ -30,8 +30,6 @@ struct
 	uint64_t bvhHitCount;
 	uint64_t bvhLeafHitCount;
 	uint64_t bvhMissCount;
-	uint64_t bvhRealHitCount;
-	uint64_t bvhRealMissCount;
 	uint64_t bvhNodeCount;
 	uint64_t skyboxTime;
 	uint64_t imageSpaceTime;
@@ -137,6 +135,53 @@ static float rgb_to_luminance(float r, float g, float b)
 	return (0.2126f*r + 0.7152f*g + 0.0722f*b);
 }
 
+#define lane_count 4
+__declspec(align(16)) typedef union
+{
+	float f[lane_count];
+	__m128 sse;
+} lane_t;
+
+static lane_t lane_replicate(float f)
+{
+	return (lane_t) { .sse = _mm_set_ps1(f) };
+}
+
+static lane_t lane_max(lane_t l, lane_t r)
+{
+	return (lane_t) { .sse = _mm_max_ps(l.sse, r.sse) };
+}
+
+static lane_t lane_min(lane_t l, lane_t r)
+{
+	return (lane_t) { .sse = _mm_min_ps(l.sse, r.sse) };
+}
+
+static lane_t lane_less(lane_t l, lane_t r)
+{
+	return (lane_t) { .sse = _mm_cmplt_ps(l.sse, r.sse) };
+}
+
+static lane_t lane_add(lane_t l, lane_t r)
+{
+	return (lane_t) { .sse = _mm_add_ps(l.sse, r.sse) };
+}
+
+static lane_t lane_sub(lane_t l, lane_t r)
+{
+	return (lane_t) { .sse = _mm_sub_ps(l.sse, r.sse) };
+}
+
+static lane_t lane_mul(lane_t l, lane_t r)
+{
+	return (lane_t) { .sse = _mm_mul_ps(l.sse, r.sse) };
+}
+
+static uint32_t lane_mask(lane_t v)
+{
+	return _mm_movemask_ps(v.sse);
+}
+
 // vector math
 typedef struct
 {
@@ -230,6 +275,80 @@ static vec3 vec3_rcp(vec3 v)
 	return (vec3) { conv.f[0], conv.f[1], conv.f[2] };
 
 	// return (vec3) { rcp(v.x), rcp(v.y), rcp(v.z) };
+}
+
+typedef struct
+{
+	lane_t x;
+	lane_t y;
+	lane_t z;
+} vec3_lanes_t;
+
+static vec3_lanes_t vec3_lanes_replicate(vec3 v)
+{
+	return (vec3_lanes_t)
+	{
+		.x = lane_replicate(v.x),
+		.y = lane_replicate(v.y),
+		.z = lane_replicate(v.z)
+	};
+}
+
+static void vec3_lanes_set(vec3_lanes_t* lanes, vec3 v, uint32_t i)
+{
+	lanes->x.f[i] = v.x;
+	lanes->y.f[i] = v.y;
+	lanes->z.f[i] = v.z;
+}
+
+static vec3_lanes_t vec3_lanes_add(vec3_lanes_t l, vec3_lanes_t r)
+{
+	return (vec3_lanes_t)
+	{
+		.x = lane_add(l.x, r.x),
+		.y = lane_add(l.y, r.y),
+		.z = lane_add(l.z, r.z)
+	};
+}
+
+static vec3_lanes_t vec3_lanes_sub(vec3_lanes_t l, vec3_lanes_t r)
+{
+	return (vec3_lanes_t)
+	{
+		.x = lane_sub(l.x, r.x),
+		.y = lane_sub(l.y, r.y),
+		.z = lane_sub(l.z, r.z)
+	};
+}
+
+static vec3_lanes_t vec3_lanes_mul(vec3_lanes_t l, vec3_lanes_t r)
+{
+	return (vec3_lanes_t)
+	{
+		.x = lane_mul(l.x, r.x),
+		.y = lane_mul(l.y, r.y),
+		.z = lane_mul(l.z, r.z)
+	};
+}
+
+static vec3_lanes_t vec3_lanes_min(vec3_lanes_t l, vec3_lanes_t r)
+{
+	return (vec3_lanes_t)
+	{
+		.x = lane_min(l.x, r.x),
+		.y = lane_min(l.y, r.y),
+		.z = lane_min(l.z, r.z)
+	};
+}
+
+static vec3_lanes_t vec3_lanes_max(vec3_lanes_t l, vec3_lanes_t r)
+{
+	return (vec3_lanes_t)
+	{
+		.x = lane_max(l.x, r.x),
+		.y = lane_max(l.y, r.y),
+		.z = lane_max(l.z, r.z)
+	};
 }
 
 typedef struct
@@ -475,6 +594,24 @@ static bool aabb_does_ray_intersect(vec3 rayO, vec3 rayD, float rayMin, float ra
 	return (tmin < tmax);*/
 }
 
+static uint32_t aabb_does_ray_intersect_lanes(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3_lanes_t aabbMin, vec3_lanes_t aabbMax)
+{
+	vec3_lanes_t rayOLanes = vec3_lanes_replicate(rayO);
+	vec3_lanes_t invD = vec3_lanes_replicate(vec3_rcp(rayD));
+	vec3_lanes_t t0s = vec3_lanes_mul(vec3_lanes_sub(aabbMin, rayOLanes), invD);
+	vec3_lanes_t t1s = vec3_lanes_mul(vec3_lanes_sub(aabbMax, rayOLanes), invD);
+
+	vec3_lanes_t tsmaller = vec3_lanes_min(t0s, t1s);
+	vec3_lanes_t tbigger  = vec3_lanes_max(t0s, t1s);
+ 
+	lane_t rayMinLane = lane_replicate(rayMin);
+	lane_t rayMaxLane = lane_replicate(rayMax);
+	lane_t tmin = lane_max(rayMinLane, lane_max(tsmaller.x, lane_max(tsmaller.y, tsmaller.z)));
+	lane_t tmax = lane_min(rayMaxLane, lane_min(tbigger.x, lane_min(tbigger.y, tbigger.z)));
+	lane_t result = lane_less(tmin, tmax);
+	return lane_mask(result);
+}
+
 // TODO: Refine our scene description
 typedef struct
 {
@@ -703,40 +840,66 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 
 	uint32_t testQueue[10000]; // TODO: Currently we just allow 1000 stack pushes. Fix this!
 	uint32_t testQueueSize = 1;
+	uint32_t testQueueIter = 0;
 
 	testQueue[0] = 0;
-	for (uint32_t testQueueIter = 0; (testQueueIter - testQueueSize) > 0; testQueueIter++)
+	while ((int32_t)testQueueSize - (int32_t)testQueueIter > 0)
 	{
-		uint32_t nodeIndex = testQueue[testQueueIter];
+		vec3_lanes_t boundMins = { 0 };
+		vec3_lanes_t boundMaxs = { 0 };
 
-		if (aabb_does_ray_intersect(rayO, rayD, rayMin, rayMax, bvh->nodes[nodeIndex].bound.min, bvh->nodes[nodeIndex].bound.max))
+		uint32_t activeLaneCount = min(testQueueSize - testQueueIter, lane_count);
+		for (uint32_t i = 0; i < activeLaneCount; i++)
 		{
-			renderStats.bvhHitCount++;
+			uint32_t nodeIndex = testQueue[testQueueIter + i];
+			vec3_lanes_set(&boundMins, bvh->nodes[nodeIndex].bound.min, i);
+			vec3_lanes_set(&boundMaxs, bvh->nodes[nodeIndex].bound.max, i);
+		}
 
-			// All our leaves are packed at the end of the 
-			bool isLeaf = bvh->nodes[nodeIndex].isLeaf;
-			if (isLeaf)
+		uint32_t intersections = aabb_does_ray_intersect_lanes(rayO, rayD, rayMin, rayMax, boundMins, boundMaxs);
+		if (intersections > 0)
+		{
+			for (uint32_t i = 0; i < activeLaneCount; i++)
 			{
-				renderStats.bvhLeafHitCount++;
+				if (intersections & (1 << i))
+				{
+					uint32_t nodeIndex = testQueue[testQueueIter + i];
 
-				candidates[iter] = bvh->nodes[nodeIndex].indices.index;
-				iter++;
-				assert(iter <= maxInstances);
-			}
-			else
-			{
-				testQueue[testQueueSize] = bvh->nodes[nodeIndex].indices.jumps.left;
-				testQueueSize++;
-				testQueue[testQueueSize] = bvh->nodes[nodeIndex].indices.jumps.right;
-				testQueueSize++;
+					renderStats.bvhHitCount++;
 
-				assert(testQueueSize < 10000);
+					// All our leaves are packed at the end of the 
+					bool isLeaf = bvh->nodes[nodeIndex].isLeaf;
+					if (isLeaf)
+					{
+						renderStats.bvhLeafHitCount++;
+
+						candidates[iter] = bvh->nodes[nodeIndex].indices.index;
+						iter++;
+						assert(iter <= maxInstances);
+					}
+					else
+					{
+						testQueue[testQueueSize] = bvh->nodes[nodeIndex].indices.jumps.left;
+						testQueueSize++;
+						testQueue[testQueueSize] = bvh->nodes[nodeIndex].indices.jumps.right;
+						testQueueSize++;
+
+						assert(testQueueSize < 10000);
+					}
+				}
+				else
+				{
+					renderStats.bvhMissCount++;
+				}
 			}
 		}
 		else
 		{
-			renderStats.bvhMissCount++;
+			renderStats.bvhMissCount += activeLaneCount;
 		}
+
+
+		testQueueIter += activeLaneCount;
 	}
 
 	renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
@@ -747,13 +910,15 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 {
 	uint64_t startTime = cranpl_timestamp_micro();
 
-	static material_lambert_t lamberts[2] = { {.color = { 0.5f, 0.8f, 1.0f } },  {.color = { 0.8f, 0.5f, 1.0f } } };
+	static material_lambert_t lamberts[3] = { {.color = { 0.8f, 0.9f, 1.0f } },  {.color = { 0.1f, 0.1f, 0.1f } }, {.color = {1.0f, 1.0f, 1.0f} } };
 	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
 
 	static material_index_t materialIndices[] = 
 	{
+		{.dataIndex = 1,.typeIndex = material_lambert },
 		{.dataIndex = 0,.typeIndex = material_mirror },
-		{.dataIndex = 0,.typeIndex = material_lambert }
+		{.dataIndex = 2,.typeIndex = material_lambert },
+		{.dataIndex = 0,.typeIndex = material_lambert },
 	};
 
 	static instance_t instances[1];
@@ -876,10 +1041,6 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 
 	const float NoRayIntersection = FLT_MAX;
 
-	// TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
-	// Do we want to handle this some other way?
-	const float ReCastBias = 0.01f;
-
 	struct
 	{
 		float distance;
@@ -896,7 +1057,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 	uint64_t intersectionStartTime = cranpl_timestamp_micro();
 
 	uint32_t candidates[1000]; // TODO: Max candidates of 1000?
-	uint32_t candidateCount = traverse_bvh(&scene->bvh, rayO, rayD, ReCastBias, NoRayIntersection, candidates, 1000);
+	uint32_t candidateCount = traverse_bvh(&scene->bvh, rayO, rayD, 0.0f, NoRayIntersection, candidates, 1000);
 	for (uint32_t i = 0; i < candidateCount; i++)
 	{
 		uint32_t candidateIndex = candidates[i];
@@ -912,7 +1073,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 		material_index_t* materialIndices = mesh->materialIndices;
 
 		uint32_t meshCandidates[1000]; // TODO:
-		uint32_t meshCandidateCount = traverse_bvh(&mesh->bvh, rayO, rayD, ReCastBias, NoRayIntersection, meshCandidates, 1000);
+		uint32_t meshCandidateCount = traverse_bvh(&mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, meshCandidates, 1000);
 		for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
 		{
 			uint32_t faceIndex = meshCandidates[faceCandidate];
@@ -927,7 +1088,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 			memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(vec3));
 
 			float u, v, w;
-			intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, ReCastBias, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
+			intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, 0.0f, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
 			if (intersectionDistance < closestHitInfo.distance)
 			{
 				uint32_t materialIndex = 0;
@@ -951,12 +1112,6 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 				memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(vec3));
 
 				closestHitInfo.normal = vec3_add(vec3_add(vec3_mulf(normalA, u), vec3_mulf(normalB, v)), vec3_mulf(normalC, w));
-
-				renderStats.bvhRealHitCount++;
-			}
-			else
-			{
-				renderStats.bvhRealMissCount++;
 			}
 		}
 	}
@@ -978,22 +1133,25 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 		return light;
 	}
 
-
-	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	vec3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
-	renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
+	vec3 skybox = vec3_lerp((vec3) {1.0f, 1.0f, 1.0f}, (vec3) {0.5f, 0.7f, 1.0f}, rayD.z * 0.5f + 0.5f);
+	//uint64_t skyboxStartTime = cranpl_timestamp_micro();
+	//vec3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
+	//renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
 	return skybox;
 }
 
+// TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
+// Do we want to handle this some other way?
+const float ReCastBias = 0.001f;
 static vec3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
 {
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 
 	vec3 randomDir = vec3_add(inputs.normal, sphere_random(&context->randomSeed));
 	// TODO: Consider iteration instead of recursion
-	vec3 result = cast_scene(context, scene, inputs.surface, randomDir);
+	vec3 result = cast_scene(context, scene, vec3_add(inputs.surface, vec3_mulf(inputs.normal, ReCastBias)), randomDir);
 
 	float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(randomDir), inputs.normal));
 	vec3 sceneCast = vec3_mulf(result, lambertCosine);
@@ -1006,7 +1164,7 @@ static vec3 shader_mirror(const void* cran_restrict materialData, uint32_t mater
 	material_mirror_t mirrorData = ((const material_mirror_t* cran_restrict)materialData)[materialIndex];
 
 	vec3 castDir = vec3_reflect(inputs.viewDir, inputs.normal);
-	vec3 sceneCast = cast_scene(context, scene, inputs.surface, castDir);
+	vec3 sceneCast = cast_scene(context, scene, vec3_add(inputs.surface, vec3_mulf(inputs.normal, ReCastBias)), castDir);
 
 	return vec3_mul(sceneCast, mirrorData.color);
 }
@@ -1016,9 +1174,9 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 4,
 		.renderWidth = 1024,
-		.renderHeight = 728
+		.renderHeight = 768
 	};
 
 	render_context_t renderContext =
@@ -1100,6 +1258,8 @@ int main()
 	renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime);
 
 	// Image Space Effects
+	bool enableImageSpace = false;
+	if(enableImageSpace)
 	{
 		uint64_t imageSpaceStartTime = cranpl_timestamp_micro();
 		// reinhard tonemapping
@@ -1116,6 +1276,8 @@ int main()
 		}
 		renderStats.imageSpaceTime = cranpl_timestamp_micro() - imageSpaceStartTime;
 	}
+
+	renderStats.totalTime = cranpl_timestamp_micro() - startTime;
 
 	// Convert HDR to 8 bit bitmap
 	{
@@ -1136,8 +1298,6 @@ int main()
 	free(hdrImage);
 	stbi_image_free(background);
 
-	renderStats.totalTime = cranpl_timestamp_micro() - startTime;
-
 	// Print stats
 	{
 		system("cls");
@@ -1149,8 +1309,6 @@ int main()
 		printf("\t\t\t\tBVH Tests: %" PRIu64 "\n", renderStats.bvhHitCount + renderStats.bvhMissCount);
 		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhHitCount, (float)renderStats.bvhHitCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount) * 100.0f);
 		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhLeafHitCount, (float)renderStats.bvhLeafHitCount/(float)renderStats.bvhHitCount * 100.0f);
-		printf("\t\t\t\t\t\t\tBVH Real Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhRealHitCount, (float)renderStats.bvhRealHitCount/(float)renderStats.bvhLeafHitCount * 100.0f);
-		printf("\t\t\t\t\t\t\tBVH Real Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhRealMissCount, (float)renderStats.bvhRealMissCount/(float)renderStats.bvhLeafHitCount * 100.0f);
 		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhMissCount, (float)renderStats.bvhMissCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount) * 100.0f);
 		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(renderStats.skyboxTime), (float)renderStats.skyboxTime / (float)renderStats.renderTime * 100.0f);
 		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(renderStats.imageSpaceTime), (float)renderStats.imageSpaceTime / (float)renderStats.totalTime * 100.0f);
