@@ -29,3 +29,9 @@ void cranpl_unmap_file(cranpl_file_map_t fileMap);
 uint32_t cranpl_get_core_count();
 void* cranpl_create_thread(void(*function)(void*), void* data);
 void cranpl_wait_on_thread(void* threadHandle);
+
+typedef struct
+{
+	volatile long value;
+} cranpl_atomic_int_t;
+long cranpl_atomic_increment(cranpl_atomic_int_t* atomic);

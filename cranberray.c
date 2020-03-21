@@ -1205,18 +1205,31 @@ typedef struct
 	int32_t imgHeight;
 	int32_t halfImgWidth;
 	int32_t halfImgHeight;
+
+	float xStep;
+	float yStep;
 } render_data_t;
+
+typedef struct
+{
+	int32_t xStart;
+	int32_t xEnd;
+	int32_t yStart;
+	int32_t yEnd;
+} render_chunk_t;
+
+typedef struct
+{
+	render_chunk_t* chunks;
+	int32_t count;
+	cranpl_atomic_int_t next;
+} render_queue_t;
 
 typedef struct
 {
 	render_data_t const* renderData;
 	render_context_t context;
-	int32_t xStart;
-	int32_t xEnd;
-	int32_t yStart;
-	int32_t yEnd;
-	float xStep;
-	float yStep;
+	render_queue_t* renderQueue;
 
 	float* hdrOutput;
 } thread_context_t;
@@ -1226,37 +1239,44 @@ static void render_scene_async(void* cran_restrict data)
 	thread_context_t* threadContext = (thread_context_t*)data;
 	render_context_t* renderContext = &threadContext->context;
 	render_data_t const* renderData = threadContext->renderData;
+	render_queue_t* renderQueue = threadContext->renderQueue;
 
-	// Sample our scene for every pixel in the bitmap. Do we want to upsample?
-	for (int32_t y = threadContext->yStart; y < threadContext->yEnd; y++)
+	int32_t chunkIdx = cranpl_atomic_increment(&renderQueue->next);
+	for (; chunkIdx < renderQueue->count; chunkIdx = cranpl_atomic_increment(&renderQueue->next))
 	{
-		float yOff = threadContext->yStep * (float)y;
-		for (int32_t x = threadContext->xStart; x < threadContext->xEnd; x++)
+		render_chunk_t chunk = renderQueue->chunks[chunkIdx];
+
+		// Sample our scene for every pixel in the bitmap. Do we want to upsample?
+		for (int32_t y = chunk.yStart; y < chunk.yEnd; y++)
 		{
-			float xOff = threadContext->xStep * (float)x;
-
-			vec3 sceneColor = { 0 };
-			for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
+			float yOff = renderData->yStep * (float)y;
+			for (int32_t x = chunk.xStart; x < chunk.xEnd; x++)
 			{
-				renderContext->renderStats.primaryRayCount++;
+				float xOff = renderData->xStep * (float)x;
 
-				float randX = xOff + threadContext->xStep * (random01f(&renderContext->randomSeed) * 0.5f - 0.5f);
-				float randY = yOff + threadContext->yStep * (random01f(&renderContext->randomSeed) * 0.5f - 0.5f);
+				vec3 sceneColor = { 0 };
+				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
+				{
+					renderContext->renderStats.primaryRayCount++;
 
-				// Construct our ray as a vector going from our origin to our near plane
-				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
-				vec3 rayDir = vec3_add(vec3_mulf(renderData->forward, renderData->near), vec3_add(vec3_mulf(renderData->right, randX), vec3_mulf(renderData->up, randY)));
-				// TODO: Do we want to scale for average in the loop or outside the loop?
-				// With too many SPP, the sceneColor might get too significant.
-				sceneColor = vec3_add(sceneColor, cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir));
+					float randX = xOff + renderData->xStep * (random01f(&renderContext->randomSeed) * 0.5f - 0.5f);
+					float randY = yOff + renderData->yStep * (random01f(&renderContext->randomSeed) * 0.5f - 0.5f);
+
+					// Construct our ray as a vector going from our origin to our near plane
+					// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
+					vec3 rayDir = vec3_add(vec3_mulf(renderData->forward, renderData->near), vec3_add(vec3_mulf(renderData->right, randX), vec3_mulf(renderData->up, randY)));
+					// TODO: Do we want to scale for average in the loop or outside the loop?
+					// With too many SPP, the sceneColor might get too significant.
+					sceneColor = vec3_add(sceneColor, cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir));
+				}
+				sceneColor = vec3_mulf(sceneColor, rcp((float)renderConfig.samplesPerPixel));
+
+				int32_t imgIdx = ((y + renderData->halfImgHeight) * renderData->imgWidth + (x + renderData->halfImgWidth)) * renderData->imgStride;
+				threadContext->hdrOutput[imgIdx + 0] = sceneColor.x;
+				threadContext->hdrOutput[imgIdx + 1] = sceneColor.y;
+				threadContext->hdrOutput[imgIdx + 2] = sceneColor.z;
+				threadContext->hdrOutput[imgIdx + 3] = 1.0f;
 			}
-			sceneColor = vec3_mulf(sceneColor, rcp((float)renderConfig.samplesPerPixel));
-
-			int32_t imgIdx = ((y + renderData->halfImgHeight) * renderData->imgWidth + (x + renderData->halfImgWidth)) * renderData->imgStride;
-			threadContext->hdrOutput[imgIdx + 0] = sceneColor.x;
-			threadContext->hdrOutput[imgIdx + 1] = sceneColor.y;
-			threadContext->hdrOutput[imgIdx + 2] = sceneColor.z;
-			threadContext->hdrOutput[imgIdx + 3] = 1.0f;
 		}
 	}
 }
@@ -1293,6 +1313,8 @@ int main()
 	mainRenderData.near = 1.0f;
 	float nearHeight = 1.0f;
 	float nearWidth = nearHeight * (float)mainRenderData.imgWidth / (float)mainRenderData.imgHeight;
+	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
+	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
 	mainRenderData.origin = (vec3){ 0.0f, -2.0f, 0.0f };
 	mainRenderData.forward = (vec3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
@@ -1303,7 +1325,22 @@ int main()
 
 	uint64_t renderStartTime = cranpl_timestamp_micro();
 
-	uint32_t imgHeightChunk = mainRenderData.imgHeight / cranpl_get_core_count();
+	static render_queue_t mainRenderQueue = { 0 };
+	{
+		mainRenderQueue.chunks = malloc(sizeof(render_chunk_t) * mainRenderData.imgHeight);
+		for (int32_t i = 0; i < mainRenderData.imgHeight; i++)
+		{
+			mainRenderQueue.chunks[i] = (render_chunk_t)
+			{
+				.xStart = -mainRenderData.halfImgWidth,
+				.xEnd = mainRenderData.halfImgWidth,
+				.yStart = -mainRenderData.halfImgHeight + i,
+				.yEnd = -mainRenderData.halfImgHeight + i + 1
+			};
+		}
+		mainRenderQueue.count = mainRenderData.imgHeight;
+	}
+
 	thread_context_t* threadContexts = malloc(sizeof(thread_context_t) * cranpl_get_core_count());
 	void** threadHandles = malloc(sizeof(void*) * cranpl_get_core_count() - 1);
 	for (uint32_t i = 0; i < cranpl_get_core_count() - 1; i++)
@@ -1311,12 +1348,7 @@ int main()
 		threadContexts[i] = (thread_context_t)
 		{
 			.renderData = &mainRenderData,
-			.xStart = -mainRenderData.halfImgWidth,
-			.xEnd = mainRenderData.halfImgWidth,
-			.yStart = -mainRenderData.halfImgHeight + imgHeightChunk * i,
-			.yEnd = -mainRenderData.halfImgHeight + imgHeightChunk * (i + 1),
-			.xStep = nearWidth / (float)mainRenderData.imgWidth,
-			.yStep = nearHeight / (float)mainRenderData.imgHeight,
+			.renderQueue = &mainRenderQueue,
 			.context = 
 			{
 				.randomSeed = i + 321
@@ -1331,12 +1363,7 @@ int main()
 	threadContexts[cranpl_get_core_count() - 1] = (thread_context_t)
 	{
 		.renderData = &mainRenderData,
-		.xStart = -mainRenderData.halfImgWidth,
-		.xEnd = mainRenderData.halfImgWidth,
-		.yStart = -mainRenderData.halfImgHeight + imgHeightChunk * (cranpl_get_core_count() - 1),
-		.yEnd = mainRenderData.halfImgHeight,
-		.xStep = nearWidth / (float)mainRenderData.imgWidth,
-		.yStep = nearHeight / (float)mainRenderData.imgHeight,
+		.renderQueue = &mainRenderQueue,
 		.context = 
 		{
 			.randomSeed = cranpl_get_core_count() - 1
