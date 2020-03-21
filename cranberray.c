@@ -38,7 +38,7 @@ typedef struct
 static void merge_render_stats(render_stats_t* base, render_stats_t const* add)
 {
 	base->rayCount += add->rayCount;
-	base->primaryRayCount += add->rayCount;
+	base->primaryRayCount += add->primaryRayCount;
 	base->totalTime += add->totalTime;
 	base->sceneGenerationTime += add->sceneGenerationTime;
 	base->renderTime += add->renderTime;
@@ -1205,11 +1205,11 @@ typedef struct
 	int32_t imgHeight;
 	int32_t halfImgWidth;
 	int32_t halfImgHeight;
-} render_view_t;
+} render_data_t;
 
 typedef struct
 {
-	render_view_t const* renderView;
+	render_data_t const* renderData;
 	render_context_t context;
 	int32_t xStart;
 	int32_t xEnd;
@@ -1225,7 +1225,7 @@ static void render_scene_async(void* cran_restrict data)
 {
 	thread_context_t* threadContext = (thread_context_t*)data;
 	render_context_t* renderContext = &threadContext->context;
-	render_view_t const* renderView = threadContext->renderView;
+	render_data_t const* renderData = threadContext->renderData;
 
 	// Sample our scene for every pixel in the bitmap. Do we want to upsample?
 	for (int32_t y = threadContext->yStart; y < threadContext->yEnd; y++)
@@ -1245,14 +1245,14 @@ static void render_scene_async(void* cran_restrict data)
 
 				// Construct our ray as a vector going from our origin to our near plane
 				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
-				vec3 rayDir = vec3_add(vec3_mulf(renderView->forward, renderView->near), vec3_add(vec3_mulf(renderView->right, randX), vec3_mulf(renderView->up, randY)));
+				vec3 rayDir = vec3_add(vec3_mulf(renderData->forward, renderData->near), vec3_add(vec3_mulf(renderData->right, randX), vec3_mulf(renderData->up, randY)));
 				// TODO: Do we want to scale for average in the loop or outside the loop?
 				// With too many SPP, the sceneColor might get too significant.
-				sceneColor = vec3_add(sceneColor, cast_scene(renderContext, &renderView->scene, renderView->origin, rayDir));
+				sceneColor = vec3_add(sceneColor, cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir));
 			}
 			sceneColor = vec3_mulf(sceneColor, rcp((float)renderConfig.samplesPerPixel));
 
-			int32_t imgIdx = ((y + renderView->halfImgHeight) * renderView->imgWidth + (x + renderView->halfImgWidth)) * renderView->imgStride;
+			int32_t imgIdx = ((y + renderData->halfImgHeight) * renderData->imgWidth + (x + renderData->halfImgWidth)) * renderData->imgStride;
 			threadContext->hdrOutput[imgIdx + 0] = sceneColor.x;
 			threadContext->hdrOutput[imgIdx + 1] = sceneColor.y;
 			threadContext->hdrOutput[imgIdx + 2] = sceneColor.z;
@@ -1271,7 +1271,7 @@ int main()
 		.renderHeight = 768
 	};
 
-	static render_view_t mainRenderView;
+	static render_data_t mainRenderData;
 	uint64_t startTime = cranpl_timestamp_micro();
 
 	background = stbi_loadf("background_4k.hdr", &backgroundWidth, &backgroundHeight, &backgroundStride, 0);
@@ -1280,43 +1280,43 @@ int main()
 	{
 		.randomSeed = 143324
 	};
-	generate_scene(&mainRenderContext, &mainRenderView.scene);
+	generate_scene(&mainRenderContext, &mainRenderData.scene);
 
-	mainRenderView.imgWidth = renderConfig.renderWidth;
-	mainRenderView.imgHeight = renderConfig.renderHeight;
-	mainRenderView.imgStride = 4;
-	mainRenderView.halfImgWidth = mainRenderView.imgWidth / 2;
-	mainRenderView.halfImgHeight = mainRenderView.imgHeight / 2;
+	mainRenderData.imgWidth = renderConfig.renderWidth;
+	mainRenderData.imgHeight = renderConfig.renderHeight;
+	mainRenderData.imgStride = 4;
+	mainRenderData.halfImgWidth = mainRenderData.imgWidth / 2;
+	mainRenderData.halfImgHeight = mainRenderData.imgHeight / 2;
 
 	// TODO: How do we want to express our camera?
 	// Currently simply using the near plane.
-	mainRenderView.near = 1.0f;
+	mainRenderData.near = 1.0f;
 	float nearHeight = 1.0f;
-	float nearWidth = nearHeight * (float)mainRenderView.imgWidth / (float)mainRenderView.imgHeight;
+	float nearWidth = nearHeight * (float)mainRenderData.imgWidth / (float)mainRenderData.imgHeight;
 
-	mainRenderView.origin = (vec3){ 0.0f, -2.0f, 0.0f };
-	mainRenderView.forward = (vec3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
-	mainRenderView.right = (vec3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
-	mainRenderView.up = (vec3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
+	mainRenderData.origin = (vec3){ 0.0f, -2.0f, 0.0f };
+	mainRenderData.forward = (vec3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
+	mainRenderData.right = (vec3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
+	mainRenderData.up = (vec3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
 
-	float* cran_restrict hdrImage = malloc(mainRenderView.imgWidth * mainRenderView.imgHeight * mainRenderView.imgStride * sizeof(float));
+	float* cran_restrict hdrImage = malloc(mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride * sizeof(float));
 
 	uint64_t renderStartTime = cranpl_timestamp_micro();
 
-	uint32_t imgHeightChunk = mainRenderView.imgHeight / cranpl_get_core_count();
+	uint32_t imgHeightChunk = mainRenderData.imgHeight / cranpl_get_core_count();
 	thread_context_t* threadContexts = malloc(sizeof(thread_context_t) * cranpl_get_core_count());
 	void** threadHandles = malloc(sizeof(void*) * cranpl_get_core_count() - 1);
 	for (uint32_t i = 0; i < cranpl_get_core_count() - 1; i++)
 	{
 		threadContexts[i] = (thread_context_t)
 		{
-			.renderView = &mainRenderView,
-			.xStart = -mainRenderView.halfImgWidth,
-			.xEnd = mainRenderView.halfImgWidth,
-			.yStart = -mainRenderView.halfImgHeight + imgHeightChunk * i,
-			.yEnd = -mainRenderView.halfImgHeight + imgHeightChunk * (i + 1),
-			.xStep = nearWidth / (float)mainRenderView.imgWidth,
-			.yStep = nearHeight / (float)mainRenderView.imgHeight,
+			.renderData = &mainRenderData,
+			.xStart = -mainRenderData.halfImgWidth,
+			.xEnd = mainRenderData.halfImgWidth,
+			.yStart = -mainRenderData.halfImgHeight + imgHeightChunk * i,
+			.yEnd = -mainRenderData.halfImgHeight + imgHeightChunk * (i + 1),
+			.xStep = nearWidth / (float)mainRenderData.imgWidth,
+			.yStep = nearHeight / (float)mainRenderData.imgHeight,
 			.context = 
 			{
 				.randomSeed = i + 321
@@ -1330,13 +1330,13 @@ int main()
 	// Start a render on our main thread as well.
 	threadContexts[cranpl_get_core_count() - 1] = (thread_context_t)
 	{
-		.renderView = &mainRenderView,
-		.xStart = -mainRenderView.halfImgWidth,
-		.xEnd = mainRenderView.halfImgWidth,
-		.yStart = -mainRenderView.halfImgHeight + imgHeightChunk * (cranpl_get_core_count() - 1),
-		.yEnd = mainRenderView.halfImgHeight,
-		.xStep = nearWidth / (float)mainRenderView.imgWidth,
-		.yStep = nearHeight / (float)mainRenderView.imgHeight,
+		.renderData = &mainRenderData,
+		.xStart = -mainRenderData.halfImgWidth,
+		.xEnd = mainRenderData.halfImgWidth,
+		.yStart = -mainRenderData.halfImgHeight + imgHeightChunk * (cranpl_get_core_count() - 1),
+		.yEnd = mainRenderData.halfImgHeight,
+		.xStep = nearWidth / (float)mainRenderData.imgWidth,
+		.yStep = nearHeight / (float)mainRenderData.imgHeight,
 		.context = 
 		{
 			.randomSeed = cranpl_get_core_count() - 1
@@ -1358,11 +1358,11 @@ int main()
 	{
 		uint64_t imageSpaceStartTime = cranpl_timestamp_micro();
 		// reinhard tonemapping
-		for (int32_t y = 0; y < mainRenderView.imgHeight; y++)
+		for (int32_t y = 0; y < mainRenderData.imgHeight; y++)
 		{
-			for (int32_t x = 0; x < mainRenderView.imgWidth; x++)
+			for (int32_t x = 0; x < mainRenderData.imgWidth; x++)
 			{
-				int32_t readIndex = (y * mainRenderView.imgWidth + x) * mainRenderView.imgStride;
+				int32_t readIndex = (y * mainRenderData.imgWidth + x) * mainRenderData.imgStride;
 
 				hdrImage[readIndex + 0] = hdrImage[readIndex + 0] / (hdrImage[readIndex + 0] + 1.0f);
 				hdrImage[readIndex + 1] = hdrImage[readIndex + 1] / (hdrImage[readIndex + 1] + 1.0f);
@@ -1376,8 +1376,8 @@ int main()
 
 	// Convert HDR to 8 bit bitmap
 	{
-		uint8_t* cran_restrict bitmap = malloc(mainRenderView.imgWidth * mainRenderView.imgHeight * mainRenderView.imgStride);
-		for (int32_t i = 0; i < mainRenderView.imgWidth * mainRenderView.imgHeight * mainRenderView.imgStride; i+=mainRenderView.imgStride)
+		uint8_t* cran_restrict bitmap = malloc(mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride);
+		for (int32_t i = 0; i < mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride; i+=mainRenderData.imgStride)
 		{
 			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 2]));
 			bitmap[i + 1] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 1]));
@@ -1385,7 +1385,7 @@ int main()
 			bitmap[i + 3] = (uint8_t)(255.99f * hdrImage[i + 3]);
 		}
 
-		cranpl_write_bmp("render.bmp", bitmap, mainRenderView.imgWidth, mainRenderView.imgHeight);
+		cranpl_write_bmp("render.bmp", bitmap, mainRenderData.imgWidth, mainRenderData.imgHeight);
 		system("render.bmp");
 		free(bitmap);
 	}
@@ -1404,6 +1404,8 @@ int main()
 		printf("Total Time: %f\n", micro_to_seconds(mainRenderContext.renderStats.totalTime));
 		printf("\tScene Generation Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.sceneGenerationTime), (float)mainRenderContext.renderStats.sceneGenerationTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
 		printf("\tRender Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.renderTime), (float)mainRenderContext.renderStats.renderTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
+		printf("----------\n");
+		printf("Accumulated Threading Data\n");
 		printf("\t\tIntersection Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.intersectionTime), (float)mainRenderContext.renderStats.intersectionTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
 		printf("\t\t\tBVH Traversal Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.bvhTraversalTime), (float)mainRenderContext.renderStats.bvhTraversalTime / (float)mainRenderContext.renderStats.intersectionTime * 100.0f);
 		printf("\t\t\t\tBVH Tests: %" PRIu64 "\n", mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount);
@@ -1411,6 +1413,7 @@ int main()
 		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%f%%]\n", mainRenderContext.renderStats.bvhLeafHitCount, (float)mainRenderContext.renderStats.bvhLeafHitCount/(float)mainRenderContext.renderStats.bvhHitCount * 100.0f);
 		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%f%%]\n", mainRenderContext.renderStats.bvhMissCount, (float)mainRenderContext.renderStats.bvhMissCount/(float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
 		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.skyboxTime), (float)mainRenderContext.renderStats.skyboxTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
+		printf("----------\n");
 		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.imageSpaceTime), (float)mainRenderContext.renderStats.imageSpaceTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
 		printf("\n");
 		printf("MRays/seconds: %f\n", (float)mainRenderContext.renderStats.rayCount / micro_to_seconds(mainRenderContext.renderStats.renderTime) / 1000000.0f);
