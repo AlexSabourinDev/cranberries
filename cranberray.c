@@ -83,28 +83,28 @@ const float RTAO = 1.0f / (_PI_VAL * 2.0f);
 // float math
 static float rcp(float f)
 {
-	// return 1.0f / f;
+	return 1.0f / f;
 
-	union
+	/*union
 	{
 		__m128 sse;
 		float f[4];
 	} conv;
 	conv.sse = _mm_rcp_ss(_mm_set_ss(f));
-	return conv.f[0];
+	return conv.f[0];*/
 }
 
 static float rsqrt(float f)
 {
-	// return 1.0f / sqrtf(f);
+	return 1.0f / sqrtf(f);
 
-	union
+	/*union
 	{
 		__m128 sse;
 		float f[4];
 	} conv;
 	conv.sse = _mm_rsqrt_ss(_mm_set_ss(f));
-	return conv.f[0];
+	return conv.f[0];*/
 }
 
 static bool quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2)
@@ -284,16 +284,16 @@ static vec3 vec3_max(vec3 v, vec3 m)
 
 static vec3 vec3_rcp(vec3 v)
 {
-	union
+	return (vec3) { rcp(v.x), rcp(v.y), rcp(v.z) };
+
+	/*union
 	{
 		__m128 sse;
 		float f[4];
 	} conv;
 
 	conv.sse = _mm_rcp_ps(_mm_loadu_ps(&v.x));
-	return (vec3) { conv.f[0], conv.f[1], conv.f[2] };
-
-	// return (vec3) { rcp(v.x), rcp(v.y), rcp(v.z) };
+	return (vec3) { conv.f[0], conv.f[1], conv.f[2] };*/
 }
 
 typedef struct
@@ -973,9 +973,24 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			leafs[i].bound.min = vec3_min(vec3_min(vertA, vertB), vertC);
 			leafs[i].bound.max = vec3_max(vec3_max(vertA, vertB), vertC);
 
-			const float padding = 0.0001f;
-			leafs[i].bound.min = vec3_sub(leafs[i].bound.min, (vec3) { padding, padding, padding });
-			leafs[i].bound.max = vec3_add(leafs[i].bound.max, (vec3) { padding, padding, padding });
+			// If our bounds have no volume, add a surrounding shell
+			if (fabsf(leafs[i].bound.max.x - leafs[i].bound.min.x) < FLT_EPSILON)
+			{
+				leafs[i].bound.max.x += 0.001f;
+				leafs[i].bound.min.x -= 0.001f;
+			}
+
+			if (fabsf(leafs[i].bound.max.y - leafs[i].bound.min.y) < FLT_EPSILON)
+			{
+				leafs[i].bound.max.y += 0.001f;
+				leafs[i].bound.min.y -= 0.001f;
+			}
+
+			if (fabsf(leafs[i].bound.max.z - leafs[i].bound.min.z) < FLT_EPSILON)
+			{
+				leafs[i].bound.max.z += 0.001f;
+				leafs[i].bound.min.z -= 0.001f;
+			}
 		}
 
 		mesh.bvh = build_bvh(context, leafs, meshLeafCount);
@@ -1029,9 +1044,6 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 				leafs[i].bound.min = vec3_min(leafs[i].bound.min, vec3_add(vertex, pos));
 				leafs[i].bound.max = vec3_max(leafs[i].bound.max, vec3_add(vertex, pos));
 			}
-			const float padding = 0.0001f;
-			leafs[i].bound.min = vec3_sub(leafs[i].bound.min, (vec3) { padding, padding, padding });
-			leafs[i].bound.max = vec3_add(leafs[i].bound.max, (vec3) { padding, padding, padding });
 		}
 
 		scene->bvh = build_bvh(context, leafs, leafCount);
@@ -1299,7 +1311,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 100,
+		.samplesPerPixel = 10,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
