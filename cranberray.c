@@ -45,6 +45,7 @@ static void merge_render_stats(render_stats_t* base, render_stats_t const* add)
 	base->intersectionTime += add->intersectionTime;
 	base->bvhTraversalTime += add->bvhTraversalTime;
 	base->bvhHitCount += add->bvhHitCount;
+	base->bvhLeafHitCount += add->bvhLeafHitCount;
 	base->bvhMissCount += add->bvhMissCount;
 	base->bvhNodeCount += add->bvhNodeCount;
 	base->skyboxTime += add->skyboxTime;
@@ -1231,7 +1232,7 @@ typedef struct
 	render_context_t context;
 	render_queue_t* renderQueue;
 
-	float* hdrOutput;
+	float* cran_restrict hdrOutput;
 } thread_context_t;
 
 static void render_scene_async(void* cran_restrict data)
