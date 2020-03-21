@@ -1178,8 +1178,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	context->depth--;
 	return (ray_hit_t)
 	{
-		.light = skybox,
-		.surface = vec3_add(rayO, (vec3) { 0.01f, 0.01f, 0.01f })
+		.light = vec3_mulf(skybox, 10000.0f),
+		.surface = vec3_add(rayO, vec3_mulf(rayD, 1000.0f))
 	};
 }
 
@@ -1311,7 +1311,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 100,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -1405,7 +1405,7 @@ int main()
 	mainRenderContext.renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime);
 
 	// Image Space Effects
-	bool enableImageSpace = false;
+	bool enableImageSpace = true;
 	if(enableImageSpace)
 	{
 		uint64_t imageSpaceStartTime = cranpl_timestamp_micro();
