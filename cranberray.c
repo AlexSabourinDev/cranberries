@@ -1157,7 +1157,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t const* scene, vec3
 	vec3 skybox = vec3_lerp((vec3) {1.0f, 1.0f, 1.0f}, (vec3) {0.5f, 0.7f, 1.0f}, rayD.z * 0.5f + 0.5f);
 	//uint64_t skyboxStartTime = cranpl_timestamp_micro();
 	//vec3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
-	//renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
+	//context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
 	return skybox;
@@ -1417,6 +1417,9 @@ int main()
 		free(bitmap);
 	}
 
+	free(threadContexts);
+	free(threadHandles);
+	free(mainRenderQueue.chunks);
 	free(hdrImage);
 	stbi_image_free(background);
 
