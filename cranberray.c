@@ -631,6 +631,11 @@ static uint32_t aabb_does_ray_intersect_lanes(vec3 rayO, vec3 rayD, float rayMin
 	return lane_mask(result);
 }
 
+float light_attenuation(vec3 l, vec3 r)
+{
+	return rcp(1.0f + vec3_length(vec3_sub(l, r)));
+}
+
 // TODO: Refine our scene description
 typedef struct
 {
@@ -968,24 +973,9 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			leafs[i].bound.min = vec3_min(vec3_min(vertA, vertB), vertC);
 			leafs[i].bound.max = vec3_max(vec3_max(vertA, vertB), vertC);
 
-			// If our bounds have no volume, add a surrounding shell
-			if (fabsf(leafs[i].bound.max.x - leafs[i].bound.min.x) < FLT_EPSILON)
-			{
-				leafs[i].bound.max.x += 0.001f;
-				leafs[i].bound.min.x -= 0.001f;
-			}
-
-			if (fabsf(leafs[i].bound.max.y - leafs[i].bound.min.y) < FLT_EPSILON)
-			{
-				leafs[i].bound.max.y += 0.001f;
-				leafs[i].bound.min.y -= 0.001f;
-			}
-
-			if (fabsf(leafs[i].bound.max.z - leafs[i].bound.min.z) < FLT_EPSILON)
-			{
-				leafs[i].bound.max.z += 0.001f;
-				leafs[i].bound.min.z -= 0.001f;
-			}
+			const float padding = 0.0001f;
+			leafs[i].bound.min = vec3_sub(leafs[i].bound.min, (vec3) { padding, padding, padding });
+			leafs[i].bound.max = vec3_add(leafs[i].bound.max, (vec3) { padding, padding, padding });
 		}
 
 		mesh.bvh = build_bvh(context, leafs, meshLeafCount);
@@ -1039,6 +1029,9 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 				leafs[i].bound.min = vec3_min(leafs[i].bound.min, vec3_add(vertex, pos));
 				leafs[i].bound.max = vec3_max(leafs[i].bound.max, vec3_add(vertex, pos));
 			}
+			const float padding = 0.0001f;
+			leafs[i].bound.min = vec3_sub(leafs[i].bound.min, (vec3) { padding, padding, padding });
+			leafs[i].bound.max = vec3_add(leafs[i].bound.max, (vec3) { padding, padding, padding });
 		}
 
 		scene->bvh = build_bvh(context, leafs, leafCount);
@@ -1048,15 +1041,21 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	context->renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
 }
 
+typedef struct
+{
+	vec3 light;
+	vec3 surface;
+} ray_hit_t;
+
 int backgroundWidth, backgroundHeight, backgroundStride;
 float* cran_restrict background;
-static vec3 cast_scene(render_context_t* context, ray_scene_t const* scene, vec3 rayO, vec3 rayD)
+static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, vec3 rayO, vec3 rayD)
 {
 	context->depth++;
 	if (context->depth >= renderConfig.maxDepth)
 	{
 		context->depth--;
-		return (vec3) { 0 };
+		return (ray_hit_t) { 0 };
 	}
 
 	context->renderStats.rayCount++;
@@ -1152,7 +1151,11 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t const* scene, vec3
 				.viewDir = rayD
 			});
 		context->depth--;
-		return light;
+		return (ray_hit_t)
+		{
+			.light = light,
+			.surface = intersectionPoint
+		};
 	}
 
 	vec3 skybox = vec3_lerp((vec3) {1.0f, 1.0f, 1.0f}, (vec3) {0.5f, 0.7f, 1.0f}, rayD.z * 0.5f + 0.5f);
@@ -1161,22 +1164,26 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t const* scene, vec3
 	//context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
-	return skybox;
+	return (ray_hit_t)
+	{
+		.light = skybox,
+		.surface = vec3_add(rayO, (vec3) { 0.01f, 0.01f, 0.01f })
+	};
 }
 
 // TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
 // Do we want to handle this some other way?
-const float ReCastBias = 0.001f;
+const float ReCastBias = 0.0001f;
 static vec3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 
-	vec3 randomDir = vec3_add(inputs.normal, sphere_random(&context->randomSeed));
+	vec3 castDir = vec3_add(inputs.normal, sphere_random(&context->randomSeed));
 	// TODO: Consider iteration instead of recursion
-	vec3 result = cast_scene(context, scene, vec3_add(inputs.surface, vec3_mulf(inputs.normal, ReCastBias)), randomDir);
+	ray_hit_t result = cast_scene(context, scene, vec3_add(inputs.surface, vec3_mulf(inputs.normal, ReCastBias)), castDir);
 
-	float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(randomDir), inputs.normal));
-	vec3 sceneCast = vec3_mulf(result, lambertCosine);
+	float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(castDir), inputs.normal));
+	vec3 sceneCast = vec3_mulf(vec3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
 
 	return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
 }
@@ -1186,7 +1193,10 @@ static vec3 shader_mirror(const void* cran_restrict materialData, uint32_t mater
 	material_mirror_t mirrorData = ((const material_mirror_t* cran_restrict)materialData)[materialIndex];
 
 	vec3 castDir = vec3_reflect(inputs.viewDir, inputs.normal);
-	vec3 sceneCast = cast_scene(context, scene, vec3_add(inputs.surface, vec3_mulf(inputs.normal, ReCastBias)), castDir);
+	ray_hit_t result = cast_scene(context, scene, vec3_add(inputs.surface, vec3_mulf(inputs.normal, ReCastBias)), castDir);
+
+	float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(castDir), inputs.normal));
+	vec3 sceneCast = vec3_mulf(vec3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
 
 	return vec3_mul(sceneCast, mirrorData.color);
 }
@@ -1268,7 +1278,9 @@ static void render_scene_async(void* cran_restrict data)
 					vec3 rayDir = vec3_add(vec3_mulf(renderData->forward, renderData->near), vec3_add(vec3_mulf(renderData->right, randX), vec3_mulf(renderData->up, randY)));
 					// TODO: Do we want to scale for average in the loop or outside the loop?
 					// With too many SPP, the sceneColor might get too significant.
-					sceneColor = vec3_add(sceneColor, cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir));
+
+					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir);
+					sceneColor = vec3_add(sceneColor, vec3_mulf(hit.light, light_attenuation(hit.surface, renderData->origin)));
 				}
 				sceneColor = vec3_mulf(sceneColor, rcp((float)renderConfig.samplesPerPixel));
 
@@ -1287,7 +1299,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 100,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
