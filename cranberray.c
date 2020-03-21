@@ -18,7 +18,7 @@
 #include "cranberry_platform.h"
 #include "cranberry_loader.h"
 
-struct
+typedef struct
 {
 	uint64_t rayCount; // TODO: only reference through atomics
 	uint64_t primaryRayCount;
@@ -33,7 +33,23 @@ struct
 	uint64_t bvhNodeCount;
 	uint64_t skyboxTime;
 	uint64_t imageSpaceTime;
-} renderStats;
+} render_stats_t;
+
+static void merge_render_stats(render_stats_t* base, render_stats_t const* add)
+{
+	base->rayCount += add->rayCount;
+	base->primaryRayCount += add->rayCount;
+	base->totalTime += add->totalTime;
+	base->sceneGenerationTime += add->sceneGenerationTime;
+	base->renderTime += add->renderTime;
+	base->intersectionTime += add->intersectionTime;
+	base->bvhTraversalTime += add->bvhTraversalTime;
+	base->bvhHitCount += add->bvhHitCount;
+	base->bvhMissCount += add->bvhMissCount;
+	base->bvhNodeCount += add->bvhNodeCount;
+	base->skyboxTime += add->skyboxTime;
+	base->imageSpaceTime += add->imageSpaceTime;
+}
 
 typedef struct
 {
@@ -48,6 +64,8 @@ typedef struct
 {
 	int32_t randomSeed;
 	uint32_t depth;
+
+	render_stats_t renderStats;
 } render_context_t;
 
 static float micro_to_seconds(uint64_t time)
@@ -703,7 +721,7 @@ typedef struct
 	vec3 viewDir;
 } shader_inputs_t;
 
-typedef vec3(material_shader_t)(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs);
+typedef vec3(material_shader_t)(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs);
 
 static material_shader_t shader_lambert;
 static material_shader_t shader_mirror;
@@ -829,17 +847,18 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		assert(bvhWriteIter < 100000);
 	}
 
-	renderStats.bvhNodeCount = bvhWriteIter;
+	context->renderStats.bvhNodeCount = bvhWriteIter;
 	return builtBVH;
 }
 
-static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, float rayMax, uint32_t* candidates, uint32_t maxInstances)
+static uint32_t traverse_bvh(render_stats_t* renderStats, bvh_t const* bvh, vec3 rayO, vec3 rayD, float rayMin, float rayMax, uint32_t* candidates, uint32_t maxInstances)
 {
 	uint64_t traversalStartTime = cranpl_timestamp_micro();
 
 	uint32_t iter = 0;
 
-	uint32_t testQueue[10000]; // TODO: Currently we just allow 1000 stack pushes. Fix this!
+	// TODO: custom allocator
+	uint32_t* testQueue = malloc(sizeof(uint32_t) * 10000); // TODO: Currently we just allow 1000 stack pushes. Fix this!
 	uint32_t testQueueSize = 1;
 	uint32_t testQueueIter = 0;
 
@@ -866,13 +885,13 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 				{
 					uint32_t nodeIndex = testQueue[testQueueIter + i];
 
-					renderStats.bvhHitCount++;
+					renderStats->bvhHitCount++;
 
 					// All our leaves are packed at the end of the 
 					bool isLeaf = bvh->jumps[nodeIndex].isLeaf;
 					if (isLeaf)
 					{
-						renderStats.bvhLeafHitCount++;
+						renderStats->bvhLeafHitCount++;
 
 						candidates[iter] = bvh->jumps[nodeIndex].indices.index;
 						iter++;
@@ -890,20 +909,21 @@ static uint32_t traverse_bvh(bvh_t* bvh, vec3 rayO, vec3 rayD, float rayMin, flo
 				}
 				else
 				{
-					renderStats.bvhMissCount++;
+					renderStats->bvhMissCount++;
 				}
 			}
 		}
 		else
 		{
-			renderStats.bvhMissCount += activeLaneCount;
+			renderStats->bvhMissCount += activeLaneCount;
 		}
 
 
 		testQueueIter += activeLaneCount;
 	}
 
-	renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
+	free(testQueue);
+	renderStats->bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
 	return iter;
 }
 
@@ -1024,12 +1044,12 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		free(leafs);
 	}
 
-	renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
+	context->renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
 }
 
 int backgroundWidth, backgroundHeight, backgroundStride;
 float* cran_restrict background;
-static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO, vec3 rayD)
+static vec3 cast_scene(render_context_t* context, ray_scene_t const* scene, vec3 rayO, vec3 rayD)
 {
 	context->depth++;
 	if (context->depth >= renderConfig.maxDepth)
@@ -1038,7 +1058,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 		return (vec3) { 0 };
 	}
 
-	renderStats.rayCount++;
+	context->renderStats.rayCount++;
 
 	const float NoRayIntersection = FLT_MAX;
 
@@ -1058,7 +1078,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 	uint64_t intersectionStartTime = cranpl_timestamp_micro();
 
 	uint32_t candidates[1000]; // TODO: Max candidates of 1000?
-	uint32_t candidateCount = traverse_bvh(&scene->bvh, rayO, rayD, 0.0f, NoRayIntersection, candidates, 1000);
+	uint32_t candidateCount = traverse_bvh(&context->renderStats, &scene->bvh, rayO, rayD, 0.0f, NoRayIntersection, candidates, 1000);
 	for (uint32_t i = 0; i < candidateCount; i++)
 	{
 		uint32_t candidateIndex = candidates[i];
@@ -1074,7 +1094,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 		material_index_t* materialIndices = mesh->materialIndices;
 
 		uint32_t meshCandidates[1000]; // TODO:
-		uint32_t meshCandidateCount = traverse_bvh(&mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, meshCandidates, 1000);
+		uint32_t meshCandidateCount = traverse_bvh(&context->renderStats, &mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, meshCandidates, 1000);
 		for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
 		{
 			uint32_t faceIndex = meshCandidates[faceCandidate];
@@ -1116,7 +1136,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 			}
 		}
 	}
-	renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
+	context->renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
 
 	if (closestHitInfo.distance != NoRayIntersection)
 	{
@@ -1146,7 +1166,7 @@ static vec3 cast_scene(render_context_t* context, ray_scene_t* scene, vec3 rayO,
 // TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
 // Do we want to handle this some other way?
 const float ReCastBias = 0.001f;
-static vec3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
+static vec3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 
@@ -1160,7 +1180,7 @@ static vec3 shader_lambert(const void* cran_restrict materialData, uint32_t mate
 	return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
 }
 
-static vec3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t* scene, shader_inputs_t inputs)
+static vec3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	material_mirror_t mirrorData = ((const material_mirror_t* cran_restrict)materialData)[materialIndex];
 
@@ -1170,93 +1190,167 @@ static vec3 shader_mirror(const void* cran_restrict materialData, uint32_t mater
 	return vec3_mul(sceneCast, mirrorData.color);
 }
 
+typedef struct
+{
+	ray_scene_t scene;
+
+	vec3 origin;
+	vec3 right;
+	vec3 up;
+	vec3 forward;
+	float near;
+
+	int32_t imgStride;
+	int32_t imgWidth;
+	int32_t imgHeight;
+	int32_t halfImgWidth;
+	int32_t halfImgHeight;
+} render_view_t;
+
+typedef struct
+{
+	render_view_t const* renderView;
+	render_context_t context;
+	int32_t xStart;
+	int32_t xEnd;
+	int32_t yStart;
+	int32_t yEnd;
+	float xStep;
+	float yStep;
+
+	float* hdrOutput;
+} thread_context_t;
+
+static void render_scene_async(void* cran_restrict data)
+{
+	thread_context_t* threadContext = (thread_context_t*)data;
+	render_context_t* renderContext = &threadContext->context;
+	render_view_t const* renderView = threadContext->renderView;
+
+	// Sample our scene for every pixel in the bitmap. Do we want to upsample?
+	for (int32_t y = threadContext->yStart; y < threadContext->yEnd; y++)
+	{
+		float yOff = threadContext->yStep * (float)y;
+		for (int32_t x = threadContext->xStart; x < threadContext->xEnd; x++)
+		{
+			float xOff = threadContext->xStep * (float)x;
+
+			vec3 sceneColor = { 0 };
+			for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
+			{
+				renderContext->renderStats.primaryRayCount++;
+
+				float randX = xOff + threadContext->xStep * (random01f(&renderContext->randomSeed) * 0.5f - 0.5f);
+				float randY = yOff + threadContext->yStep * (random01f(&renderContext->randomSeed) * 0.5f - 0.5f);
+
+				// Construct our ray as a vector going from our origin to our near plane
+				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
+				vec3 rayDir = vec3_add(vec3_mulf(renderView->forward, renderView->near), vec3_add(vec3_mulf(renderView->right, randX), vec3_mulf(renderView->up, randY)));
+				// TODO: Do we want to scale for average in the loop or outside the loop?
+				// With too many SPP, the sceneColor might get too significant.
+				sceneColor = vec3_add(sceneColor, cast_scene(renderContext, &renderView->scene, renderView->origin, rayDir));
+			}
+			sceneColor = vec3_mulf(sceneColor, rcp((float)renderConfig.samplesPerPixel));
+
+			int32_t imgIdx = ((y + renderView->halfImgHeight) * renderView->imgWidth + (x + renderView->halfImgWidth)) * renderView->imgStride;
+			threadContext->hdrOutput[imgIdx + 0] = sceneColor.x;
+			threadContext->hdrOutput[imgIdx + 1] = sceneColor.y;
+			threadContext->hdrOutput[imgIdx + 2] = sceneColor.z;
+			threadContext->hdrOutput[imgIdx + 3] = 1.0f;
+		}
+	}
+}
+
 int main()
 {
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 4,
+		.samplesPerPixel = 10,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
 
-	render_context_t renderContext =
-	{
-		.randomSeed = 10346425,
-	};
-
+	static render_view_t mainRenderView;
 	uint64_t startTime = cranpl_timestamp_micro();
 
 	background = stbi_loadf("background_4k.hdr", &backgroundWidth, &backgroundHeight, &backgroundStride, 0);
 
-	ray_scene_t scene;
-	generate_scene(&renderContext, &scene);
+	render_context_t mainRenderContext =
+	{
+		.randomSeed = 143324
+	};
+	generate_scene(&mainRenderContext, &mainRenderView.scene);
 
-	int32_t imgWidth = renderConfig.renderWidth, imgHeight = renderConfig.renderHeight, imgStride = 4;
-	int32_t halfImgWidth = imgWidth / 2, halfImgHeight = imgHeight / 2;
+	mainRenderView.imgWidth = renderConfig.renderWidth;
+	mainRenderView.imgHeight = renderConfig.renderHeight;
+	mainRenderView.imgStride = 4;
+	mainRenderView.halfImgWidth = mainRenderView.imgWidth / 2;
+	mainRenderView.halfImgHeight = mainRenderView.imgHeight / 2;
 
 	// TODO: How do we want to express our camera?
-	// Currently simply using the near triangle.
-	float near = 1.0f, nearHeight = 1.0f, nearWidth = nearHeight * (float)imgWidth / (float)imgHeight;
+	// Currently simply using the near plane.
+	mainRenderView.near = 1.0f;
+	float nearHeight = 1.0f;
+	float nearWidth = nearHeight * (float)mainRenderView.imgWidth / (float)mainRenderView.imgHeight;
 
-	vec3 origin = { 0.0f, -2.0f, 0.0f };
-	vec3 forward = { .x = 0.0f,.y = 1.0f,.z = 0.0f }, right = { .x = 1.0f,.y = 0.0f,.z = 0.0f }, up = { .x = 0.0f, .y = 0.0f, .z = 1.0f };
+	mainRenderView.origin = (vec3){ 0.0f, -2.0f, 0.0f };
+	mainRenderView.forward = (vec3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
+	mainRenderView.right = (vec3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
+	mainRenderView.up = (vec3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
 
-	float* cran_restrict hdrImage = malloc(imgWidth * imgHeight * imgStride * sizeof(float));
+	float* cran_restrict hdrImage = malloc(mainRenderView.imgWidth * mainRenderView.imgHeight * mainRenderView.imgStride * sizeof(float));
 
 	uint64_t renderStartTime = cranpl_timestamp_micro();
 
-	uint64_t totalIterationTime = 0;
-	// Sample our scene for every pixel in the bitmap. (Could be upsampled if we wanted to)
-	float xStep = nearWidth / (float)imgWidth, yStep = nearHeight / (float)imgHeight;
-	for (int32_t y = -halfImgHeight; y < halfImgHeight; y++)
+	uint32_t imgHeightChunk = mainRenderView.imgHeight / cranpl_get_core_count();
+	thread_context_t* threadContexts = malloc(sizeof(thread_context_t) * cranpl_get_core_count());
+	void** threadHandles = malloc(sizeof(void*) * cranpl_get_core_count() - 1);
+	for (uint32_t i = 0; i < cranpl_get_core_count() - 1; i++)
 	{
-		// Progress data
-		uint64_t iterationStartTime = cranpl_timestamp_micro();
+		threadContexts[i] = (thread_context_t)
 		{
-			system("cls");
-			printf("Completed: %.2f%%\n", ((float)(y + halfImgHeight) / (float)imgHeight) * 100.0f);
-			if (totalIterationTime != 0)
+			.renderView = &mainRenderView,
+			.xStart = -mainRenderView.halfImgWidth,
+			.xEnd = mainRenderView.halfImgWidth,
+			.yStart = -mainRenderView.halfImgHeight + imgHeightChunk * i,
+			.yEnd = -mainRenderView.halfImgHeight + imgHeightChunk * (i + 1),
+			.xStep = nearWidth / (float)mainRenderView.imgWidth,
+			.yStep = nearHeight / (float)mainRenderView.imgHeight,
+			.context = 
 			{
-				// Use doubles, our value can be quite large until we divide.
-				float timeStep = micro_to_seconds(totalIterationTime) / (float)(y + halfImgHeight);
-				printf("Remaining Time: %.2f\n\n", timeStep * (imgHeight - (y + halfImgHeight)));
-			}
-		}
+				.randomSeed = i + 321
+			},
+			.hdrOutput = hdrImage
+		};
 
-		float yOff = yStep * (float)y;
-		for (int32_t x = -halfImgWidth; x < halfImgWidth; x++)
-		{
-			float xOff = xStep * (float)x;
-
-			vec3 sceneColor = { 0 };
-			for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
-			{
-				renderStats.primaryRayCount++;
-
-				float randX = xOff + xStep * (random01f(&renderContext.randomSeed) * 0.5f - 0.5f);
-				float randY = yOff + yStep * (random01f(&renderContext.randomSeed) * 0.5f - 0.5f);
-
-				// Construct our ray as a vector going from our origin to our near plane
-				// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
-				vec3 rayDir = vec3_add(vec3_mulf(forward, near), vec3_add(vec3_mulf(right, randX), vec3_mulf(up, randY)));
-				// TODO: Do we want to scale for average in the loop or outside the loop?
-				// With too many SPP, the sceneColor might get too significant.
-				sceneColor = vec3_add(sceneColor, cast_scene(&renderContext, &scene, origin, rayDir));
-			}
-			sceneColor = vec3_mulf(sceneColor, rcp((float)renderConfig.samplesPerPixel));
-
-			int32_t imgIdx = ((y + halfImgHeight) * imgWidth + (x + halfImgWidth)) * imgStride;
-			hdrImage[imgIdx + 0] = sceneColor.x;
-			hdrImage[imgIdx + 1] = sceneColor.y;
-			hdrImage[imgIdx + 2] = sceneColor.z;
-			hdrImage[imgIdx + 3] = 1.0f;
-		}
-
-		totalIterationTime += cranpl_timestamp_micro() - iterationStartTime;
+		threadHandles[i] = cranpl_create_thread(&render_scene_async, &threadContexts[i]);
 	}
 
-	renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime);
+	// Start a render on our main thread as well.
+	threadContexts[cranpl_get_core_count() - 1] = (thread_context_t)
+	{
+		.renderView = &mainRenderView,
+		.xStart = -mainRenderView.halfImgWidth,
+		.xEnd = mainRenderView.halfImgWidth,
+		.yStart = -mainRenderView.halfImgHeight + imgHeightChunk * (cranpl_get_core_count() - 1),
+		.yEnd = mainRenderView.halfImgHeight,
+		.xStep = nearWidth / (float)mainRenderView.imgWidth,
+		.yStep = nearHeight / (float)mainRenderView.imgHeight,
+		.context = 
+		{
+			.randomSeed = cranpl_get_core_count() - 1
+		},
+		.hdrOutput = hdrImage
+	};
+	render_scene_async(&threadContexts[cranpl_get_core_count() - 1]);
+
+	for (uint32_t i = 0; i < cranpl_get_core_count() - 1; i++)
+	{
+		cranpl_wait_on_thread(threadHandles[i]);
+	}
+
+	mainRenderContext.renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime);
 
 	// Image Space Effects
 	bool enableImageSpace = false;
@@ -1264,26 +1358,26 @@ int main()
 	{
 		uint64_t imageSpaceStartTime = cranpl_timestamp_micro();
 		// reinhard tonemapping
-		for (int32_t y = 0; y < imgHeight; y++)
+		for (int32_t y = 0; y < mainRenderView.imgHeight; y++)
 		{
-			for (int32_t x = 0; x < imgWidth; x++)
+			for (int32_t x = 0; x < mainRenderView.imgWidth; x++)
 			{
-				int32_t readIndex = (y * imgWidth + x) * imgStride;
+				int32_t readIndex = (y * mainRenderView.imgWidth + x) * mainRenderView.imgStride;
 
 				hdrImage[readIndex + 0] = hdrImage[readIndex + 0] / (hdrImage[readIndex + 0] + 1.0f);
 				hdrImage[readIndex + 1] = hdrImage[readIndex + 1] / (hdrImage[readIndex + 1] + 1.0f);
 				hdrImage[readIndex + 2] = hdrImage[readIndex + 2] / (hdrImage[readIndex + 2] + 1.0f);
 			}
 		}
-		renderStats.imageSpaceTime = cranpl_timestamp_micro() - imageSpaceStartTime;
+		mainRenderContext.renderStats.imageSpaceTime = cranpl_timestamp_micro() - imageSpaceStartTime;
 	}
 
-	renderStats.totalTime = cranpl_timestamp_micro() - startTime;
+	mainRenderContext.renderStats.totalTime = cranpl_timestamp_micro() - startTime;
 
 	// Convert HDR to 8 bit bitmap
 	{
-		uint8_t* cran_restrict bitmap = malloc(imgWidth * imgHeight * imgStride);
-		for (int32_t i = 0; i < imgWidth * imgHeight * imgStride; i+=imgStride)
+		uint8_t* cran_restrict bitmap = malloc(mainRenderView.imgWidth * mainRenderView.imgHeight * mainRenderView.imgStride);
+		for (int32_t i = 0; i < mainRenderView.imgWidth * mainRenderView.imgHeight * mainRenderView.imgStride; i+=mainRenderView.imgStride)
 		{
 			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 2]));
 			bitmap[i + 1] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 1]));
@@ -1291,7 +1385,7 @@ int main()
 			bitmap[i + 3] = (uint8_t)(255.99f * hdrImage[i + 3]);
 		}
 
-		cranpl_write_bmp("render.bmp", bitmap, imgWidth, imgHeight);
+		cranpl_write_bmp("render.bmp", bitmap, mainRenderView.imgWidth, mainRenderView.imgHeight);
 		system("render.bmp");
 		free(bitmap);
 	}
@@ -1299,28 +1393,33 @@ int main()
 	free(hdrImage);
 	stbi_image_free(background);
 
+	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
+	{
+		merge_render_stats(&mainRenderContext.renderStats, &threadContexts[i].context.renderStats);
+	}
+
 	// Print stats
 	{
 		system("cls");
-		printf("Total Time: %f\n", micro_to_seconds(renderStats.totalTime));
-		printf("\tScene Generation Time: %f [%f%%]\n", micro_to_seconds(renderStats.sceneGenerationTime), (float)renderStats.sceneGenerationTime / (float)renderStats.totalTime * 100.0f);
-		printf("\tRender Time: %f [%f%%]\n", micro_to_seconds(renderStats.renderTime), (float)renderStats.renderTime / (float)renderStats.totalTime * 100.0f);
-		printf("\t\tIntersection Time: %f [%f%%]\n", micro_to_seconds(renderStats.intersectionTime), (float)renderStats.intersectionTime / (float)renderStats.renderTime * 100.0f);
-		printf("\t\t\tBVH Traversal Time: %f [%f%%]\n", micro_to_seconds(renderStats.bvhTraversalTime), (float)renderStats.bvhTraversalTime / (float)renderStats.intersectionTime * 100.0f);
-		printf("\t\t\t\tBVH Tests: %" PRIu64 "\n", renderStats.bvhHitCount + renderStats.bvhMissCount);
-		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhHitCount, (float)renderStats.bvhHitCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount) * 100.0f);
-		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%f%%]\n", renderStats.bvhLeafHitCount, (float)renderStats.bvhLeafHitCount/(float)renderStats.bvhHitCount * 100.0f);
-		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%f%%]\n", renderStats.bvhMissCount, (float)renderStats.bvhMissCount/(float)(renderStats.bvhHitCount + renderStats.bvhMissCount) * 100.0f);
-		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(renderStats.skyboxTime), (float)renderStats.skyboxTime / (float)renderStats.renderTime * 100.0f);
-		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(renderStats.imageSpaceTime), (float)renderStats.imageSpaceTime / (float)renderStats.totalTime * 100.0f);
+		printf("Total Time: %f\n", micro_to_seconds(mainRenderContext.renderStats.totalTime));
+		printf("\tScene Generation Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.sceneGenerationTime), (float)mainRenderContext.renderStats.sceneGenerationTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
+		printf("\tRender Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.renderTime), (float)mainRenderContext.renderStats.renderTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
+		printf("\t\tIntersection Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.intersectionTime), (float)mainRenderContext.renderStats.intersectionTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
+		printf("\t\t\tBVH Traversal Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.bvhTraversalTime), (float)mainRenderContext.renderStats.bvhTraversalTime / (float)mainRenderContext.renderStats.intersectionTime * 100.0f);
+		printf("\t\t\t\tBVH Tests: %" PRIu64 "\n", mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount);
+		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%f%%]\n", mainRenderContext.renderStats.bvhHitCount, (float)mainRenderContext.renderStats.bvhHitCount/(float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
+		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%f%%]\n", mainRenderContext.renderStats.bvhLeafHitCount, (float)mainRenderContext.renderStats.bvhLeafHitCount/(float)mainRenderContext.renderStats.bvhHitCount * 100.0f);
+		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%f%%]\n", mainRenderContext.renderStats.bvhMissCount, (float)mainRenderContext.renderStats.bvhMissCount/(float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
+		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.skyboxTime), (float)mainRenderContext.renderStats.skyboxTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
+		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.imageSpaceTime), (float)mainRenderContext.renderStats.imageSpaceTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
 		printf("\n");
-		printf("MRays/seconds: %f\n", (float)renderStats.rayCount / micro_to_seconds(renderStats.renderTime) / 1000000.0f);
-		printf("Rays Fired: %" PRIu64 "\n", renderStats.rayCount);
-		printf("\tCamera Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.primaryRayCount, (float)renderStats.primaryRayCount / (float)renderStats.rayCount * 100.0f);
-		printf("\tBounce Rays Fired: %" PRIu64 " [%f%%]\n", renderStats.rayCount - renderStats.primaryRayCount, (float)(renderStats.rayCount - renderStats.primaryRayCount) / (float)renderStats.rayCount * 100.0f);
+		printf("MRays/seconds: %f\n", (float)mainRenderContext.renderStats.rayCount / micro_to_seconds(mainRenderContext.renderStats.renderTime) / 1000000.0f);
+		printf("Rays Fired: %" PRIu64 "\n", mainRenderContext.renderStats.rayCount);
+		printf("\tCamera Rays Fired: %" PRIu64 " [%f%%]\n", mainRenderContext.renderStats.primaryRayCount, (float)mainRenderContext.renderStats.primaryRayCount / (float)mainRenderContext.renderStats.rayCount * 100.0f);
+		printf("\tBounce Rays Fired: %" PRIu64 " [%f%%]\n", mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount, (float)(mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount) / (float)mainRenderContext.renderStats.rayCount * 100.0f);
 		printf("\n");
 		printf("BVH\n");
-		printf("\tBVH Node Count: %" PRIu64 "\n", renderStats.bvhNodeCount);
+		printf("\tBVH Node Count: %" PRIu64 "\n", mainRenderContext.renderStats.bvhNodeCount);
 
 		system("pause");
 	}

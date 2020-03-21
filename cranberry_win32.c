@@ -1,5 +1,7 @@
 #include "cranberry_platform.h"
 
+#include <assert.h>
+#include <stdlib.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wingdi.h>
@@ -148,4 +150,46 @@ void cranpl_unmap_file(cranpl_file_map_t fileMap)
 	UnmapViewOfFile(fileMap.fileData);
 	CloseHandle(fileMap._handle2);
 	CloseHandle(fileMap._handle1);
+}
+
+typedef struct
+{
+	void(*function)(void*);
+	void* data;
+} thread_data_t;
+
+static DWORD WINAPI platform_thread_callback(void* data)
+{
+	thread_data_t threadData = *(thread_data_t*)data;
+	free(data);
+	threadData.function(threadData.data);
+	return 0;
+}
+
+uint32_t cranpl_get_core_count()
+{
+	SYSTEM_INFO systemInfo;
+	GetSystemInfo(&systemInfo);
+
+	return systemInfo.dwNumberOfProcessors;
+}
+
+void* cranpl_create_thread(void(*function)(void*), void* data)
+{
+	// TODO: custom allocator
+	thread_data_t* threadData = malloc(sizeof(thread_data_t));
+	*threadData = (thread_data_t)
+	{
+		.function = function,
+		.data = data
+	};
+	HANDLE threadHandle = CreateThread(NULL, 0, &platform_thread_callback, threadData, 0, NULL);
+	assert(threadHandle != NULL);
+
+	return threadHandle;
+}
+
+void cranpl_wait_on_thread(void* threadHandle)
+{
+	WaitForSingleObjectEx(threadHandle, INFINITE, FALSE);
 }
