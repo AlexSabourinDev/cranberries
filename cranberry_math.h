@@ -5,7 +5,7 @@
 
 #define cran_inline inline
 #define cran_forceinline __forceinline
-#define cran_align(a) __declspec(align(16))
+#define cran_align(a) __declspec(align(a))
 
 #ifdef _MSC_BUILD
 #define cran_restrict __restrict
