@@ -401,9 +401,6 @@ cran_forceinline cv3l cv3l_max(cv3l l, cv3l r)
 // Matrix Implementation
 cran_forceinline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k)
 {
-	assert(cv3_length(i) < 1.01f && cv3_length(i) > 0.99f);
-	assert(cv3_length(j) < 1.01f && cv3_length(j) > 0.99f);
-	assert(cv3_length(k) < 1.01f && cv3_length(k) > 0.99f);
 	return (cm3)
 	{
 		.i = i,
