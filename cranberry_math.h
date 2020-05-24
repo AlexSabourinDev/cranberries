@@ -1,8 +1,10 @@
 #pragma once
 
 #include <math.h>
+#include <immintrin.h>
 
 #define cran_inline inline
+#define cran_forceinline __forceinline
 #define cran_align(a) __declspec(align(16))
 
 #ifdef _MSC_BUILD
@@ -11,11 +13,11 @@
 #define cran_restrict restrict
 #endif
 
-#define _PI_VAL 3.14159265358979323846264338327f
-const float cran_pi = _PI_VAL;
-const float cran_tao = _PI_VAL * 2.0f;
-const float cran_rpi = 1.0f / _PI_VAL;
-const float cran_rtao = 1.0f / (_PI_VAL * 2.0f);
+#define cran_pi_val 3.14159265358979323846264338327f
+const float cran_pi = cran_pi_val;
+const float cran_tao = cran_pi_val * 2.0f;
+const float cran_rpi = 1.0f / cran_pi_val;
+const float cran_rtao = 1.0f / (cran_pi_val * 2.0f);
 
 #define cran_lane_count 4
 cran_align(16) typedef union
@@ -48,73 +50,73 @@ typedef struct
 } caabb;
 
 // Single API
-cran_inline float cf_rcp(float f);
-cran_inline float cf_fast_rcp(float f);
-cran_inline float cf_rsqrt(float f);
-cran_inline float cf_fast_rsqrt(float f);
-cran_inline bool cf_quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2);
+cran_forceinline float cf_rcp(float f);
+cran_forceinline float cf_fast_rcp(float f);
+cran_forceinline float cf_rsqrt(float f);
+cran_forceinline float cf_fast_rsqrt(float f);
+cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2);
 
 // Lane API
-cran_inline cfl cfl_replicate(float f);
-cran_inline cfl cfl_max(cfl l, cfl r);
-cran_inline cfl cfl_min(cfl l, cfl r);
-cran_inline cfl cfl_less(cfl l, cfl r);
-cran_inline cfl cfl_add(cfl l, cfl r);
-cran_inline cfl cfl_sub(cfl l, cfl r);
-cran_inline cfl cfl_mul(cfl l, cfl r);
-cran_inline int cfl_mask(cfl v);
+cran_forceinline cfl cfl_replicate(float f);
+cran_forceinline cfl cfl_max(cfl l, cfl r);
+cran_forceinline cfl cfl_min(cfl l, cfl r);
+cran_forceinline cfl cfl_less(cfl l, cfl r);
+cran_forceinline cfl cfl_add(cfl l, cfl r);
+cran_forceinline cfl cfl_sub(cfl l, cfl r);
+cran_forceinline cfl cfl_mul(cfl l, cfl r);
+cran_forceinline int cfl_mask(cfl v);
 
 // V3 API
-cran_inline cv3 cv3_mulf(cv3 l, float r);
-cran_inline cv3 cv3_add(cv3 l, cv3 r);
-cran_inline cv3 cv3_addf(cv3 l, float r);
-cran_inline cv3 cv3_sub(cv3 l, cv3 r);
-cran_inline cv3 cv3_subf(cv3 l, float r);
-cran_inline cv3 cv3_mul(cv3 l, cv3 r);
-cran_inline float cv3_dot(cv3 l, cv3 r);
-cran_inline cv3 cv3_cross(cv3 l, cv3 r);
-cran_inline cv3 cv3_lerp(cv3 l, cv3 r, float t);
-cran_inline float cv3_length(cv3 v);
-cran_inline float cv3_rlength(cv3 v);
-cran_inline cv3 cv3_normalized(cv3 v);
-cran_inline cv3 cv3_min(cv3 v, cv3 m);
-cran_inline cv3 cv3_max(cv3 v, cv3 m);
-cran_inline cv3 cv3_rcp(cv3 v);
-cran_inline cv3 cv3_fast_rcp(cv3 v);
-cran_inline cv3 cv3_reflect(cv3 i, cv3 n);
+cran_forceinline cv3 cv3_mulf(cv3 l, float r);
+cran_forceinline cv3 cv3_add(cv3 l, cv3 r);
+cran_forceinline cv3 cv3_addf(cv3 l, float r);
+cran_forceinline cv3 cv3_sub(cv3 l, cv3 r);
+cran_forceinline cv3 cv3_subf(cv3 l, float r);
+cran_forceinline cv3 cv3_mul(cv3 l, cv3 r);
+cran_forceinline float cv3_dot(cv3 l, cv3 r);
+cran_forceinline cv3 cv3_cross(cv3 l, cv3 r);
+cran_forceinline cv3 cv3_lerp(cv3 l, cv3 r, float t);
+cran_forceinline float cv3_length(cv3 v);
+cran_forceinline float cv3_rlength(cv3 v);
+cran_forceinline cv3 cv3_normalized(cv3 v);
+cran_forceinline cv3 cv3_min(cv3 v, cv3 m);
+cran_forceinline cv3 cv3_max(cv3 v, cv3 m);
+cran_forceinline cv3 cv3_rcp(cv3 v);
+cran_forceinline cv3 cv3_fast_rcp(cv3 v);
+cran_forceinline cv3 cv3_reflect(cv3 i, cv3 n);
 // a is between 0 and 2 PI
 // t is between 0 and PI (0 being the bottom, PI being the top)
-cran_inline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_restrict t);
+cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_restrict t);
 // theta is between 0 and 2PI (horizontal plane)
 // phi is between 0 and PI (vertical plane)
-cran_inline cv3 cv3_from_spherical(float theta, float phi, float radius);
+cran_forceinline cv3 cv3_from_spherical(float theta, float phi, float radius);
 
 // V3 Lane API
-cran_inline cv3l cv3l_replicate(cv3 v);
-cran_inline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i);
-cran_inline cv3l cv3l_add(cv3l l, cv3l r);
-cran_inline cv3l cv3l_sub(cv3l l, cv3l r);
-cran_inline cv3l cv3l_mul(cv3l l, cv3l r);
-cran_inline cv3l cv3l_min(cv3l l, cv3l r);
-cran_inline cv3l cv3l_max(cv3l l, cv3l r);
+cran_forceinline cv3l cv3l_replicate(cv3 v);
+cran_forceinline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i);
+cran_forceinline cv3l cv3l_add(cv3l l, cv3l r);
+cran_forceinline cv3l cv3l_sub(cv3l l, cv3l r);
+cran_forceinline cv3l cv3l_mul(cv3l l, cv3l r);
+cran_forceinline cv3l cv3l_min(cv3l l, cv3l r);
+cran_forceinline cv3l cv3l_max(cv3l l, cv3l r);
 
 // Matrix API
-cran_inline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k);
-cran_inline cm3 cm3_basis_from_normal(cv3 n);
-cran_inline cv3 cm3_mul_cv3(cm3 m, cv3 v);
-cran_inline cv3 cm3_rotate_cv3(cm3 m, cv3 v);
+cran_forceinline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k);
+cran_forceinline cm3 cm3_basis_from_normal(cv3 n);
+cran_forceinline cv3 cm3_mul_cv3(cm3 m, cv3 v);
+cran_forceinline cv3 cm3_rotate_cv3(cm3 m, cv3 v);
 
 // AABB API
-cran_inline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin, float rayMax, caabb aabb);
-cran_inline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax);
+cran_forceinline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin, float rayMax, caabb aabb);
+cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax);
 
 // Single Implementation
-cran_inline float cf_rcp(float f)
+cran_forceinline float cf_rcp(float f)
 {
 	return 1.0f / f;
 }
 
-cran_inline float cf_fast_rcp(float f)
+cran_forceinline float cf_fast_rcp(float f)
 {
 	union
 	{
@@ -125,12 +127,12 @@ cran_inline float cf_fast_rcp(float f)
 	return conv.f[0];
 }
 
-cran_inline float cf_rsqrt(float f)
+cran_forceinline float cf_rsqrt(float f)
 {
 	return 1.0f / sqrtf(f);
 }
 
-cran_inline float cf_fast_rsqrt(float f)
+cran_forceinline float cf_fast_rsqrt(float f)
 {
 	union
 	{
@@ -141,7 +143,7 @@ cran_inline float cf_fast_rsqrt(float f)
 	return conv.f[0];
 }
 
-cran_inline bool cf_quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2)
+cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2)
 {
 	// TODO: Replace with more numerically robust version.
 	float determinant = b * b - 4.0f * a * c;
@@ -159,83 +161,83 @@ cran_inline bool cf_quadratic(float a, float b, float c, float* cran_restrict ou
 }
 
 // Lane Implementation
-cran_inline cfl cfl_replicate(float f)
+cran_forceinline cfl cfl_replicate(float f)
 {
 	return (cfl) { .sse = _mm_set_ps1(f) };
 }
 
-cran_inline cfl cfl_max(cfl l, cfl r)
+cran_forceinline cfl cfl_max(cfl l, cfl r)
 {
 	return (cfl) { .sse = _mm_max_ps(l.sse, r.sse) };
 }
 
-cran_inline cfl cfl_min(cfl l, cfl r)
+cran_forceinline cfl cfl_min(cfl l, cfl r)
 {
 	return (cfl) { .sse = _mm_min_ps(l.sse, r.sse) };
 }
 
-cran_inline cfl cfl_less(cfl l, cfl r)
+cran_forceinline cfl cfl_less(cfl l, cfl r)
 {
 	return (cfl) { .sse = _mm_cmplt_ps(l.sse, r.sse) };
 }
 
-cran_inline cfl cfl_add(cfl l, cfl r)
+cran_forceinline cfl cfl_add(cfl l, cfl r)
 {
 	return (cfl) { .sse = _mm_add_ps(l.sse, r.sse) };
 }
 
-cran_inline cfl cfl_sub(cfl l, cfl r)
+cran_forceinline cfl cfl_sub(cfl l, cfl r)
 {
 	return (cfl) { .sse = _mm_sub_ps(l.sse, r.sse) };
 }
 
-cran_inline cfl cfl_mul(cfl l, cfl r)
+cran_forceinline cfl cfl_mul(cfl l, cfl r)
 {
 	return (cfl) { .sse = _mm_mul_ps(l.sse, r.sse) };
 }
 
-cran_inline int cfl_mask(cfl v)
+cran_forceinline int cfl_mask(cfl v)
 {
 	return _mm_movemask_ps(v.sse);
 }
 
 // V3 Implementation
-cran_inline cv3 cv3_mulf(cv3 l, float r)
+cran_forceinline cv3 cv3_mulf(cv3 l, float r)
 {
 	return (cv3) { .x = l.x * r, .y = l.y * r, .z = l.z * r };
 }
 
-cran_inline cv3 cv3_add(cv3 l, cv3 r)
+cran_forceinline cv3 cv3_add(cv3 l, cv3 r)
 {
 	return (cv3) {.x = l.x + r.x, .y = l.y + r.y, .z = l.z + r.z};
 }
 
-cran_inline cv3 cv3_addf(cv3 l, float r)
+cran_forceinline cv3 cv3_addf(cv3 l, float r)
 {
 	return (cv3) {.x = l.x + r, .y = l.y + r, .z = l.z + r};
 }
 
-cran_inline cv3 cv3_sub(cv3 l, cv3 r)
+cran_forceinline cv3 cv3_sub(cv3 l, cv3 r)
 {
 	return (cv3) {.x = l.x - r.x, .y = l.y - r.y, .z = l.z - r.z};
 }
 
-cran_inline cv3 cv3_subf(cv3 l, float r)
+cran_forceinline cv3 cv3_subf(cv3 l, float r)
 {
 	return (cv3) {.x = l.x - r, .y = l.y - r, .z = l.z - r};
 }
 
-cran_inline cv3 cv3_mul(cv3 l, cv3 r)
+cran_forceinline cv3 cv3_mul(cv3 l, cv3 r)
 {
 	return (cv3) {.x = l.x * r.x, .y = l.y * r.y, .z = l.z * r.z};
 }
 
-cran_inline float cv3_dot(cv3 l, cv3 r)
+cran_forceinline float cv3_dot(cv3 l, cv3 r)
 {
 	return l.x * r.x + l.y * r.y + l.z * r.z;
 }
 
-cran_inline cv3 cv3_cross(cv3 l, cv3 r)
+cran_forceinline cv3 cv3_cross(cv3 l, cv3 r)
 {
 	return (cv3)
 	{
@@ -245,42 +247,42 @@ cran_inline cv3 cv3_cross(cv3 l, cv3 r)
 	};
 }
 
-cran_inline cv3 cv3_lerp(cv3 l, cv3 r, float t)
+cran_forceinline cv3 cv3_lerp(cv3 l, cv3 r, float t)
 {
 	return cv3_add(cv3_mulf(l, 1.0f - t), cv3_mulf(r, t));
 }
 
-cran_inline float cv3_length(cv3 v)
+cran_forceinline float cv3_length(cv3 v)
 {
 	return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
-cran_inline float cv3_rlength(cv3 v)
+cran_forceinline float cv3_rlength(cv3 v)
 {
 	return cf_rsqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
-cran_inline cv3 cv3_normalized(cv3 v)
+cran_forceinline cv3 cv3_normalized(cv3 v)
 {
 	return cv3_mulf(v, cv3_rlength(v));
 }
 
-cran_inline cv3 cv3_min(cv3 v, cv3 m)
+cran_forceinline cv3 cv3_min(cv3 v, cv3 m)
 {
 	return (cv3){fminf(v.x, m.x), fminf(v.y, m.y), fminf(v.z, m.z)};
 }
 
-cran_inline cv3 cv3_max(cv3 v, cv3 m)
+cran_forceinline cv3 cv3_max(cv3 v, cv3 m)
 {
 	return (cv3){fmaxf(v.x, m.x), fmaxf(v.y, m.y), fmaxf(v.z, m.z)};
 }
 
-cran_inline cv3 cv3_rcp(cv3 v)
+cran_forceinline cv3 cv3_rcp(cv3 v)
 {
 	return (cv3) { cf_rcp(v.x), cf_rcp(v.y), cf_rcp(v.z) };
 }
 
-cran_inline cv3 cv3_fast_rcp(cv3 v)
+cran_forceinline cv3 cv3_fast_rcp(cv3 v)
 {
 	union
 	{
@@ -292,12 +294,12 @@ cran_inline cv3 cv3_fast_rcp(cv3 v)
 	return (cv3) { conv.f[0], conv.f[1], conv.f[2] };
 }
 
-cran_inline cv3 cv3_reflect(cv3 i, cv3 n)
+cran_forceinline cv3 cv3_reflect(cv3 i, cv3 n)
 {
 	return cv3_sub(i, cv3_mulf(n, 2.0f * cv3_dot(i, n)));
 }
 
-cran_inline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_restrict t)
+cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_restrict t)
 {
 	float rlenght = cv3_rlength(v);
 	float azimuth = atan2f(v.y, v.x);
@@ -305,13 +307,13 @@ cran_inline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_res
 	*t = acosf(v.z * rlenght);
 }
 
-cran_inline cv3 cv3_from_spherical(float theta, float phi, float radius)
+cran_forceinline cv3 cv3_from_spherical(float theta, float phi, float radius)
 {
 	return (cv3) { cosf(theta) * sinf(phi) * radius, sinf(theta) * sinf(phi) * radius, radius * cosf(phi) };
 }
 
 // V3 Lane Implementation
-cran_inline cv3l cv3l_replicate(cv3 v)
+cran_forceinline cv3l cv3l_replicate(cv3 v)
 {
 	return (cv3l)
 	{
@@ -321,14 +323,14 @@ cran_inline cv3l cv3l_replicate(cv3 v)
 	};
 }
 
-cran_inline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i)
+cran_forceinline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i)
 {
 	lanes->x.f[i] = v.x;
 	lanes->y.f[i] = v.y;
 	lanes->z.f[i] = v.z;
 }
 
-cran_inline cv3l cv3l_add(cv3l l, cv3l r)
+cran_forceinline cv3l cv3l_add(cv3l l, cv3l r)
 {
 	return (cv3l)
 	{
@@ -338,7 +340,7 @@ cran_inline cv3l cv3l_add(cv3l l, cv3l r)
 	};
 }
 
-cran_inline cv3l cv3l_sub(cv3l l, cv3l r)
+cran_forceinline cv3l cv3l_sub(cv3l l, cv3l r)
 {
 	return (cv3l)
 	{
@@ -348,7 +350,7 @@ cran_inline cv3l cv3l_sub(cv3l l, cv3l r)
 	};
 }
 
-cran_inline cv3l cv3l_mul(cv3l l, cv3l r)
+cran_forceinline cv3l cv3l_mul(cv3l l, cv3l r)
 {
 	return (cv3l)
 	{
@@ -358,7 +360,7 @@ cran_inline cv3l cv3l_mul(cv3l l, cv3l r)
 	};
 }
 
-cran_inline cv3l cv3l_min(cv3l l, cv3l r)
+cran_forceinline cv3l cv3l_min(cv3l l, cv3l r)
 {
 	return (cv3l)
 	{
@@ -368,7 +370,7 @@ cran_inline cv3l cv3l_min(cv3l l, cv3l r)
 	};
 }
 
-cran_inline cv3l cv3l_max(cv3l l, cv3l r)
+cran_forceinline cv3l cv3l_max(cv3l l, cv3l r)
 {
 	return (cv3l)
 	{
@@ -379,7 +381,7 @@ cran_inline cv3l cv3l_max(cv3l l, cv3l r)
 }
 
 // Matrix Implementation
-cran_inline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k)
+cran_forceinline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k)
 {
 	assert(cv3_length(i) < 1.01f && cv3_length(i) > 0.99f);
 	assert(cv3_length(j) < 1.01f && cv3_length(j) > 0.99f);
@@ -392,7 +394,7 @@ cran_inline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k)
 	};
 }
 
-cran_inline cm3 cm3_basis_from_normal(cv3 n)
+cran_forceinline cm3 cm3_basis_from_normal(cv3 n)
 {
 	// Frisvad ONB from https://backend.orbit.dtu.dk/ws/portalfiles/portal/126824972/onb_frisvad_jgt2012_v2.pdf
 	// revised from Pixar https://graphics.pixar.com/library/OrthonormalB/paper.pdf#page=2&zoom=auto,-233,561
@@ -405,7 +407,7 @@ cran_inline cm3 cm3_basis_from_normal(cv3 n)
 	return cm3_from_basis(i, j, n);
 }
 
-cran_inline cv3 cm3_mul_cv3(cm3 m, cv3 v)
+cran_forceinline cv3 cm3_mul_cv3(cm3 m, cv3 v)
 {
 	cv3 vx = (cv3) { v.x, v.x, v.x };
 	cv3 vy = (cv3) { v.y, v.y, v.y };
@@ -418,13 +420,13 @@ cran_inline cv3 cm3_mul_cv3(cm3 m, cv3 v)
 	return cv3_add(cv3_add(rx, ry), rz);
 }
 
-cran_inline cv3 cm3_rotate_cv3(cm3 m, cv3 v)
+cran_forceinline cv3 cm3_rotate_cv3(cm3 m, cv3 v)
 {
 	return cm3_mul_cv3(m, v);
 }
 
 // AABB Implementation
-cran_inline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin, float rayMax, caabb aabb)
+cran_forceinline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin, float rayMax, caabb aabb)
 {
 	// Source: https://medium.com/@bromanz/another-view-on-the-classic-ray-aabb-intersection-algorithm-for-bvh-traversal-41125138b525
 
@@ -468,7 +470,7 @@ cran_inline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin, floa
 	return _mm_movemask_ps(_mm_cmplt_ps(vrayMin, vrayMax));
 }
 
-cran_inline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax)
+cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax)
 {
 	cv3l rayOLanes = cv3l_replicate(rayO);
 	cv3l invD = cv3l_replicate(cv3_rcp(rayD));

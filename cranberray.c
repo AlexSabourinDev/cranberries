@@ -12,7 +12,6 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <string.h>
-#include <immintrin.h>
 
 #include "stb_image.h"
 #include "cranberry_platform.h"
