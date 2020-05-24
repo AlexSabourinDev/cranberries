@@ -58,6 +58,7 @@ cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restri
 
 // Lane API
 cran_forceinline cfl cfl_replicate(float f);
+cran_forceinline cfl cfl_load(float* v);
 cran_forceinline cfl cfl_max(cfl l, cfl r);
 cran_forceinline cfl cfl_min(cfl l, cfl r);
 cran_forceinline cfl cfl_less(cfl l, cfl r);
@@ -65,6 +66,8 @@ cran_forceinline cfl cfl_add(cfl l, cfl r);
 cran_forceinline cfl cfl_sub(cfl l, cfl r);
 cran_forceinline cfl cfl_mul(cfl l, cfl r);
 cran_forceinline int cfl_mask(cfl v);
+cran_forceinline cfl cfl_rcp(cfl v);
+cran_forceinline cfl cfl_lt(cfl l, cfl r);
 
 // V3 API
 cran_forceinline cv3 cv3_mulf(cv3 l, float r);
@@ -166,6 +169,11 @@ cran_forceinline cfl cfl_replicate(float f)
 	return (cfl) { .sse = _mm_set_ps1(f) };
 }
 
+cran_forceinline cfl cfl_load(float* f)
+{
+	return (cfl) { .sse = _mm_loadu_ps(f) };
+}
+
 cran_forceinline cfl cfl_max(cfl l, cfl r)
 {
 	return (cfl) { .sse = _mm_max_ps(l.sse, r.sse) };
@@ -199,6 +207,16 @@ cran_forceinline cfl cfl_mul(cfl l, cfl r)
 cran_forceinline int cfl_mask(cfl v)
 {
 	return _mm_movemask_ps(v.sse);
+}
+
+cran_forceinline cfl cfl_rcp(cfl v)
+{
+	return (cfl) { .sse = _mm_rcp_ps(v.sse) };
+}
+
+cran_forceinline cfl cfl_lt(cfl l, cfl r)
+{
+	return  (cfl) { .sse = _mm_cmplt_ps(l.sse, r.sse) };
 }
 
 // V3 Implementation
@@ -441,33 +459,33 @@ cran_forceinline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin,
 	float tmax = fminf(rayMax, fminf(tbigger.x, fminf(tbigger.y, tbigger.z)));
 	return (tmin < tmax);*/
 
-	__m128 vrayO = _mm_loadu_ps(&rayO.x);
-	__m128 vrayD = _mm_loadu_ps(&rayD.x);
-	__m128 vmin = _mm_loadu_ps(&aabb.min.x);
-	__m128 vmax = _mm_loadu_ps(&aabb.max.x);
-	__m128 vrayMax = _mm_set_ps1(rayMax);
-	__m128 vrayMin = _mm_set_ps1(rayMin);
+	cfl vrayO = cfl_load(&rayO.x);
+	cfl vrayD = cfl_load(&rayD.x);
+	cfl vmin = cfl_load(&aabb.min.x);
+	cfl vmax = cfl_load(&aabb.max.x);
+	cfl vrayMax = cfl_replicate(rayMax);
+	cfl vrayMin = cfl_replicate(rayMin);
 
-	__m128 invD = _mm_rcp_ps(vrayD);
-	__m128 t0s = _mm_mul_ps(_mm_sub_ps(vmin, vrayO), invD);
-	__m128 t1s = _mm_mul_ps(_mm_sub_ps(vmax, vrayO), invD);
+	cfl invD = cfl_rcp(vrayD);
+	cfl t0s = cfl_mul(cfl_sub(vmin, vrayO), invD);
+	cfl t1s = cfl_mul(cfl_sub(vmax, vrayO), invD);
 
-	__m128 tsmaller = _mm_min_ps(t0s, t1s);
+	cfl tsmaller = cfl_min(t0s, t1s);
 	// Our fourth element is bad, we need to overwrite it
-	tsmaller = _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(2, 2, 1, 0));
+	tsmaller.sse = _mm_shuffle_ps(tsmaller.sse, tsmaller.sse, _MM_SHUFFLE(2, 2, 1, 0));
 
-	__m128 tbigger = _mm_max_ps(t0s, t1s);
-	tbigger = _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(2, 2, 1, 0));
+	cfl tbigger = cfl_max(t0s, t1s);
+	tbigger.sse = _mm_shuffle_ps(tbigger.sse, tbigger.sse, _MM_SHUFFLE(2, 2, 1, 0));
 
-	tsmaller = _mm_max_ps(tsmaller, _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(2, 1, 0, 3)));
-	tsmaller = _mm_max_ps(tsmaller, _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(1, 0, 3, 2)));
-	vrayMin = _mm_max_ps(vrayMin, tsmaller);
+	tsmaller = cfl_max(tsmaller, (cfl) { .sse = _mm_shuffle_ps(tsmaller.sse, tsmaller.sse, _MM_SHUFFLE(2, 1, 0, 3)) });
+	tsmaller = cfl_max(tsmaller, (cfl) { .sse = _mm_shuffle_ps(tsmaller.sse, tsmaller.sse, _MM_SHUFFLE(1, 0, 3, 2)) });
+	vrayMin = cfl_max(vrayMin, tsmaller);
 
-	tbigger = _mm_min_ps(tbigger, _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(2, 1, 0, 3)));
-	tbigger = _mm_min_ps(tbigger, _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(1, 0, 3, 2)));
-	vrayMax = _mm_min_ps(vrayMax, tbigger);
+	tbigger = cfl_min(tbigger, (cfl) { .sse = _mm_shuffle_ps(tbigger.sse, tbigger.sse, _MM_SHUFFLE(2, 1, 0, 3)) });
+	tbigger = cfl_min(tbigger, (cfl) { .sse = _mm_shuffle_ps(tbigger.sse, tbigger.sse, _MM_SHUFFLE(1, 0, 3, 2)) });
+	vrayMax = cfl_min(vrayMax, tbigger);
 
-	return _mm_movemask_ps(_mm_cmplt_ps(vrayMin, vrayMax));
+	return cfl_mask(cfl_lt(vrayMin, vrayMax));
 }
 
 cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax)
