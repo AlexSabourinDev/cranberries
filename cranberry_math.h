@@ -55,6 +55,8 @@ cran_forceinline float cf_fast_rcp(float f);
 cran_forceinline float cf_rsqrt(float f);
 cran_forceinline float cf_fast_rsqrt(float f);
 cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2);
+cran_forceinline float cf_bilinear(float topLeft, float topRight, float bottomLeft, float bottomRight, float tx, float ty);
+cran_forceinline float cf_lerp(float a, float b, float t);
 
 // Lane API
 cran_forceinline cfl cfl_replicate(float f);
@@ -161,6 +163,18 @@ cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restri
 	*out1 = (-b - d) * e;
 	*out2 = (-b + d) * e;
 	return true;
+}
+
+cran_forceinline float cf_bilinear(float topLeft, float topRight, float bottomLeft, float bottomRight, float tx, float ty)
+{
+	float top = tx*topRight + (1.0f-tx)*topLeft;
+	float bottom = tx * bottomRight + (1.0f - tx)*bottomLeft;
+	return ty * top + (1.0f - ty)*bottom;
+}
+
+cran_forceinline float cf_lerp(float a, float b, float t)
+{
+	return t * b + (1.0f - t)*a;
 }
 
 // Lane Implementation

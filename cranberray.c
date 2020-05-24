@@ -200,6 +200,22 @@ static cv3 sphere_random(int32_t* seed)
 	return p;
 }
 
+typedef struct
+{
+	float* cran_restrict image;
+
+	float* cran_restrict cdf2d;
+	float* cran_restrict luminance2d;
+
+	float* cran_restrict cdf1d;
+	float* cran_restrict sum1d;
+	float sumTotal;
+
+	int32_t width;
+	int32_t height;
+	int32_t stride;
+} imageset_t;
+
 static cv3 sample_hdr(cv3 v, float* image, int32_t imgWidth, int32_t imgHeight, int32_t imgStride)
 {
 	float azimuth, theta;
@@ -209,15 +225,47 @@ static cv3 sample_hdr(cv3 v, float* image, int32_t imgWidth, int32_t imgHeight, 
 	int32_t readX = (int32_t)(fminf(azimuth * cran_rtao, 0.999f) * (float)imgWidth);
 	int32_t readIndex = (readY * imgWidth + readX) * imgStride;
 
-	// TODO: Don't just clamp to 1, remap our image later on. For now this is fine.
 	cv3 color;
 	color.x = image[readIndex + 0];
 	color.y = image[readIndex + 1];
 	color.z = image[readIndex + 2];
+
 	return color;
 }
 
-float light_attenuation(cv3 l, cv3 r)
+static cv3 importance_sample_hdr(imageset_t imageset, float* cran_restrict outBias, int32_t* seed)
+{
+	float ycdf = random01f(seed);
+	int y = 0;
+	for (; y < imageset.height; y++)
+	{
+		if (imageset.cdf1d[y] >= ycdf)
+		{
+			break;
+		}
+	}
+
+	float xcdf = random01f(seed);
+	int x = 0;
+	for (; x < imageset.width; x++)
+	{
+		if (imageset.cdf2d[y*imageset.width + x] >= xcdf)
+		{
+			break;
+		}
+	}
+
+	float biasy = imageset.sum1d[y] * cf_rcp(imageset.sumTotal);
+	float biasx = imageset.luminance2d[y * imageset.width + x] * cf_rcp(imageset.sum1d[y]);
+	float bias = biasy * biasx;
+
+	cv3 direction = cv3_from_spherical(((float)x / (float)imageset.width)*cran_tao, ((float)y / (float)imageset.height)*cran_pi, 1.0f);
+
+	*outBias = bias;
+	return direction;
+}
+
+static float light_attenuation(cv3 l, cv3 r)
 {
 	return cf_rcp(1.0f + cv3_length(cv3_sub(l, r)));
 }
@@ -643,10 +691,10 @@ typedef struct
 {
 	cv3 light;
 	cv3 surface;
+	bool hit;
 } ray_hit_t;
 
-int backgroundWidth, backgroundHeight, backgroundStride;
-float* cran_restrict background;
+imageset_t backgroundImageset;
 static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD)
 {
 	context->depth++;
@@ -753,20 +801,21 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		return (ray_hit_t)
 		{
 			.light = light,
-			.surface = intersectionPoint
+			.surface = intersectionPoint,
+			.hit = true
 		};
 	}
 
-	cv3 skybox = cv3_lerp((cv3) {1.0f, 1.0f, 1.0f}, (cv3) {0.5f, 0.7f, 1.0f}, rayD.z * 0.5f + 0.5f);
-	//uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	//cv3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
-	//context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
+	uint64_t skyboxStartTime = cranpl_timestamp_micro();
+	cv3 skybox = sample_hdr(rayD, backgroundImageset.image, backgroundImageset.width, backgroundImageset.height, backgroundImageset.stride);
+	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
 	return (ray_hit_t)
 	{
 		.light = cv3_mulf(skybox, 10000.0f),
-		.surface = cv3_add(rayO, cv3_mulf(rayD, 1000.0f))
+		.surface = cv3_add(rayO, cv3_mulf(rayD, 1000.0f)),
+		.hit = false
 	};
 }
 
@@ -777,6 +826,9 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 {
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 
+	// Cast to our environment map
+	// randomly select between a BRDF cast and an environment cast
+
 	cv3 castDir = cv3_add(inputs.normal, sphere_random(&context->randomSeed));
 	// TODO: Consider iteration instead of recursion
 	ray_hit_t result = cast_scene(context, scene, cv3_add(inputs.surface, cv3_mulf(inputs.normal, ReCastBias)), castDir);
@@ -784,7 +836,8 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 	float lambertCosine = fmaxf(0.0f, cv3_dot(cv3_normalized(castDir), inputs.normal));
 	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
 
-	return cv3_mul(sceneCast, cv3_mulf(lambertData.color, cran_rpi));
+	cv3 sceneColor = cv3_mul(sceneCast, cv3_mulf(lambertData.color, cran_rpi));
+	return sceneColor;
 }
 
 static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
@@ -898,7 +951,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 1,
+		.samplesPerPixel = 4,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -906,11 +959,52 @@ int main()
 	static render_data_t mainRenderData;
 	uint64_t startTime = cranpl_timestamp_micro();
 
-	background = stbi_loadf("background_4k.hdr", &backgroundWidth, &backgroundHeight, &backgroundStride, 0);
+	{
+		backgroundImageset.image = stbi_loadf("background_4k.hdr", &backgroundImageset.width, &backgroundImageset.height, &backgroundImageset.stride, 0);
+		backgroundImageset.cdf2d = (float*)malloc(sizeof(float) * backgroundImageset.width * backgroundImageset.height);
+		backgroundImageset.luminance2d = (float*)malloc(sizeof(float) * backgroundImageset.width * backgroundImageset.height);
+
+		backgroundImageset.cdf1d = (float*)malloc(sizeof(float) * backgroundImageset.height);
+		backgroundImageset.sum1d = (float*)malloc(sizeof(float) * backgroundImageset.height);
+
+		float ysum = 0.0f;
+		for (int y = 0; y < backgroundImageset.height; y++)
+		{
+			float xsum = 0.0f;
+			for (int x = 0; x < backgroundImageset.width; x++)
+			{
+				int index = (y * backgroundImageset.width) + x;
+
+				float* cran_restrict pixel = &backgroundImageset.image[index * backgroundImageset.stride];
+				float luminance = rgb_to_luminance(pixel[0], pixel[1], pixel[2]);
+
+				xsum += luminance;
+				backgroundImageset.luminance2d[index] = luminance;
+				backgroundImageset.cdf2d[index] = xsum;
+			}
+
+			for (int x = 0; x < backgroundImageset.width; x++)
+			{
+				int index = (y * backgroundImageset.width) + x;
+				backgroundImageset.cdf2d[index] = backgroundImageset.cdf2d[index] * cf_rcp(xsum);
+			}
+
+			ysum += xsum;
+			backgroundImageset.cdf1d[y] = ysum;
+			backgroundImageset.sum1d[y] = xsum;
+		}
+
+		for (int y = 0; y < backgroundImageset.height; y++)
+		{
+			backgroundImageset.cdf1d[y] = backgroundImageset.cdf1d[y]  * cf_rcp(ysum);
+		}
+
+		backgroundImageset.sumTotal = ysum;
+	}
 
 	render_context_t mainRenderContext =
 	{
-		.randomSeed = 143324
+		.randomSeed = 143259
 	};
 	generate_scene(&mainRenderContext, &mainRenderData.scene);
 
@@ -1029,12 +1123,6 @@ int main()
 		free(bitmap);
 	}
 
-	free(threadContexts);
-	free(threadHandles);
-	free(mainRenderQueue.chunks);
-	free(hdrImage);
-	stbi_image_free(background);
-
 	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
 	{
 		merge_render_stats(&mainRenderContext.renderStats, &threadContexts[i].context.renderStats);
@@ -1068,5 +1156,15 @@ int main()
 
 		system("pause");
 	}
+
+	free(threadContexts);
+	free(threadHandles);
+	free(mainRenderQueue.chunks);
+	free(hdrImage);
+	free(backgroundImageset.cdf2d);
+	free(backgroundImageset.luminance2d);
+	free(backgroundImageset.cdf1d);
+	free(backgroundImageset.sum1d);
+	stbi_image_free(backgroundImageset.image);
 	return 0;
 }
