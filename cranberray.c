@@ -695,6 +695,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		uint32_t meshCandidateCount = traverse_bvh(&context->renderStats, &mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, meshCandidates, 1000);
 		for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
 		{
+			// TODO: Lanes
 			uint32_t faceIndex = meshCandidates[faceCandidate];
 
 			uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
