@@ -406,14 +406,19 @@ static int index_aabb_sort_min_z(const void* cran_restrict l, const void* cran_r
 
 static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint32_t leafCount)
 {
+	assert(leafCount > 0);
+
+#define bvh_workgroup_size 10000000
+
 	int(*sortFuncs[3])(const void* cran_restrict l, const void* cran_restrict r) = { index_aabb_sort_min_x, index_aabb_sort_min_y, index_aabb_sort_min_z };
 
-	struct
+	typedef struct
 	{
 		index_aabb_pair_t* start;
 		uint32_t count;
 		uint32_t* parentIndex;
-	} bvhWorkgroup[10000];
+	} bvh_workgroup_t;
+	bvh_workgroup_t* bvhWorkgroup = (bvh_workgroup_t*)malloc(sizeof(bvh_workgroup_t) * bvh_workgroup_size);
 	uint32_t workgroupQueueEnd = 1;
 
 	bvhWorkgroup[0].start = leafs;
@@ -423,11 +428,11 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	uint32_t bvhWriteIter = 0;
 	bvh_t builtBVH =
 	{
-		.bounds = malloc(sizeof(caabb) * 100000), // TODO: Actually get an accurate size?/Release this memory.
-		.jumps = malloc(sizeof(bvh_jump_t) * 100000),
+		.bounds = malloc(sizeof(caabb) * bvh_workgroup_size), // TODO: Actually get an accurate size?/Release this memory.
+		.jumps = malloc(sizeof(bvh_jump_t) * bvh_workgroup_size),
 	};
 
-	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % 10000) // TODO: constant for workgroup size
+	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % bvh_workgroup_size) // TODO: constant for workgroup size
 	{
 		index_aabb_pair_t* start = bvhWorkgroup[workgroupIter].start;
 		uint32_t count = bvhWorkgroup[workgroupIter].count;
@@ -473,19 +478,21 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			bvhWorkgroup[workgroupQueueEnd].start = start;
 			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH.jumps[bvhWriteIter].indices.jumps.left;
-			workgroupQueueEnd = (workgroupQueueEnd + 1) % 10000; // TODO: Constant for workgroup size
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % bvh_workgroup_size; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
 
 			bvhWorkgroup[workgroupQueueEnd].start = start + centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH.jumps[bvhWriteIter].indices.jumps.right;
-			workgroupQueueEnd = (workgroupQueueEnd + 1) % 10000; // TODO: Constant for workgroup size
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % bvh_workgroup_size; // TODO: Constant for workgroup size
 			assert(workgroupQueueEnd != workgroupIter);
 		}
 
 		bvhWriteIter++;
-		assert(bvhWriteIter < 100000);
+		assert(bvhWriteIter < bvh_workgroup_size);
 	}
+
+	free(bvhWorkgroup);
 
 	context->renderStats.bvhNodeCount = bvhWriteIter;
 	return builtBVH;
@@ -821,17 +828,21 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 
 // TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
 // Do we want to handle this some other way?
-const float ReCastBias = 0.0001f;
+const float ReCastBias = 0.01f;
 static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
-
-	// Cast to our environment map
-	// randomly select between a BRDF cast and an environment cast
-
-	cv3 castDir = cv3_add(inputs.normal, sphere_random(&context->randomSeed));
 	// TODO: Consider iteration instead of recursion
+	cv3 castDir = cv3_add(inputs.normal, sphere_random(&context->randomSeed));
 	ray_hit_t result = cast_scene(context, scene, cv3_add(inputs.surface, cv3_mulf(inputs.normal, ReCastBias)), castDir);
+
+	if (!result.hit)
+	{
+		float bias;
+		castDir = importance_sample_hdr(backgroundImageset, &bias, &context->randomSeed);
+		result = cast_scene(context, scene, cv3_add(inputs.surface, cv3_mulf(inputs.normal, ReCastBias)), castDir);
+		result.light = cv3_mulf(result.light, bias);
+	}
 
 	float lambertCosine = fmaxf(0.0f, cv3_dot(cv3_normalized(castDir), inputs.normal));
 	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
@@ -951,7 +962,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 4,
+		.samplesPerPixel = 10,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -1057,7 +1068,7 @@ int main()
 			.renderQueue = &mainRenderQueue,
 			.context = 
 			{
-				.randomSeed = i + 321
+				.randomSeed = i+32165+i%2
 			},
 			.hdrOutput = hdrImage
 		};
