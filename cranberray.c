@@ -17,6 +17,7 @@
 #include "stb_image.h"
 #include "cranberry_platform.h"
 #include "cranberry_loader.h"
+#include "cranberry_math.h"
 
 typedef struct
 {
@@ -74,58 +75,6 @@ static float micro_to_seconds(uint64_t time)
 	return (float)time / 1000000.0f;
 }
 
-#define _PI_VAL 3.14159265358979323846264338327f
-const float PI = _PI_VAL;
-const float TAO = _PI_VAL * 2.0f;
-const float RPI = 1.0f / _PI_VAL;
-const float RTAO = 1.0f / (_PI_VAL * 2.0f);
-
-// float math
-static float rcp(float f)
-{
-	return 1.0f / f;
-
-	/*union
-	{
-		__m128 sse;
-		float f[4];
-	} conv;
-	conv.sse = _mm_rcp_ss(_mm_set_ss(f));
-	return conv.f[0];*/
-}
-
-static float rsqrt(float f)
-{
-	return 1.0f / sqrtf(f);
-
-	/*union
-	{
-		__m128 sse;
-		float f[4];
-	} conv;
-	conv.sse = _mm_rsqrt_ss(_mm_set_ss(f));
-	return conv.f[0];*/
-}
-
-static bool quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2)
-{
-	assert(out1 != out2);
-
-	// TODO: Replace with more numerically robust version.
-	float determinant = b * b - 4.0f * a * c;
-	if (determinant < 0.0f)
-	{
-		return false;
-	}
-
-	float d = sqrtf(determinant);
-	float e = rcp(2.0f * a);
-
-	*out1 = (-b - d) * e;
-	*out2 = (-b + d) * e;
-	return true;
-}
-
 static float random01f(int32_t* seed)
 {
 	assert(*seed != 0);
@@ -154,279 +103,14 @@ static float rgb_to_luminance(float r, float g, float b)
 	return (0.2126f*r + 0.7152f*g + 0.0722f*b);
 }
 
-#define lane_count 4
-__declspec(align(16)) typedef union
+static bool sphere_does_ray_intersect(cv3 rayO, cv3 rayD, float sphereR)
 {
-	float f[lane_count];
-	__m128 sse;
-} lane_t;
-
-static lane_t lane_replicate(float f)
-{
-	return (lane_t) { .sse = _mm_set_ps1(f) };
-}
-
-static lane_t lane_max(lane_t l, lane_t r)
-{
-	return (lane_t) { .sse = _mm_max_ps(l.sse, r.sse) };
-}
-
-static lane_t lane_min(lane_t l, lane_t r)
-{
-	return (lane_t) { .sse = _mm_min_ps(l.sse, r.sse) };
-}
-
-static lane_t lane_less(lane_t l, lane_t r)
-{
-	return (lane_t) { .sse = _mm_cmplt_ps(l.sse, r.sse) };
-}
-
-static lane_t lane_add(lane_t l, lane_t r)
-{
-	return (lane_t) { .sse = _mm_add_ps(l.sse, r.sse) };
-}
-
-static lane_t lane_sub(lane_t l, lane_t r)
-{
-	return (lane_t) { .sse = _mm_sub_ps(l.sse, r.sse) };
-}
-
-static lane_t lane_mul(lane_t l, lane_t r)
-{
-	return (lane_t) { .sse = _mm_mul_ps(l.sse, r.sse) };
-}
-
-static uint32_t lane_mask(lane_t v)
-{
-	return _mm_movemask_ps(v.sse);
-}
-
-// vector math
-typedef struct
-{
-	float x, y, z;
-} vec3;
-
-static vec3 vec3_mulf(vec3 l, float r)
-{
-	return (vec3) { .x = l.x * r, .y = l.y * r, .z = l.z * r };
-}
-
-static vec3 vec3_add(vec3 l, vec3 r)
-{
-	return (vec3) {.x = l.x + r.x, .y = l.y + r.y, .z = l.z + r.z};
-}
-
-static vec3 vec3_addf(vec3 l, float r)
-{
-	return (vec3) {.x = l.x + r, .y = l.y + r, .z = l.z + r};
-}
-
-static vec3 vec3_sub(vec3 l, vec3 r)
-{
-	return (vec3) {.x = l.x - r.x, .y = l.y - r.y, .z = l.z - r.z};
-}
-
-static vec3 vec3_subf(vec3 l, float r)
-{
-	return (vec3) {.x = l.x - r, .y = l.y - r, .z = l.z - r};
-}
-
-static vec3 vec3_mul(vec3 l, vec3 r)
-{
-	return (vec3) {.x = l.x * r.x, .y = l.y * r.y, .z = l.z * r.z};
-}
-
-static float vec3_dot(vec3 l, vec3 r)
-{
-	return l.x * r.x + l.y * r.y + l.z * r.z;
-}
-
-static vec3 vec3_cross(vec3 l, vec3 r)
-{
-	return (vec3)
-	{
-		.x = l.y*r.z - l.z*r.y,
-		.y = l.z*r.x - l.x*r.z,
-		.z = l.x*r.y - l.y*r.x
-	};
-}
-
-static vec3 vec3_lerp(vec3 l, vec3 r, float t)
-{
-	return vec3_add(vec3_mulf(l, 1.0f - t), vec3_mulf(r, t));
-}
-
-static float vec3_length(vec3 v)
-{
-	return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-}
-
-static float vec3_rlength(vec3 v)
-{
-	return rsqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-}
-
-static vec3 vec3_normalized(vec3 v)
-{
-	return vec3_mulf(v, vec3_rlength(v));
-}
-
-static vec3 vec3_min(vec3 v, vec3 m)
-{
-	return (vec3){fminf(v.x, m.x), fminf(v.y, m.y), fminf(v.z, m.z)};
-}
-
-static vec3 vec3_max(vec3 v, vec3 m)
-{
-	return (vec3){fmaxf(v.x, m.x), fmaxf(v.y, m.y), fmaxf(v.z, m.z)};
-}
-
-static vec3 vec3_rcp(vec3 v)
-{
-	return (vec3) { rcp(v.x), rcp(v.y), rcp(v.z) };
-
-	/*union
-	{
-		__m128 sse;
-		float f[4];
-	} conv;
-
-	conv.sse = _mm_rcp_ps(_mm_loadu_ps(&v.x));
-	return (vec3) { conv.f[0], conv.f[1], conv.f[2] };*/
-}
-
-typedef struct
-{
-	lane_t x;
-	lane_t y;
-	lane_t z;
-} vec3_lanes_t;
-
-static vec3_lanes_t vec3_lanes_replicate(vec3 v)
-{
-	return (vec3_lanes_t)
-	{
-		.x = lane_replicate(v.x),
-		.y = lane_replicate(v.y),
-		.z = lane_replicate(v.z)
-	};
-}
-
-static void vec3_lanes_set(vec3_lanes_t* lanes, vec3 v, uint32_t i)
-{
-	lanes->x.f[i] = v.x;
-	lanes->y.f[i] = v.y;
-	lanes->z.f[i] = v.z;
-}
-
-static vec3_lanes_t vec3_lanes_add(vec3_lanes_t l, vec3_lanes_t r)
-{
-	return (vec3_lanes_t)
-	{
-		.x = lane_add(l.x, r.x),
-		.y = lane_add(l.y, r.y),
-		.z = lane_add(l.z, r.z)
-	};
-}
-
-static vec3_lanes_t vec3_lanes_sub(vec3_lanes_t l, vec3_lanes_t r)
-{
-	return (vec3_lanes_t)
-	{
-		.x = lane_sub(l.x, r.x),
-		.y = lane_sub(l.y, r.y),
-		.z = lane_sub(l.z, r.z)
-	};
-}
-
-static vec3_lanes_t vec3_lanes_mul(vec3_lanes_t l, vec3_lanes_t r)
-{
-	return (vec3_lanes_t)
-	{
-		.x = lane_mul(l.x, r.x),
-		.y = lane_mul(l.y, r.y),
-		.z = lane_mul(l.z, r.z)
-	};
-}
-
-static vec3_lanes_t vec3_lanes_min(vec3_lanes_t l, vec3_lanes_t r)
-{
-	return (vec3_lanes_t)
-	{
-		.x = lane_min(l.x, r.x),
-		.y = lane_min(l.y, r.y),
-		.z = lane_min(l.z, r.z)
-	};
-}
-
-static vec3_lanes_t vec3_lanes_max(vec3_lanes_t l, vec3_lanes_t r)
-{
-	return (vec3_lanes_t)
-	{
-		.x = lane_max(l.x, r.x),
-		.y = lane_max(l.y, r.y),
-		.z = lane_max(l.z, r.z)
-	};
-}
-
-typedef struct
-{
-	vec3 i, j, k;
-} mat3;
-
-static mat3 mat3_from_basis(vec3 i, vec3 j, vec3 k)
-{
-	assert(vec3_length(i) < 1.01f && vec3_length(i) > 0.99f);
-	assert(vec3_length(j) < 1.01f && vec3_length(j) > 0.99f);
-	assert(vec3_length(k) < 1.01f && vec3_length(k) > 0.99f);
-	return (mat3)
-	{
-		.i = i,
-		.j = j,
-		.k = k
-	};
-}
-
-static mat3 mat3_basis_from_normal(vec3 n)
-{
-	// Frisvad ONB from https://backend.orbit.dtu.dk/ws/portalfiles/portal/126824972/onb_frisvad_jgt2012_v2.pdf
-	// revised from Pixar https://graphics.pixar.com/library/OrthonormalB/paper.pdf#page=2&zoom=auto,-233,561
-	float sign = copysignf(1.0f, n.z);
-	float a = -rcp(sign + n.z);
-	float b = -n.x*n.y*a;
-	vec3 i = (vec3) { 1.0f + sign * n.x*n.x*a, sign * b, -sign * n.x };
-	vec3 j = (vec3) { b, sign + n.y*n.y*a, -n.y };
-
-	return mat3_from_basis(i, j, n);
-}
-
-static vec3 mat3_mul_vec3(mat3 m, vec3 v)
-{
-	vec3 vx = (vec3) { v.x, v.x, v.x };
-	vec3 vy = (vec3) { v.y, v.y, v.y };
-	vec3 vz = (vec3) { v.z, v.z, v.z };
-
-	vec3 rx = vec3_mul(vx, m.i);
-	vec3 ry = vec3_mul(vy, m.j);
-	vec3 rz = vec3_mul(vz, m.k);
-
-	return vec3_add(vec3_add(rx, ry), rz);
-}
-
-static vec3 mat3_rotate_vec3(mat3 m, vec3 v)
-{
-	return mat3_mul_vec3(m, v);
-}
-
-static bool sphere_does_ray_intersect(vec3 rayO, vec3 rayD, float sphereR)
-{
-	float projectedDistance = -vec3_dot(rayO, rayD);
-	float distanceToRaySqr = vec3_dot(rayO,rayO) - projectedDistance * projectedDistance;
+	float projectedDistance = -cv3_dot(rayO, rayD);
+	float distanceToRaySqr = cv3_dot(rayO,rayO) - projectedDistance * projectedDistance;
 	return (distanceToRaySqr < sphereR * sphereR);
 }
 
-static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float rayMax, float sphereR)
+static float sphere_ray_intersection(cv3 rayO, cv3 rayD, float rayMin, float rayMax, float sphereR)
 {
 	// Calculate our intersection distance
 	// With the sphere equation: dot(P-O,P-O) = r^2
@@ -446,13 +130,13 @@ static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float r
 	// a = (Cx^2+Cy^2), b = (2*Cx*Dx + 2*Cy*Dy), c = (Dx^2 + Dy^2 - r^2)
 	// d^2 * a + d * b + c = 0
 	// Solve for d
-	vec3 raySphereSpace = rayO;
+	cv3 raySphereSpace = rayO;
 	float a = rayD.x * rayD.x + rayD.y * rayD.y + rayD.z * rayD.z;
 	float b = 2.0f * rayD.x * raySphereSpace.x + 2.0f * rayD.y * raySphereSpace.y + 2.0f * rayD.z * raySphereSpace.z;
 	float c = raySphereSpace.x * raySphereSpace.x + raySphereSpace.y * raySphereSpace.y + raySphereSpace.z * raySphereSpace.z - sphereR * sphereR;
 
 	float d1, d2;
-	if (!quadratic(a, b, c, &d1, &d2))
+	if (!cf_quadratic(a, b, c, &d1, &d2))
 	{
 		return rayMax;
 	}
@@ -467,34 +151,34 @@ static float sphere_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float r
 	return rayMax;
 }
 
-static float triangle_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 A, vec3 B, vec3 C, float* out_u, float* out_v, float* out_w)
+static float triangle_ray_intersection(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3 A, cv3 B, cv3 C, float* out_u, float* out_v, float* out_w)
 {
 	// Source: https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-rendering-a-triangle/moller-trumbore-ray-triangle-intersection
-	vec3 e1 = vec3_sub(B, A);
-	vec3 e2 = vec3_sub(C, A);
-	vec3 p = vec3_cross(rayD, e2);
-	float d = vec3_dot(e1, p);
+	cv3 e1 = cv3_sub(B, A);
+	cv3 e2 = cv3_sub(C, A);
+	cv3 p = cv3_cross(rayD, e2);
+	float d = cv3_dot(e1, p);
 	if (d < FLT_EPSILON)
 	{
 		return rayMax;
 	}
 
-	float invD = rcp(d);
-	vec3 tv = vec3_sub(rayO, A);
-	float v = vec3_dot(tv, p) * invD;
+	float invD = cf_rcp(d);
+	cv3 tv = cv3_sub(rayO, A);
+	float v = cv3_dot(tv, p) * invD;
 	if (v < 0.0f || v > 1.0f)
 	{
 		return rayMax;
 	}
 
-	vec3 q = vec3_cross(tv, e1);
-	float w = vec3_dot(rayD, q) * invD;
+	cv3 q = cv3_cross(tv, e1);
+	float w = cv3_dot(rayD, q) * invD;
 	if (w < 0.0f || v + w > 1.0f)
 	{
 		return rayMax;
 	}
 
-	float t = vec3_dot(e2, q) * invD;
+	float t = cv3_dot(e2, q) * invD;
 	if (t > rayMin && t < rayMax)
 	{
 		*out_u = 1.0f - v - w;
@@ -506,134 +190,37 @@ static float triangle_ray_intersection(vec3 rayO, vec3 rayD, float rayMin, float
 	return rayMax;
 }
 
-static vec3 sphere_random(int32_t* seed)
+static cv3 sphere_random(int32_t* seed)
 {
-	vec3 p;
+	cv3 p;
 	do
 	{
-		p = vec3_mulf((vec3) { random01f(seed)-0.5f, random01f(seed)-0.5f, random01f(seed)-0.5f }, 2.0f);
-	} while (vec3_dot(p, p) <= 1.0f);
+		p = cv3_mulf((cv3) { random01f(seed)-0.5f, random01f(seed)-0.5f, random01f(seed)-0.5f }, 2.0f);
+	} while (cv3_dot(p, p) <= 1.0f);
 
 	return p;
 }
 
-static vec3 vec3_reflect(vec3 i, vec3 n)
-{
-	return vec3_sub(i, vec3_mulf(n, 2.0f * vec3_dot(i, n)));
-}
-
-// a is between 0 and 2 PI
-// t is between 0 and PI (0 being the bottom, PI being the top)
-static void vec3_to_spherical(vec3 v, float* cran_restrict a, float* cran_restrict t)
-{
-	assert(a != t);
-
-	float rlenght = vec3_rlength(v);
-	float azimuth = atan2f(v.y, v.x);
-	*a = (azimuth < 0.0f ? TAO + azimuth : azimuth);
-	*t = acosf(v.z * rlenght);
-}
-
-// theta is between 0 and 2PI (horizontal plane)
-// phi is between 0 and PI (vertical plane)
-static vec3 vec3_from_spherical(float theta, float phi, float radius)
-{
-	return (vec3) { cosf(theta) * sinf(phi) * radius, sinf(theta) * sinf(phi) * radius, radius * cosf(phi) };
-}
-
-static vec3 sample_hdr(vec3 v, float* image, int32_t imgWidth, int32_t imgHeight, int32_t imgStride)
+static cv3 sample_hdr(cv3 v, float* image, int32_t imgWidth, int32_t imgHeight, int32_t imgStride)
 {
 	float azimuth, theta;
-	vec3_to_spherical(v, &azimuth, &theta);
+	cv3_to_spherical(v, &azimuth, &theta);
 
-	int32_t readY = (int32_t)(fminf(theta * RPI, 0.999f) * (float)imgHeight);
-	int32_t readX = (int32_t)(fminf(azimuth * RTAO, 0.999f) * (float)imgWidth);
+	int32_t readY = (int32_t)(fminf(theta * cran_rpi, 0.999f) * (float)imgHeight);
+	int32_t readX = (int32_t)(fminf(azimuth * cran_rtao, 0.999f) * (float)imgWidth);
 	int32_t readIndex = (readY * imgWidth + readX) * imgStride;
 
 	// TODO: Don't just clamp to 1, remap our image later on. For now this is fine.
-	vec3 color;
+	cv3 color;
 	color.x = image[readIndex + 0];
 	color.y = image[readIndex + 1];
 	color.z = image[readIndex + 2];
 	return color;
 }
 
-typedef struct
+float light_attenuation(cv3 l, cv3 r)
 {
-	vec3 min;
-	vec3 max;
-} aabb;
-
-static bool aabb_does_ray_intersect_sse(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 aabbMin, vec3 aabbMax)
-{
-	// Wasting 25% of vector space, do we want to do lanes? This is currently just easier.
-	__m128 vrayO = _mm_loadu_ps(&rayO.x);
-	__m128 vrayD = _mm_loadu_ps(&rayD.x);
-	__m128 vmin = _mm_loadu_ps(&aabbMin.x);
-	__m128 vmax = _mm_loadu_ps(&aabbMax.x);
-	__m128 vrayMax = _mm_set_ps1(rayMax);
-	__m128 vrayMin = _mm_set_ps1(rayMin);
-
-	__m128 invD = _mm_rcp_ps(vrayD);
-	__m128 t0s = _mm_mul_ps(_mm_sub_ps(vmin, vrayO), invD);
-	__m128 t1s = _mm_mul_ps(_mm_sub_ps(vmax, vrayO), invD);
-
-	__m128 tsmaller = _mm_min_ps(t0s, t1s);
-	// Our fourth element is bad, we need to overwrite it
-	tsmaller = _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(2, 2, 1, 0));
-
-	__m128 tbigger = _mm_max_ps(t0s, t1s);
-	tbigger = _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(2, 2, 1, 0));
-
-	tsmaller = _mm_max_ps(tsmaller, _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(2, 1, 0, 3)));
-	tsmaller = _mm_max_ps(tsmaller, _mm_shuffle_ps(tsmaller, tsmaller, _MM_SHUFFLE(1, 0, 3, 2)));
-	vrayMin = _mm_max_ps(vrayMin, tsmaller);
-
-	tbigger = _mm_min_ps(tbigger, _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(2, 1, 0, 3)));
-	tbigger = _mm_min_ps(tbigger, _mm_shuffle_ps(tbigger, tbigger, _MM_SHUFFLE(1, 0, 3, 2)));
-	vrayMax = _mm_min_ps(vrayMax, tbigger);
-
-	return _mm_movemask_ps(_mm_cmplt_ps(vrayMin, vrayMax));
-}
-
-// Source: https://medium.com/@bromanz/another-view-on-the-classic-ray-aabb-intersection-algorithm-for-bvh-traversal-41125138b525
-static bool aabb_does_ray_intersect(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3 aabbMin, vec3 aabbMax)
-{
-	return aabb_does_ray_intersect_sse(rayO, rayD, rayMin, rayMax, aabbMin, aabbMax);
-
-	/*vec3 invD = vec3_rcp(rayD);
-	vec3 t0s = vec3_mul(vec3_sub(aabbMin, rayO), invD);
-	vec3 t1s = vec3_mul(vec3_sub(aabbMax, rayO), invD);
-
-	vec3 tsmaller = vec3_min(t0s, t1s);
-	vec3 tbigger  = vec3_max(t0s, t1s);
- 
-	float tmin = fmaxf(rayMin, fmaxf(tsmaller.x, fmaxf(tsmaller.y, tsmaller.z)));
-	float tmax = fminf(rayMax, fminf(tbigger.x, fminf(tbigger.y, tbigger.z)));
-	return (tmin < tmax);*/
-}
-
-static uint32_t aabb_does_ray_intersect_lanes(vec3 rayO, vec3 rayD, float rayMin, float rayMax, vec3_lanes_t aabbMin, vec3_lanes_t aabbMax)
-{
-	vec3_lanes_t rayOLanes = vec3_lanes_replicate(rayO);
-	vec3_lanes_t invD = vec3_lanes_replicate(vec3_rcp(rayD));
-	vec3_lanes_t t0s = vec3_lanes_mul(vec3_lanes_sub(aabbMin, rayOLanes), invD);
-	vec3_lanes_t t1s = vec3_lanes_mul(vec3_lanes_sub(aabbMax, rayOLanes), invD);
-
-	vec3_lanes_t tsmaller = vec3_lanes_min(t0s, t1s);
-	vec3_lanes_t tbigger  = vec3_lanes_max(t0s, t1s);
- 
-	lane_t rayMinLane = lane_replicate(rayMin);
-	lane_t rayMaxLane = lane_replicate(rayMax);
-	lane_t tmin = lane_max(rayMinLane, lane_max(tsmaller.x, lane_max(tsmaller.y, tsmaller.z)));
-	lane_t tmax = lane_min(rayMaxLane, lane_min(tbigger.x, lane_min(tbigger.y, tbigger.z)));
-	lane_t result = lane_less(tmin, tmax);
-	return lane_mask(result);
-}
-
-float light_attenuation(vec3 l, vec3 r)
-{
-	return rcp(1.0f + vec3_length(vec3_sub(l, r)));
+	return cf_rcp(1.0f + cv3_length(cv3_sub(l, r)));
 }
 
 // TODO: Refine our scene description
@@ -654,7 +241,7 @@ typedef struct
 
 typedef struct
 {
-	aabb* bounds;
+	caabb* bounds;
 	bvh_jump_t* jumps;
 } bvh_t;
 
@@ -667,12 +254,12 @@ typedef enum
 
 typedef struct
 {
-	vec3 color;
+	cv3 color;
 } material_lambert_t;
 
 typedef struct
 {
-	vec3 color;
+	cv3 color;
 } material_mirror_t;
 
 typedef struct
@@ -696,7 +283,7 @@ typedef struct
 
 typedef struct
 {
-	vec3 pos;
+	cv3 pos;
 	uint32_t renderableIndex;
 } instance_t;
 
@@ -716,18 +303,18 @@ typedef struct
 
 typedef struct
 {
-	aabb bound;
+	caabb bound;
 	uint32_t index;
 } index_aabb_pair_t;
 
 typedef struct
 {
-	vec3 surface;
-	vec3 normal;
-	vec3 viewDir;
+	cv3 surface;
+	cv3 normal;
+	cv3 viewDir;
 } shader_inputs_t;
 
-typedef vec3(material_shader_t)(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs);
+typedef cv3(material_shader_t)(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs);
 
 static material_shader_t shader_lambert;
 static material_shader_t shader_mirror;
@@ -789,7 +376,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	uint32_t bvhWriteIter = 0;
 	bvh_t builtBVH =
 	{
-		.bounds = malloc(sizeof(aabb) * 100000), // TODO: Actually get an accurate size?/Release this memory.
+		.bounds = malloc(sizeof(caabb) * 100000), // TODO: Actually get an accurate size?/Release this memory.
 		.jumps = malloc(sizeof(bvh_jump_t) * 100000),
 	};
 
@@ -803,11 +390,11 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			*(bvhWorkgroup[workgroupIter].parentIndex) = bvhWriteIter;
 		}
 
-		aabb bounds = start[0].bound;
+		caabb bounds = start[0].bound;
 		for (uint32_t i = 1; i < count; i++)
 		{
-			bounds.min = vec3_min(start[i].bound.min, bounds.min);
-			bounds.max = vec3_max(start[i].bound.max, bounds.max);
+			bounds.min = cv3_min(start[i].bound.min, bounds.min);
+			bounds.max = cv3_max(start[i].bound.max, bounds.max);
 		}
 
 		bool isLeaf = (count == 1);
@@ -857,7 +444,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	return builtBVH;
 }
 
-static uint32_t traverse_bvh(render_stats_t* renderStats, bvh_t const* bvh, vec3 rayO, vec3 rayD, float rayMin, float rayMax, uint32_t* candidates, uint32_t maxInstances)
+static uint32_t traverse_bvh(render_stats_t* renderStats, bvh_t const* bvh, cv3 rayO, cv3 rayD, float rayMin, float rayMax, uint32_t* candidates, uint32_t maxInstances)
 {
 	uint64_t traversalStartTime = cranpl_timestamp_micro();
 
@@ -871,18 +458,18 @@ static uint32_t traverse_bvh(render_stats_t* renderStats, bvh_t const* bvh, vec3
 	testQueue[0] = 0;
 	while ((int32_t)testQueueSize - (int32_t)testQueueIter > 0)
 	{
-		vec3_lanes_t boundMins = { 0 };
-		vec3_lanes_t boundMaxs = { 0 };
+		cv3l boundMins = { 0 };
+		cv3l boundMaxs = { 0 };
 
-		uint32_t activeLaneCount = min(testQueueSize - testQueueIter, lane_count);
+		uint32_t activeLaneCount = min(testQueueSize - testQueueIter, cran_lane_count);
 		for (uint32_t i = 0; i < activeLaneCount; i++)
 		{
 			uint32_t nodeIndex = testQueue[testQueueIter + i];
-			vec3_lanes_set(&boundMins, bvh->bounds[nodeIndex].min, i);
-			vec3_lanes_set(&boundMaxs, bvh->bounds[nodeIndex].max, i);
+			cv3l_set(&boundMins, bvh->bounds[nodeIndex].min, i);
+			cv3l_set(&boundMaxs, bvh->bounds[nodeIndex].max, i);
 		}
 
-		uint32_t intersections = aabb_does_ray_intersect_lanes(rayO, rayD, rayMin, rayMax, boundMins, boundMaxs);
+		uint32_t intersections = caabb_does_ray_intersect_lanes(rayO, rayD, rayMin, rayMax, boundMins, boundMaxs);
 		if (intersections > 0)
 		{
 			for (uint32_t i = 0; i < activeLaneCount; i++)
@@ -965,13 +552,13 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			uint32_t vertIndexB = mesh.data.faces.vertexIndices[i * 3 + 1];
 			uint32_t vertIndexC = mesh.data.faces.vertexIndices[i * 3 + 2];
 
-			vec3 vertA, vertB, vertC;
-			memcpy(&vertA, mesh.data.vertices.data + vertIndexA * 3, sizeof(vec3));
-			memcpy(&vertB, mesh.data.vertices.data + vertIndexB * 3, sizeof(vec3));
-			memcpy(&vertC, mesh.data.vertices.data + vertIndexC * 3, sizeof(vec3));
+			cv3 vertA, vertB, vertC;
+			memcpy(&vertA, mesh.data.vertices.data + vertIndexA * 3, sizeof(cv3));
+			memcpy(&vertB, mesh.data.vertices.data + vertIndexB * 3, sizeof(cv3));
+			memcpy(&vertC, mesh.data.vertices.data + vertIndexC * 3, sizeof(cv3));
 
-			leafs[i].bound.min = vec3_min(vec3_min(vertA, vertB), vertC);
-			leafs[i].bound.max = vec3_max(vec3_max(vertA, vertB), vertC);
+			leafs[i].bound.min = cv3_min(cv3_min(vertA, vertB), vertC);
+			leafs[i].bound.max = cv3_max(cv3_max(vertA, vertB), vertC);
 
 			// If our bounds have no volume, add a surrounding shell
 			if (fabsf(leafs[i].bound.max.x - leafs[i].bound.min.x) < FLT_EPSILON)
@@ -1029,7 +616,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		index_aabb_pair_t* leafs = malloc(sizeof(index_aabb_pair_t) * leafCount);
 		for (uint32_t i = 0; i < leafCount; i++)
 		{
-			vec3 pos = scene->instances.data[i].pos;
+			cv3 pos = scene->instances.data[i].pos;
 			uint32_t renderableIndex = scene->instances.data[i].renderableIndex;
 
 			leafs[i].index = i;
@@ -1038,11 +625,11 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			for (uint32_t vert = 0; vert < meshData->data.vertices.count; vert++)
 			{
 				// TODO: type pun here
-				vec3 vertex;
-				memcpy(&vertex, meshData->data.vertices.data + vert * 3, sizeof(vec3));
+				cv3 vertex;
+				memcpy(&vertex, meshData->data.vertices.data + vert * 3, sizeof(cv3));
 
-				leafs[i].bound.min = vec3_min(leafs[i].bound.min, vec3_add(vertex, pos));
-				leafs[i].bound.max = vec3_max(leafs[i].bound.max, vec3_add(vertex, pos));
+				leafs[i].bound.min = cv3_min(leafs[i].bound.min, cv3_add(vertex, pos));
+				leafs[i].bound.max = cv3_max(leafs[i].bound.max, cv3_add(vertex, pos));
 			}
 		}
 
@@ -1055,13 +642,13 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 typedef struct
 {
-	vec3 light;
-	vec3 surface;
+	cv3 light;
+	cv3 surface;
 } ray_hit_t;
 
 int backgroundWidth, backgroundHeight, backgroundStride;
 float* cran_restrict background;
-static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, vec3 rayO, vec3 rayD)
+static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD)
 {
 	context->depth++;
 	if (context->depth >= renderConfig.maxDepth)
@@ -1077,7 +664,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	struct
 	{
 		float distance;
-		vec3 normal;
+		cv3 normal;
 		material_index_t materialIndex;
 	} closestHitInfo = { 0 };
 	closestHitInfo.distance = NoRayIntersection;
@@ -1095,10 +682,10 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	{
 		uint32_t candidateIndex = candidates[i];
 
-		vec3 instancePos = scene->instances.data[candidateIndex].pos;
+		cv3 instancePos = scene->instances.data[candidateIndex].pos;
 		uint32_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
 
-		vec3 rayInstanceO = vec3_sub(rayO, instancePos);
+		cv3 rayInstanceO = cv3_sub(rayO, instancePos);
 
 		float intersectionDistance = 0.0f;
 
@@ -1115,10 +702,10 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
 			uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
 
-			vec3 vertA, vertB, vertC;
-			memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(vec3));
-			memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(vec3));
-			memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(vec3));
+			cv3 vertA, vertB, vertC;
+			memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(cv3));
+			memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(cv3));
+			memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(cv3));
 
 			float u, v, w;
 			intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, 0.0f, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
@@ -1139,12 +726,12 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 				uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
 				uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
 				uint32_t normalIndexC = mesh->data.faces.normalIndices[faceIndex * 3 + 2];
-				vec3 normalA, normalB, normalC;
-				memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(vec3));
-				memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(vec3));
-				memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(vec3));
+				cv3 normalA, normalB, normalC;
+				memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(cv3));
+				memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(cv3));
+				memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(cv3));
 
-				closestHitInfo.normal = vec3_add(vec3_add(vec3_mulf(normalA, u), vec3_mulf(normalB, v)), vec3_mulf(normalC, w));
+				closestHitInfo.normal = cv3_add(cv3_add(cv3_mulf(normalA, u), cv3_mulf(normalB, v)), cv3_mulf(normalC, w));
 			}
 		}
 	}
@@ -1153,9 +740,9 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	if (closestHitInfo.distance != NoRayIntersection)
 	{
 		material_index_t materialIndex = closestHitInfo.materialIndex;
-		vec3 intersectionPoint = vec3_add(rayO, vec3_mulf(rayD, closestHitInfo.distance));
+		cv3 intersectionPoint = cv3_add(rayO, cv3_mulf(rayD, closestHitInfo.distance));
 
-		vec3 light = shaders[materialIndex.typeIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
+		cv3 light = shaders[materialIndex.typeIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
 			(shader_inputs_t)
 			{
 				.surface = intersectionPoint,
@@ -1170,57 +757,57 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		};
 	}
 
-	vec3 skybox = vec3_lerp((vec3) {1.0f, 1.0f, 1.0f}, (vec3) {0.5f, 0.7f, 1.0f}, rayD.z * 0.5f + 0.5f);
+	cv3 skybox = cv3_lerp((cv3) {1.0f, 1.0f, 1.0f}, (cv3) {0.5f, 0.7f, 1.0f}, rayD.z * 0.5f + 0.5f);
 	//uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	//vec3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
+	//cv3 skybox = sample_hdr(rayD, background, backgroundWidth, backgroundHeight, backgroundStride);
 	//context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
 	return (ray_hit_t)
 	{
-		.light = vec3_mulf(skybox, 10000.0f),
-		.surface = vec3_add(rayO, vec3_mulf(rayD, 1000.0f))
+		.light = cv3_mulf(skybox, 10000.0f),
+		.surface = cv3_add(rayO, cv3_mulf(rayD, 1000.0f))
 	};
 }
 
 // TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
 // Do we want to handle this some other way?
 const float ReCastBias = 0.0001f;
-static vec3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
+static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 
-	vec3 castDir = vec3_add(inputs.normal, sphere_random(&context->randomSeed));
+	cv3 castDir = cv3_add(inputs.normal, sphere_random(&context->randomSeed));
 	// TODO: Consider iteration instead of recursion
-	ray_hit_t result = cast_scene(context, scene, vec3_add(inputs.surface, vec3_mulf(inputs.normal, ReCastBias)), castDir);
+	ray_hit_t result = cast_scene(context, scene, cv3_add(inputs.surface, cv3_mulf(inputs.normal, ReCastBias)), castDir);
 
-	float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(castDir), inputs.normal));
-	vec3 sceneCast = vec3_mulf(vec3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
+	float lambertCosine = fmaxf(0.0f, cv3_dot(cv3_normalized(castDir), inputs.normal));
+	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
 
-	return vec3_mul(sceneCast, vec3_mulf(lambertData.color, RPI));
+	return cv3_mul(sceneCast, cv3_mulf(lambertData.color, cran_rpi));
 }
 
-static vec3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
+static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	material_mirror_t mirrorData = ((const material_mirror_t* cran_restrict)materialData)[materialIndex];
 
-	vec3 castDir = vec3_reflect(inputs.viewDir, inputs.normal);
-	ray_hit_t result = cast_scene(context, scene, vec3_add(inputs.surface, vec3_mulf(inputs.normal, ReCastBias)), castDir);
+	cv3 castDir = cv3_reflect(inputs.viewDir, inputs.normal);
+	ray_hit_t result = cast_scene(context, scene, cv3_add(inputs.surface, cv3_mulf(inputs.normal, ReCastBias)), castDir);
 
-	float lambertCosine = fmaxf(0.0f, vec3_dot(vec3_normalized(castDir), inputs.normal));
-	vec3 sceneCast = vec3_mulf(vec3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
+	float lambertCosine = fmaxf(0.0f, cv3_dot(cv3_normalized(castDir), inputs.normal));
+	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
 
-	return vec3_mul(sceneCast, mirrorData.color);
+	return cv3_mul(sceneCast, mirrorData.color);
 }
 
 typedef struct
 {
 	ray_scene_t scene;
 
-	vec3 origin;
-	vec3 right;
-	vec3 up;
-	vec3 forward;
+	cv3 origin;
+	cv3 right;
+	cv3 up;
+	cv3 forward;
 	float near;
 
 	int32_t imgStride;
@@ -1277,7 +864,7 @@ static void render_scene_async(void* cran_restrict data)
 			{
 				float xOff = renderData->xStep * (float)x;
 
-				vec3 sceneColor = { 0 };
+				cv3 sceneColor = { 0 };
 				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
 				{
 					renderContext->renderStats.primaryRayCount++;
@@ -1287,14 +874,14 @@ static void render_scene_async(void* cran_restrict data)
 
 					// Construct our ray as a vector going from our origin to our near plane
 					// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
-					vec3 rayDir = vec3_add(vec3_mulf(renderData->forward, renderData->near), vec3_add(vec3_mulf(renderData->right, randX), vec3_mulf(renderData->up, randY)));
+					cv3 rayDir = cv3_add(cv3_mulf(renderData->forward, renderData->near), cv3_add(cv3_mulf(renderData->right, randX), cv3_mulf(renderData->up, randY)));
 					// TODO: Do we want to scale for average in the loop or outside the loop?
 					// With too many SPP, the sceneColor might get too significant.
 
 					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir);
-					sceneColor = vec3_add(sceneColor, vec3_mulf(hit.light, light_attenuation(hit.surface, renderData->origin)));
+					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, light_attenuation(hit.surface, renderData->origin)));
 				}
-				sceneColor = vec3_mulf(sceneColor, rcp((float)renderConfig.samplesPerPixel));
+				sceneColor = cv3_mulf(sceneColor, cf_rcp((float)renderConfig.samplesPerPixel));
 
 				int32_t imgIdx = ((y + renderData->halfImgHeight) * renderData->imgWidth + (x + renderData->halfImgWidth)) * renderData->imgStride;
 				threadContext->hdrOutput[imgIdx + 0] = sceneColor.x;
@@ -1311,7 +898,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 100,
+		.samplesPerPixel = 1,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -1341,10 +928,10 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (vec3){ 0.0f, -2.0f, 0.0f };
-	mainRenderData.forward = (vec3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
-	mainRenderData.right = (vec3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
-	mainRenderData.up = (vec3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
+	mainRenderData.origin = (cv3){ 0.0f, -2.0f, 0.0f };
+	mainRenderData.forward = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
+	mainRenderData.right = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
+	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
 
 	float* cran_restrict hdrImage = malloc(mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride * sizeof(float));
 
