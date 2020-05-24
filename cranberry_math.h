@@ -14,10 +14,10 @@
 #endif
 
 #define cran_pi_val 3.14159265358979323846264338327f
-const float cran_pi = cran_pi_val;
-const float cran_tao = cran_pi_val * 2.0f;
-const float cran_rpi = 1.0f / cran_pi_val;
-const float cran_rtao = 1.0f / (cran_pi_val * 2.0f);
+static const float cran_pi = cran_pi_val;
+static const float cran_tao = cran_pi_val * 2.0f;
+static const float cran_rpi = 1.0f / cran_pi_val;
+static const float cran_rtao = 1.0f / (cran_pi_val * 2.0f);
 
 #define cran_lane_count 4
 cran_align(16) typedef union
