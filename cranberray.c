@@ -61,9 +61,10 @@ typedef struct
 } render_config_t;
 render_config_t renderConfig;
 
+typedef uint32_t random_seed_t;
 typedef struct
 {
-	int32_t randomSeed;
+	random_seed_t randomSeed;
 	uint32_t depth;
 
 	render_stats_t renderStats;
@@ -74,7 +75,17 @@ static float micro_to_seconds(uint64_t time)
 	return (float)time / 1000000.0f;
 }
 
-static float random01f(int32_t* seed)
+uint32_t lcg_parkmiller(uint32_t* state)
+{
+	// https://en.wikipedia.org/wiki/Lehmer_random_number_generator
+	uint64_t product = (uint64_t)(*state) * 48271;
+	uint32_t x = (uint32_t)(product & 0x7fffffff) + (uint32_t)(product >> 31);
+	x = (x & 0x7fffffff) + (x >> 31);
+	*state = x;
+	return x;
+}
+
+static float random01f(random_seed_t* seed)
 {
 	assert(*seed != 0);
 
@@ -85,13 +96,12 @@ static float random01f(int32_t* seed)
 		int32_t i;
 	} res;
 
-	*seed *= 16807;
-	uint32_t randomNumber = *seed;
+	uint32_t randomNumber = lcg_parkmiller(seed);
 	res.i = ((randomNumber>>9) | 0x3f800000);
 	return res.f - 1.0f;
 }
 
-static uint32_t randomRange(int32_t* seed, uint32_t min, uint32_t max)
+static uint32_t randomRange(random_seed_t* seed, uint32_t min, uint32_t max)
 {
 	float result = random01f(seed) * (float)(max - min);
 	return (uint32_t)result + min;
@@ -189,7 +199,7 @@ static float triangle_ray_intersection(cv3 rayO, cv3 rayD, float rayMin, float r
 	return rayMax;
 }
 
-static cv3 sphere_random(int32_t* seed)
+static cv3 sphere_random(random_seed_t* seed)
 {
 	cv3 p;
 	do
@@ -198,6 +208,22 @@ static cv3 sphere_random(int32_t* seed)
 	} while (cv3_dot(p, p) <= 1.0f);
 
 	return p;
+}
+
+static cv3 hemisphere_surface_random_uniform(random_seed_t* seed)
+{
+	float r1 = random01f(seed);
+	float r2 = random01f(seed);
+	float sinTheta = sqrtf(1.0f - r1 * r1); 
+	float phi = cran_tao * r2;
+	float x = sinTheta * cosf(phi);
+	float y = sinTheta * sinf(phi);
+	return (cv3) { x, y, r1 };
+}
+
+static cv3 box_random(random_seed_t* seed)
+{
+	return cv3_mulf((cv3) { random01f(seed)-0.5f, random01f(seed)-0.5f, random01f(seed)-0.5f }, 2.0f);
 }
 
 typedef struct
@@ -233,7 +259,7 @@ static cv3 sample_hdr(cv3 v, float* image, int32_t imgWidth, int32_t imgHeight, 
 	return color;
 }
 
-static cv3 importance_sample_hdr(imageset_t imageset, float* cran_restrict outBias, int32_t* seed)
+static cv3 importance_sample_hdr(imageset_t imageset, float* cran_restrict outBias, random_seed_t* seed)
 {
 	float ycdf = random01f(seed);
 	int y = 0;
@@ -267,7 +293,7 @@ static cv3 importance_sample_hdr(imageset_t imageset, float* cran_restrict outBi
 
 static float light_attenuation(cv3 l, cv3 r)
 {
-	return cf_rcp(1.0f + cv3_length(cv3_sub(l, r)));
+	return cf_rcp(1.0f + cv3_sqrlength(cv3_sub(l, r)));
 }
 
 // TODO: Refine our scene description
@@ -301,7 +327,7 @@ typedef enum
 
 typedef struct
 {
-	cv3 color;
+	cv3 albedo;
 } material_lambert_t;
 
 typedef struct
@@ -359,6 +385,7 @@ typedef struct
 	cv3 surface;
 	cv3 normal;
 	cv3 viewDir;
+	uint64_t triangleId;
 } shader_inputs_t;
 
 typedef cv3(material_shader_t)(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs);
@@ -578,13 +605,13 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 {
 	uint64_t startTime = cranpl_timestamp_micro();
 
-	static material_lambert_t lamberts[3] = { {.color = { 0.8f, 0.9f, 1.0f } },  {.color = { 0.1f, 0.1f, 0.1f } }, {.color = {1.0f, 1.0f, 1.0f} } };
+	static material_lambert_t lamberts[3] = { {.albedo = { 0.8f, 0.9f, 1.0f } },  {.albedo = { 0.1f, 0.1f, 0.1f } }, {.albedo = {1.0f, 1.0f, 1.0f} } };
 	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
 
 	static material_index_t materialIndices[] = 
 	{
-		{.dataIndex = 1,.typeIndex = material_lambert },
 		{.dataIndex = 0,.typeIndex = material_mirror },
+		{.dataIndex = 2,.typeIndex = material_lambert },
 		{.dataIndex = 2,.typeIndex = material_lambert },
 		{.dataIndex = 0,.typeIndex = material_lambert },
 	};
@@ -594,7 +621,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 	// Mesh
 	{
-		mesh.data = cranl_obj_load("mori_knob.obj", cranl_flip_yz);
+		mesh.data = cranl_obj_load("mitsuba-sphere.obj", cranl_flip_yz);
 		uint32_t meshLeafCount = mesh.data.faces.count;
 		index_aabb_pair_t* leafs = malloc(sizeof(index_aabb_pair_t) * meshLeafCount);
 
@@ -702,7 +729,7 @@ typedef struct
 } ray_hit_t;
 
 imageset_t backgroundImageset;
-static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD)
+static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD, uint64_t sourceTriangleId)
 {
 	context->depth++;
 	if (context->depth >= renderConfig.maxDepth)
@@ -720,6 +747,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		float distance;
 		cv3 normal;
 		material_index_t materialIndex;
+		uint64_t triangleId;
 	} closestHitInfo = { 0 };
 	closestHitInfo.distance = NoRayIntersection;
 
@@ -753,6 +781,12 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			// TODO: Lanes
 			uint32_t faceIndex = meshCandidates[faceCandidate];
 
+			uint64_t triangleId = ((uint64_t)faceIndex | (uint64_t)candidateIndex << 32);
+			if (triangleId == sourceTriangleId) // disallow self intersection
+			{
+				continue;
+			}
+
 			uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
 			uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
 			uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
@@ -775,8 +809,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 					}
 				}
 				closestHitInfo.materialIndex = materialIndices[materialIndex - 1];
-
 				closestHitInfo.distance = intersectionDistance;
+				closestHitInfo.triangleId = triangleId;
 
 				uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
 				uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
@@ -802,7 +836,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			{
 				.surface = intersectionPoint,
 				.normal = closestHitInfo.normal,
-				.viewDir = rayD
+				.viewDir = rayD,
+				.triangleId = closestHitInfo.triangleId
 			});
 		context->depth--;
 		return (ray_hit_t)
@@ -814,41 +849,33 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = sample_hdr(rayD, backgroundImageset.image, backgroundImageset.width, backgroundImageset.height, backgroundImageset.stride);
+	cv3 skybox = (cv3) { 1.0f, 1.0f, 1.0f };// sample_hdr(rayD, backgroundImageset.image, backgroundImageset.width, backgroundImageset.height, backgroundImageset.stride);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
 	return (ray_hit_t)
 	{
-		.light = cv3_mulf(skybox, 10000.0f),
-		.surface = cv3_add(rayO, cv3_mulf(rayD, 1000.0f)),
+		.light = skybox,
+		.surface = cv3_add(rayO, cv3_mulf(rayD, 10000000.0f)),
 		.hit = false
 	};
 }
 
 // TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
 // Do we want to handle this some other way?
-const float ReCastBias = 0.01f;
 static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 	// TODO: Consider iteration instead of recursion
-	cv3 castDir = cv3_add(inputs.normal, sphere_random(&context->randomSeed));
-	ray_hit_t result = cast_scene(context, scene, cv3_add(inputs.surface, cv3_mulf(inputs.normal, ReCastBias)), castDir);
+	cv3 castDir = hemisphere_surface_random_uniform(&context->randomSeed);
+	castDir = cm3_rotate_cv3(cm3_basis_from_normal(inputs.normal), castDir);
+	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 
-	if (!result.hit)
-	{
-		float bias;
-		castDir = importance_sample_hdr(backgroundImageset, &bias, &context->randomSeed);
-		result = cast_scene(context, scene, cv3_add(inputs.surface, cv3_mulf(inputs.normal, ReCastBias)), castDir);
-		result.light = cv3_mulf(result.light, bias);
-	}
+	float lambertCosine = cv3_dot(cv3_normalize(castDir), inputs.normal);
+	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
+	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), attenuation);
 
-	float lambertCosine = fmaxf(0.0f, cv3_dot(cv3_normalized(castDir), inputs.normal));
-	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
-
-	cv3 sceneColor = cv3_mul(sceneCast, cv3_mulf(lambertData.color, cran_rpi));
-	return sceneColor;
+	return cv3_mulf(cv3_mul(sceneCast, lambertData.albedo), 2.0f);
 }
 
 static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
@@ -856,10 +883,11 @@ static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materi
 	material_mirror_t mirrorData = ((const material_mirror_t* cran_restrict)materialData)[materialIndex];
 
 	cv3 castDir = cv3_reflect(inputs.viewDir, inputs.normal);
-	ray_hit_t result = cast_scene(context, scene, cv3_add(inputs.surface, cv3_mulf(inputs.normal, ReCastBias)), castDir);
+	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 
-	float lambertCosine = fmaxf(0.0f, cv3_dot(cv3_normalized(castDir), inputs.normal));
-	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), light_attenuation(result.surface, inputs.surface));
+	float lambertCosine = fmaxf(0.0f, cv3_dot(cv3_normalize(castDir), inputs.normal));
+	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
+	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), attenuation);
 
 	return cv3_mul(sceneCast, mirrorData.color);
 }
@@ -942,8 +970,8 @@ static void render_scene_async(void* cran_restrict data)
 					// TODO: Do we want to scale for average in the loop or outside the loop?
 					// With too many SPP, the sceneColor might get too significant.
 
-					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir);
-					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, light_attenuation(hit.surface, renderData->origin)));
+					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir, ~0ull);
+					sceneColor = cv3_add(sceneColor, hit.light);
 				}
 				sceneColor = cv3_mulf(sceneColor, cf_rcp((float)renderConfig.samplesPerPixel));
 
@@ -962,9 +990,9 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 10,
-		.renderWidth = 1024,
-		.renderHeight = 768
+		.samplesPerPixel = 100,
+		.renderWidth = 200,
+		.renderHeight = 100
 	};
 
 	static render_data_t mainRenderData;
@@ -1015,7 +1043,7 @@ int main()
 
 	render_context_t mainRenderContext =
 	{
-		.randomSeed = 143259
+		.randomSeed = 4325
 	};
 	generate_scene(&mainRenderContext, &mainRenderData.scene);
 
@@ -1033,7 +1061,7 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ 0.0f, -2.0f, 0.0f };
+	mainRenderData.origin = (cv3){ 0.0f, -3.5f, 0.0f };
 	mainRenderData.forward = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
 	mainRenderData.right = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
@@ -1068,7 +1096,7 @@ int main()
 			.renderQueue = &mainRenderQueue,
 			.context = 
 			{
-				.randomSeed = i+32165+i%2
+				.randomSeed = i+5435
 			},
 			.hdrOutput = hdrImage
 		};
@@ -1097,7 +1125,7 @@ int main()
 	mainRenderContext.renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime);
 
 	// Image Space Effects
-	bool enableImageSpace = true;
+	bool enableImageSpace = false;
 	if(enableImageSpace)
 	{
 		uint64_t imageSpaceStartTime = cranpl_timestamp_micro();

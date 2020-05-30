@@ -57,6 +57,7 @@ cran_forceinline float cf_fast_rsqrt(float f);
 cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2);
 cran_forceinline float cf_bilinear(float topLeft, float topRight, float bottomLeft, float bottomRight, float tx, float ty);
 cran_forceinline float cf_lerp(float a, float b, float t);
+cran_forceinline float cf_sign(float a);
 
 // Lane API
 cran_forceinline cfl cfl_replicate(float f);
@@ -83,7 +84,8 @@ cran_forceinline cv3 cv3_cross(cv3 l, cv3 r);
 cran_forceinline cv3 cv3_lerp(cv3 l, cv3 r, float t);
 cran_forceinline float cv3_length(cv3 v);
 cran_forceinline float cv3_rlength(cv3 v);
-cran_forceinline cv3 cv3_normalized(cv3 v);
+cran_forceinline float cv3_sqrlength(cv3 v);
+cran_forceinline cv3 cv3_normalize(cv3 v);
 cran_forceinline cv3 cv3_min(cv3 v, cv3 m);
 cran_forceinline cv3 cv3_max(cv3 v, cv3 m);
 cran_forceinline cv3 cv3_rcp(cv3 v);
@@ -175,6 +177,19 @@ cran_forceinline float cf_bilinear(float topLeft, float topRight, float bottomLe
 cran_forceinline float cf_lerp(float a, float b, float t)
 {
 	return t * b + (1.0f - t)*a;
+}
+
+cran_forceinline float cf_sign(float a)
+{
+	// Don't handle NaN, 0, inf
+	union
+	{
+		uint32_t u;
+		float f;
+	} conv;
+	conv.f = a;
+	conv.u = conv.u & 0x80000000 | 0x3F800000;
+	return conv.f;
 }
 
 // Lane Implementation
@@ -294,7 +309,12 @@ cran_forceinline float cv3_rlength(cv3 v)
 	return cf_rsqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
-cran_forceinline cv3 cv3_normalized(cv3 v)
+cran_forceinline float cv3_sqrlength(cv3 v)
+{
+	return (v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+cran_forceinline cv3 cv3_normalize(cv3 v)
 {
 	return cv3_mulf(v, cv3_rlength(v));
 }
@@ -427,9 +447,9 @@ cran_forceinline cm3 cm3_basis_from_normal(cv3 n)
 {
 	// Frisvad ONB from https://backend.orbit.dtu.dk/ws/portalfiles/portal/126824972/onb_frisvad_jgt2012_v2.pdf
 	// revised from Pixar https://graphics.pixar.com/library/OrthonormalB/paper.pdf#page=2&zoom=auto,-233,561
-	float sign = copysignf(1.0f, n.z);
+	float sign = cf_sign(n.z);
 	float a = -cf_rcp(sign + n.z);
-	float b = -n.x*n.y*a;
+	float b = n.x*n.y*a;
 	cv3 i = (cv3) { 1.0f + sign * n.x*n.x*a, sign * b, -sign * n.x };
 	cv3 j = (cv3) { b, sign + n.y*n.y*a, -n.y };
 
@@ -438,13 +458,9 @@ cran_forceinline cm3 cm3_basis_from_normal(cv3 n)
 
 cran_forceinline cv3 cm3_mul_cv3(cm3 m, cv3 v)
 {
-	cv3 vx = (cv3) { v.x, v.x, v.x };
-	cv3 vy = (cv3) { v.y, v.y, v.y };
-	cv3 vz = (cv3) { v.z, v.z, v.z };
-
-	cv3 rx = cv3_mul(vx, m.i);
-	cv3 ry = cv3_mul(vy, m.j);
-	cv3 rz = cv3_mul(vz, m.k);
+	cv3 rx = cv3_mulf(m.i, v.x);
+	cv3 ry = cv3_mulf(m.j, v.y);
+	cv3 rz = cv3_mulf(m.k, v.z);
 
 	return cv3_add(cv3_add(rx, ry), rz);
 }
