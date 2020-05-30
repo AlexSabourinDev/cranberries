@@ -361,7 +361,7 @@ cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cra
 
 cran_forceinline cv3 cv3_from_spherical(float theta, float phi, float radius)
 {
-	return (cv3) { cosf(theta) * sinf(phi) * radius, sinf(theta) * sinf(phi) * radius, radius * cosf(phi) };
+	return (cv3) { cosf(phi) * sinf(theta) * radius, sinf(phi) * sinf(theta) * radius, radius * cosf(theta) };
 }
 
 // V3 Lane Implementation

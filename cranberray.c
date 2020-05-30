@@ -285,7 +285,7 @@ static cv3 importance_sample_hdr(imageset_t imageset, float* cran_restrict outBi
 	float biasx = imageset.luminance2d[y * imageset.width + x] * cf_rcp(imageset.sum1d[y]);
 	float bias = biasy * biasx;
 
-	cv3 direction = cv3_from_spherical(((float)x / (float)imageset.width)*cran_tao, ((float)y / (float)imageset.height)*cran_pi, 1.0f);
+	cv3 direction = cv3_from_spherical(((float)y / (float)imageset.height)*cran_pi, ((float)x / (float)imageset.width)*cran_tao, 1.0f);
 
 	*outBias = bias;
 	return direction;
@@ -611,7 +611,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	static material_index_t materialIndices[] = 
 	{
 		{.dataIndex = 0,.typeIndex = material_mirror },
-		{.dataIndex = 2,.typeIndex = material_lambert },
+		{.dataIndex = 1,.typeIndex = material_lambert },
 		{.dataIndex = 2,.typeIndex = material_lambert },
 		{.dataIndex = 0,.typeIndex = material_lambert },
 	};
@@ -782,7 +782,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			uint32_t faceIndex = meshCandidates[faceCandidate];
 
 			uint64_t triangleId = ((uint64_t)faceIndex | (uint64_t)candidateIndex << 32);
-			if (triangleId == sourceTriangleId) // disallow self intersection
+			if (sourceTriangleId == triangleId) // disallow self intersection
 			{
 				continue;
 			}
@@ -849,14 +849,14 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = (cv3) { 1.0f, 1.0f, 1.0f };// sample_hdr(rayD, backgroundImageset.image, backgroundImageset.width, backgroundImageset.height, backgroundImageset.stride);
+	cv3 skybox = sample_hdr(rayD, backgroundImageset.image, backgroundImageset.width, backgroundImageset.height, backgroundImageset.stride);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
 	return (ray_hit_t)
 	{
 		.light = skybox,
-		.surface = cv3_add(rayO, cv3_mulf(rayD, 10000000.0f)),
+		.surface = cv3_add(rayO, cv3_mulf(rayD, 100.0f)),
 		.hit = false
 	};
 }
@@ -867,15 +867,27 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 {
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 	// TODO: Consider iteration instead of recursion
+	cv3 light = { 0 };
 	cv3 castDir = hemisphere_surface_random_uniform(&context->randomSeed);
 	castDir = cm3_rotate_cv3(cm3_basis_from_normal(inputs.normal), castDir);
 	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
+	if (!result.hit)
+	{
+		float bias;
+		castDir = importance_sample_hdr(backgroundImageset, &bias, &context->randomSeed);
+		result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
+		result.light = cv3_mulf(result.light, cf_rcp(bias));
+	}
+	else
+	{
+		result.light = cv3_mulf(result.light, cran_tao);
+	}
 
-	float lambertCosine = cv3_dot(cv3_normalize(castDir), inputs.normal);
-	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
-	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), attenuation);
+	float lambertCosine = fmaxf(0.0f, cv3_dot(castDir, inputs.normal));
+	float attenuation = light_attenuation(result.surface, inputs.surface);
+	light = cv3_add(light, cv3_mulf(result.light, lambertCosine * attenuation));
 
-	return cv3_mulf(cv3_mul(sceneCast, lambertData.albedo), 2.0f);
+	return cv3_mulf(cv3_mul(light, lambertData.albedo), cran_rpi);
 }
 
 static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
@@ -971,9 +983,9 @@ static void render_scene_async(void* cran_restrict data)
 					// With too many SPP, the sceneColor might get too significant.
 
 					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir, ~0ull);
-					sceneColor = cv3_add(sceneColor, hit.light);
+					float attenuation = hit.hit ? light_attenuation(hit.surface, renderData->origin) : 1.0f;
+					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, cf_rcp((float)renderConfig.samplesPerPixel) * attenuation));
 				}
-				sceneColor = cv3_mulf(sceneColor, cf_rcp((float)renderConfig.samplesPerPixel));
 
 				int32_t imgIdx = ((y + renderData->halfImgHeight) * renderData->imgWidth + (x + renderData->halfImgWidth)) * renderData->imgStride;
 				threadContext->hdrOutput[imgIdx + 0] = sceneColor.x;
@@ -991,8 +1003,8 @@ int main()
 	{
 		.maxDepth = 99,
 		.samplesPerPixel = 100,
-		.renderWidth = 200,
-		.renderHeight = 100
+		.renderWidth = 1024,
+		.renderHeight = 768
 	};
 
 	static render_data_t mainRenderData;
@@ -1125,7 +1137,7 @@ int main()
 	mainRenderContext.renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime);
 
 	// Image Space Effects
-	bool enableImageSpace = false;
+	bool enableImageSpace = true;
 	if(enableImageSpace)
 	{
 		uint64_t imageSpaceStartTime = cranpl_timestamp_micro();
