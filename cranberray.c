@@ -12,6 +12,7 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <string.h>
+#include <time.h>
 
 #include "stb_image.h"
 #include "cranberry_platform.h"
@@ -75,6 +76,7 @@ static float micro_to_seconds(uint64_t time)
 	return (float)time / 1000000.0f;
 }
 
+
 uint32_t lcg_parkmiller(uint32_t* state)
 {
 	// https://en.wikipedia.org/wiki/Lehmer_random_number_generator
@@ -85,26 +87,28 @@ uint32_t lcg_parkmiller(uint32_t* state)
 	return x;
 }
 
+static uint32_t random(random_seed_t* seed)
+{
+	return lcg_parkmiller(seed);
+}
+
 static float random01f(random_seed_t* seed)
 {
-	assert(*seed != 0);
-
 	// http://www.iquilezles.org/www/articles/sfrand/sfrand.htm
 	union
 	{
 		float f;
-		int32_t i;
+		uint32_t u;
 	} res;
 
-	uint32_t randomNumber = lcg_parkmiller(seed);
-	res.i = ((randomNumber>>9) | 0x3f800000);
-	return res.f - 1.0f;
+	res.u = ((lcg_parkmiller(seed)>>8) | 0x3f800000);
+	return res.f-1.0f;
 }
 
 static uint32_t randomRange(random_seed_t* seed, uint32_t min, uint32_t max)
 {
-	float result = random01f(seed) * (float)(max - min);
-	return (uint32_t)result + min;
+	uint32_t result = random(seed) % (max - min);
+	return result + min;
 }
 
 static float rgb_to_luminance(float r, float g, float b)
@@ -210,10 +214,8 @@ static cv3 sphere_random(random_seed_t* seed)
 	return p;
 }
 
-static cv3 hemisphere_surface_random_uniform(random_seed_t* seed)
+static cv3 hemisphere_surface_random_uniform(float r1, float r2)
 {
-	float r1 = random01f(seed);
-	float r2 = random01f(seed);
 	float sinTheta = sqrtf(1.0f - r1 * r1); 
 	float phi = cran_tao * r2;
 	float x = sinTheta * cosf(phi);
@@ -867,8 +869,10 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 {
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 	// TODO: Consider iteration instead of recursion
-	cv3 light = { 0 };
-	cv3 castDir = hemisphere_surface_random_uniform(&context->randomSeed);
+
+	float r1 = random01f(&context->randomSeed);
+	float r2 = random01f(&context->randomSeed);
+	cv3 castDir = hemisphere_surface_random_uniform(r1,r2);
 	castDir = cm3_rotate_cv3(cm3_basis_from_normal(inputs.normal), castDir);
 	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 	if (!result.hit)
@@ -883,11 +887,9 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 		result.light = cv3_mulf(result.light, cran_tao);
 	}
 
-	float lambertCosine = fmaxf(0.0f, cv3_dot(castDir, inputs.normal));
 	float attenuation = light_attenuation(result.surface, inputs.surface);
-	light = cv3_add(light, cv3_mulf(result.light, lambertCosine * attenuation));
-
-	return cv3_mulf(cv3_mul(light, lambertData.albedo), cran_rpi);
+	cv3 light = cv3_mulf(result.light, cv3_dot(castDir, inputs.normal) * attenuation);
+	return cv3_mul(light, cv3_mulf(lambertData.albedo, cran_rpi));
 }
 
 static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
@@ -983,8 +985,7 @@ static void render_scene_async(void* cran_restrict data)
 					// With too many SPP, the sceneColor might get too significant.
 
 					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir, ~0ull);
-					float attenuation = hit.hit ? light_attenuation(hit.surface, renderData->origin) : 1.0f;
-					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, cf_rcp((float)renderConfig.samplesPerPixel) * attenuation));
+					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, cf_rcp((float)renderConfig.samplesPerPixel)));
 				}
 
 				int32_t imgIdx = ((y + renderData->halfImgHeight) * renderData->imgWidth + (x + renderData->halfImgWidth)) * renderData->imgStride;
@@ -1002,7 +1003,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 100,
+		.samplesPerPixel = 10,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -1055,7 +1056,7 @@ int main()
 
 	render_context_t mainRenderContext =
 	{
-		.randomSeed = 4325
+		.randomSeed = (uint32_t)time(0)
 	};
 	generate_scene(&mainRenderContext, &mainRenderData.scene);
 
@@ -1108,7 +1109,7 @@ int main()
 			.renderQueue = &mainRenderQueue,
 			.context = 
 			{
-				.randomSeed = i+5435
+				.randomSeed = random(&mainRenderContext.randomSeed)
 			},
 			.hdrOutput = hdrImage
 		};
@@ -1163,9 +1164,9 @@ int main()
 		uint8_t* cran_restrict bitmap = malloc(mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride);
 		for (int32_t i = 0; i < mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride; i+=mainRenderData.imgStride)
 		{
-			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 2]));
-			bitmap[i + 1] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 1]));
-			bitmap[i + 2] = (uint8_t)(255.99f * sqrtf(hdrImage[i + 0]));
+			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(fminf(hdrImage[i + 2], 1.0f)));
+			bitmap[i + 1] = (uint8_t)(255.99f * sqrtf(fminf(hdrImage[i + 1], 1.0f)));
+			bitmap[i + 2] = (uint8_t)(255.99f * sqrtf(fminf(hdrImage[i + 0], 1.0f)));
 			bitmap[i + 3] = (uint8_t)(255.99f * hdrImage[i + 3]);
 		}
 
