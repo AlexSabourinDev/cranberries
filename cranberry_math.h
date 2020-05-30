@@ -94,8 +94,8 @@ cran_forceinline cv3 cv3_reflect(cv3 i, cv3 n);
 // a is between 0 and 2 PI
 // t is between 0 and PI (0 being the bottom, PI being the top)
 cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_restrict t);
-// theta is between 0 and 2PI (horizontal plane)
-// phi is between 0 and PI (vertical plane)
+// theta is between 0 and PI (vertical plane)
+// phi is between 0 and 2PI (horizontal plane)
 cran_forceinline cv3 cv3_from_spherical(float theta, float phi, float radius);
 
 // V3 Lane API

@@ -608,12 +608,12 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	uint64_t startTime = cranpl_timestamp_micro();
 
 	static material_lambert_t lamberts[3] = { {.albedo = { 0.8f, 0.9f, 1.0f } },  {.albedo = { 0.1f, 0.1f, 0.1f } }, {.albedo = {1.0f, 1.0f, 1.0f} } };
-	static material_mirror_t mirrors[2] = { {.color = { 0.8f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
+	static material_mirror_t mirrors[2] = { {.color = { 1.0f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
 
 	static material_index_t materialIndices[] = 
 	{
 		{.dataIndex = 0,.typeIndex = material_mirror },
-		{.dataIndex = 1,.typeIndex = material_lambert },
+		{.dataIndex = 2,.typeIndex = material_lambert },
 		{.dataIndex = 2,.typeIndex = material_lambert },
 		{.dataIndex = 0,.typeIndex = material_lambert },
 	};
@@ -753,11 +753,6 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	} closestHitInfo = { 0 };
 	closestHitInfo.distance = NoRayIntersection;
 
-	// TODO: Traverse our BVH instead - Done
-	// TODO: Gather list of candidate BVHs - Done
-	// TODO: Sort list of instances by type
-	// TODO: find closest intersection in candidates
-	// TODO: ?!?!?
 	uint64_t intersectionStartTime = cranpl_timestamp_micro();
 
 	uint32_t candidates[1000]; // TODO: Max candidates of 1000?
@@ -851,19 +846,18 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = sample_hdr(rayD, backgroundImageset.image, backgroundImageset.width, backgroundImageset.height, backgroundImageset.stride);
+	cv3 skybox = (cv3) { 1.0f, 1.0f, 1.0f };// sample_hdr(rayD, backgroundImageset.image, backgroundImageset.width, backgroundImageset.height, backgroundImageset.stride);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
 	return (ray_hit_t)
 	{
 		.light = skybox,
-		.surface = cv3_add(rayO, cv3_mulf(rayD, 100.0f)),
+		.surface = cv3_add(rayO, cv3_mulf(rayD, 10000.0f)),
 		.hit = false
 	};
 }
 
-// TODO: This recast bias is simply to avoid re-intersecting with our object when casting.
 // Do we want to handle this some other way?
 static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
@@ -875,7 +869,9 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 	cv3 castDir = hemisphere_surface_random_uniform(r1,r2);
 	castDir = cm3_rotate_cv3(cm3_basis_from_normal(inputs.normal), castDir);
 	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
-	if (!result.hit)
+
+	const bool ImportanceSampling = false;
+	if (!result.hit && ImportanceSampling)
 	{
 		float bias;
 		castDir = importance_sample_hdr(backgroundImageset, &bias, &context->randomSeed);
@@ -887,8 +883,8 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 		result.light = cv3_mulf(result.light, cran_tao);
 	}
 
-	float attenuation = light_attenuation(result.surface, inputs.surface);
-	cv3 light = cv3_mulf(result.light, cv3_dot(castDir, inputs.normal) * attenuation);
+	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
+	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, inputs.normal), 0.0f) * attenuation);
 	return cv3_mul(light, cv3_mulf(lambertData.albedo, cran_rpi));
 }
 
@@ -981,8 +977,6 @@ static void render_scene_async(void* cran_restrict data)
 					// Construct our ray as a vector going from our origin to our near plane
 					// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
 					cv3 rayDir = cv3_add(cv3_mulf(renderData->forward, renderData->near), cv3_add(cv3_mulf(renderData->right, randX), cv3_mulf(renderData->up, randY)));
-					// TODO: Do we want to scale for average in the loop or outside the loop?
-					// With too many SPP, the sceneColor might get too significant.
 
 					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir, ~0ull);
 					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, cf_rcp((float)renderConfig.samplesPerPixel)));
