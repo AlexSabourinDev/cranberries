@@ -28,6 +28,11 @@ cran_align(16) typedef union
 
 typedef struct
 {
+	float x, y;
+} cv2;
+
+typedef struct
+{
 	float x, y, z;
 } cv3;
 
@@ -58,6 +63,7 @@ cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restri
 cran_forceinline float cf_bilinear(float topLeft, float topRight, float bottomLeft, float bottomRight, float tx, float ty);
 cran_forceinline float cf_lerp(float a, float b, float t);
 cran_forceinline float cf_sign(float a);
+cran_forceinline float cf_frac(float a);
 
 // Lane API
 cran_forceinline cfl cfl_replicate(float f);
@@ -71,6 +77,10 @@ cran_forceinline cfl cfl_mul(cfl l, cfl r);
 cran_forceinline int cfl_mask(cfl v);
 cran_forceinline cfl cfl_rcp(cfl v);
 cran_forceinline cfl cfl_lt(cfl l, cfl r);
+
+// V2 API
+cran_forceinline cv2 cv2_mulf(cv2 l, float r);
+cran_forceinline cv2 cv2_add(cv2 l, cv2 r);
 
 // V3 API
 cran_forceinline cv3 cv3_mulf(cv3 l, float r);
@@ -192,6 +202,11 @@ cran_forceinline float cf_sign(float a)
 	return conv.f;
 }
 
+cran_forceinline float cf_frac(float a)
+{
+	return a - truncf(a);
+}
+
 // Lane Implementation
 cran_forceinline cfl cfl_replicate(float f)
 {
@@ -246,6 +261,17 @@ cran_forceinline cfl cfl_rcp(cfl v)
 cran_forceinline cfl cfl_lt(cfl l, cfl r)
 {
 	return  (cfl) { .sse = _mm_cmplt_ps(l.sse, r.sse) };
+}
+
+// V2 Implementation
+cran_forceinline cv2 cv2_mulf(cv2 l, float r)
+{
+	return (cv2) { .x = l.x * r, .y = l.y * r };
+}
+
+cran_forceinline cv2 cv2_add(cv2 l, cv2 r)
+{
+	return (cv2) {.x = l.x + r.x, .y = l.y + r.y};
 }
 
 // V3 Implementation

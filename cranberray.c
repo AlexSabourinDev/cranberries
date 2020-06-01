@@ -242,26 +242,58 @@ typedef struct
 	int32_t width;
 	int32_t height;
 	int32_t stride;
-} imageset_t;
+} sampler_hdr_t;
 
-static cv3 sample_hdr(cv3 v, float* image, int32_t imgWidth, int32_t imgHeight, int32_t imgStride)
+typedef struct
 {
-	float azimuth, theta;
-	cv3_to_spherical(v, &azimuth, &theta);
+	uint8_t* cran_restrict image;
 
-	int32_t readY = (int32_t)(fminf(theta * cran_rpi, 0.999f) * (float)imgHeight);
-	int32_t readX = (int32_t)(fminf(azimuth * cran_rtao, 0.999f) * (float)imgWidth);
-	int32_t readIndex = (readY * imgWidth + readX) * imgStride;
+	int32_t width;
+	int32_t height;
+	int32_t stride;
+} sampler_u8_t;
+
+static cv3 sample_rgb_f32(cv2 uv, sampler_u8_t sampler)
+{
+	// TODO: Bilerp
+	uv.y = cf_frac(uv.y);
+	uv.x = cf_frac(uv.x);
+
+	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
+	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
+
+	float readY = uv.y * (float)sampler.height;
+	float readX = uv.x * (float)sampler.width;
+	int32_t readIndex = ((int32_t)floorf(readY) * sampler.width + (int32_t)floorf(readX)) * sampler.stride;
 
 	cv3 color;
-	color.x = image[readIndex + 0];
-	color.y = image[readIndex + 1];
-	color.z = image[readIndex + 2];
+	color.x = (float)sampler.image[readIndex + 0] / 255.0f;
+	color.y = (float)sampler.image[readIndex + 1] / 255.0f;
+	color.z = (float)sampler.image[readIndex + 2] / 255.0f;
 
 	return color;
 }
 
-static cv3 importance_sample_hdr(imageset_t imageset, float* cran_restrict outBias, random_seed_t* seed)
+
+static cv3 sample_hdr(cv3 v, sampler_hdr_t sampler)
+{
+	float azimuth, theta;
+	cv3_to_spherical(v, &azimuth, &theta);
+
+	// TODO: lerp
+	int32_t readY = (int32_t)(fminf(theta * cran_rpi, 0.999f) * (float)sampler.height);
+	int32_t readX = (int32_t)(fminf(azimuth * cran_rtao, 0.999f) * (float)sampler.width);
+	int32_t readIndex = (readY * sampler.width + readX) * sampler.stride;
+
+	cv3 color;
+	color.x = sampler.image[readIndex + 0];
+	color.y = sampler.image[readIndex + 1];
+	color.z = sampler.image[readIndex + 2];
+
+	return color;
+}
+
+static cv3 importance_sample_hdr(sampler_hdr_t imageset, float* cran_restrict outBias, random_seed_t* seed)
 {
 	float ycdf = random01f(seed);
 	int y = 0;
@@ -387,6 +419,7 @@ typedef struct
 	cv3 surface;
 	cv3 normal;
 	cv3 viewDir;
+	cv2 uv;
 	uint64_t triangleId;
 } shader_inputs_t;
 
@@ -730,7 +763,9 @@ typedef struct
 	bool hit;
 } ray_hit_t;
 
-imageset_t backgroundImageset;
+sampler_hdr_t backgroundSampler;
+sampler_u8_t checkerboardSampler;
+
 static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD, uint64_t sourceTriangleId)
 {
 	context->depth++;
@@ -748,6 +783,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	{
 		float distance;
 		cv3 normal;
+		cv2 uv;
 		material_index_t materialIndex;
 		uint64_t triangleId;
 	} closestHitInfo = { 0 };
@@ -818,6 +854,16 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 				memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(cv3));
 
 				closestHitInfo.normal = cv3_add(cv3_add(cv3_mulf(normalA, u), cv3_mulf(normalB, v)), cv3_mulf(normalC, w));
+			
+				uint32_t uvIndexA = mesh->data.faces.uvIndices[faceIndex * 3 + 0];
+				uint32_t uvIndexB = mesh->data.faces.uvIndices[faceIndex * 3 + 1];
+				uint32_t uvIndexC = mesh->data.faces.uvIndices[faceIndex * 3 + 2];
+				cv2 uvA, uvB, uvC;
+				memcpy(&uvA, mesh->data.uvs.data + uvIndexA * 2, sizeof(cv2));
+				memcpy(&uvB, mesh->data.uvs.data + uvIndexB * 2, sizeof(cv2));
+				memcpy(&uvC, mesh->data.uvs.data + uvIndexC * 2, sizeof(cv2));
+
+				closestHitInfo.uv = cv2_add(cv2_add(cv2_mulf(uvA, u), cv2_mulf(uvB, v)), cv2_mulf(uvC, w));
 			}
 		}
 	}
@@ -834,6 +880,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 				.surface = intersectionPoint,
 				.normal = closestHitInfo.normal,
 				.viewDir = rayD,
+				.uv = closestHitInfo.uv,
 				.triangleId = closestHitInfo.triangleId
 			});
 		context->depth--;
@@ -846,7 +893,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = (cv3) { 1.0f, 1.0f, 1.0f };// sample_hdr(rayD, backgroundImageset.image, backgroundImageset.width, backgroundImageset.height, backgroundImageset.stride);
+	cv3 skybox = (cv3) { 1.0f, 1.0f, 1.0f };// sample_hdr(rayD, backgroundSampler.image, backgroundSampler.width, backgroundSampler.height, backgroundSampler.stride);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
@@ -874,7 +921,7 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 	if (!result.hit && ImportanceSampling)
 	{
 		float bias;
-		castDir = importance_sample_hdr(backgroundImageset, &bias, &context->randomSeed);
+		castDir = importance_sample_hdr(backgroundSampler, &bias, &context->randomSeed);
 		result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 		result.light = cv3_mulf(result.light, cf_rcp(bias));
 	}
@@ -883,9 +930,12 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 		result.light = cv3_mulf(result.light, cran_tao);
 	}
 
+	cv3 albedo = sample_rgb_f32(inputs.uv, checkerboardSampler);
+	albedo = cv3_mul(albedo,lambertData.albedo);
+
 	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
 	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, inputs.normal), 0.0f) * attenuation);
-	return cv3_mul(light, cv3_mulf(lambertData.albedo, cran_rpi));
+	return cv3_mul(light, cv3_mulf(albedo, cran_rpi));
 }
 
 static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
@@ -1005,47 +1055,53 @@ int main()
 	static render_data_t mainRenderData;
 	uint64_t startTime = cranpl_timestamp_micro();
 
+	// Checkerboad
 	{
-		backgroundImageset.image = stbi_loadf("background_4k.hdr", &backgroundImageset.width, &backgroundImageset.height, &backgroundImageset.stride, 0);
-		backgroundImageset.cdf2d = (float*)malloc(sizeof(float) * backgroundImageset.width * backgroundImageset.height);
-		backgroundImageset.luminance2d = (float*)malloc(sizeof(float) * backgroundImageset.width * backgroundImageset.height);
+		checkerboardSampler.image = stbi_load("checkerboard.png", &checkerboardSampler.width, &checkerboardSampler.height, &checkerboardSampler.stride, 0);
+	}
 
-		backgroundImageset.cdf1d = (float*)malloc(sizeof(float) * backgroundImageset.height);
-		backgroundImageset.sum1d = (float*)malloc(sizeof(float) * backgroundImageset.height);
+	// Environment map
+	{
+		backgroundSampler.image = stbi_loadf("background_4k.hdr", &backgroundSampler.width, &backgroundSampler.height, &backgroundSampler.stride, 0);
+		backgroundSampler.cdf2d = (float*)malloc(sizeof(float) * backgroundSampler.width * backgroundSampler.height);
+		backgroundSampler.luminance2d = (float*)malloc(sizeof(float) * backgroundSampler.width * backgroundSampler.height);
+
+		backgroundSampler.cdf1d = (float*)malloc(sizeof(float) * backgroundSampler.height);
+		backgroundSampler.sum1d = (float*)malloc(sizeof(float) * backgroundSampler.height);
 
 		float ysum = 0.0f;
-		for (int y = 0; y < backgroundImageset.height; y++)
+		for (int y = 0; y < backgroundSampler.height; y++)
 		{
 			float xsum = 0.0f;
-			for (int x = 0; x < backgroundImageset.width; x++)
+			for (int x = 0; x < backgroundSampler.width; x++)
 			{
-				int index = (y * backgroundImageset.width) + x;
+				int index = (y * backgroundSampler.width) + x;
 
-				float* cran_restrict pixel = &backgroundImageset.image[index * backgroundImageset.stride];
+				float* cran_restrict pixel = &backgroundSampler.image[index * backgroundSampler.stride];
 				float luminance = rgb_to_luminance(pixel[0], pixel[1], pixel[2]);
 
 				xsum += luminance;
-				backgroundImageset.luminance2d[index] = luminance;
-				backgroundImageset.cdf2d[index] = xsum;
+				backgroundSampler.luminance2d[index] = luminance;
+				backgroundSampler.cdf2d[index] = xsum;
 			}
 
-			for (int x = 0; x < backgroundImageset.width; x++)
+			for (int x = 0; x < backgroundSampler.width; x++)
 			{
-				int index = (y * backgroundImageset.width) + x;
-				backgroundImageset.cdf2d[index] = backgroundImageset.cdf2d[index] * cf_rcp(xsum);
+				int index = (y * backgroundSampler.width) + x;
+				backgroundSampler.cdf2d[index] = backgroundSampler.cdf2d[index] * cf_rcp(xsum);
 			}
 
 			ysum += xsum;
-			backgroundImageset.cdf1d[y] = ysum;
-			backgroundImageset.sum1d[y] = xsum;
+			backgroundSampler.cdf1d[y] = ysum;
+			backgroundSampler.sum1d[y] = xsum;
 		}
 
-		for (int y = 0; y < backgroundImageset.height; y++)
+		for (int y = 0; y < backgroundSampler.height; y++)
 		{
-			backgroundImageset.cdf1d[y] = backgroundImageset.cdf1d[y]  * cf_rcp(ysum);
+			backgroundSampler.cdf1d[y] = backgroundSampler.cdf1d[y]  * cf_rcp(ysum);
 		}
 
-		backgroundImageset.sumTotal = ysum;
+		backgroundSampler.sumTotal = ysum;
 	}
 
 	render_context_t mainRenderContext =
@@ -1207,10 +1263,11 @@ int main()
 	free(threadHandles);
 	free(mainRenderQueue.chunks);
 	free(hdrImage);
-	free(backgroundImageset.cdf2d);
-	free(backgroundImageset.luminance2d);
-	free(backgroundImageset.cdf1d);
-	free(backgroundImageset.sum1d);
-	stbi_image_free(backgroundImageset.image);
+	free(backgroundSampler.cdf2d);
+	free(backgroundSampler.luminance2d);
+	free(backgroundSampler.cdf1d);
+	free(backgroundSampler.sum1d);
+	stbi_image_free(checkerboardSampler.image);
+	stbi_image_free(backgroundSampler.image);
 	return 0;
 }
