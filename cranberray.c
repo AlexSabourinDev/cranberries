@@ -19,6 +19,30 @@
 #include "cranberry_loader.h"
 #include "cranberry_math.h"
 
+// Allocator
+typedef struct
+{
+	// Grows from bottom to top
+	uint8_t* mem;
+	uint64_t top;
+	uint64_t size;
+} crana_stack_t;
+
+void* crana_stack_alloc(crana_stack_t* stack, uint64_t size)
+{
+	uint8_t* ptr = stack->mem + stack->top;
+	stack->top += size;
+	assert(stack->top <= stack->size);
+	return ptr;
+}
+
+void crana_stack_free(crana_stack_t* stack, uint64_t size)
+{
+	stack->top -= size;
+	assert(stack->top <= stack->size);
+}
+
+
 typedef struct
 {
 	uint64_t rayCount; // TODO: only reference through atomics
@@ -67,6 +91,8 @@ typedef struct
 {
 	random_seed_t randomSeed;
 	uint32_t depth;
+	crana_stack_t stack;
+	crana_stack_t scratchStack;
 
 	render_stats_t renderStats;
 } render_context_t;
@@ -560,14 +586,18 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	return builtBVH;
 }
 
-static uint32_t traverse_bvh(render_stats_t* renderStats, bvh_t const* bvh, cv3 rayO, cv3 rayD, float rayMin, float rayMax, uint32_t* candidates, uint32_t maxInstances)
+// Allocates candidates from bottom stack
+// Uses top stack for working memory
+// TODO: Maybe 2 seperate stacks would be better than using a single stack with 2 apis
+static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 rayO, cv3 rayD, float rayMin, float rayMax, uint32_t** candidates)
 {
+	*candidates = crana_stack_alloc(&context->stack, 0); // Allocate nothing, but we're going to be growing it
+
 	uint64_t traversalStartTime = cranpl_timestamp_micro();
 
 	uint32_t iter = 0;
 
-	// TODO: custom allocator
-	uint32_t* testQueue = malloc(sizeof(uint32_t) * 10000); // TODO: Currently we just allow 1000 stack pushes. Fix this!
+	uint32_t* testQueue = crana_stack_alloc(&context->scratchStack, sizeof(uint32_t));
 	uint32_t testQueueSize = 1;
 	uint32_t testQueueIter = 0;
 
@@ -594,45 +624,47 @@ static uint32_t traverse_bvh(render_stats_t* renderStats, bvh_t const* bvh, cv3 
 				{
 					uint32_t nodeIndex = testQueue[testQueueIter + i];
 
-					renderStats->bvhHitCount++;
+					context->renderStats.bvhHitCount++;
 
 					// All our leaves are packed at the end of the 
 					bool isLeaf = bvh->jumps[nodeIndex].isLeaf;
 					if (isLeaf)
 					{
-						renderStats->bvhLeafHitCount++;
+						context->renderStats.bvhLeafHitCount++;
 
-						candidates[iter] = bvh->jumps[nodeIndex].indices.index;
+						// Grows our candidate pointer
+						crana_stack_alloc(&context->stack, sizeof(uint32_t));
+						(*candidates)[iter] = bvh->jumps[nodeIndex].indices.index;
 						iter++;
-						assert(iter <= maxInstances);
 					}
 					else
 					{
+						// We know that our memory still started at our original allocation
+						crana_stack_alloc(&context->scratchStack, sizeof(uint32_t) * 2);
+
 						testQueue[testQueueSize] = bvh->jumps[nodeIndex].indices.jumps.left;
 						testQueueSize++;
 						testQueue[testQueueSize] = bvh->jumps[nodeIndex].indices.jumps.right;
 						testQueueSize++;
-
-						assert(testQueueSize < 10000);
 					}
 				}
 				else
 				{
-					renderStats->bvhMissCount++;
+					context->renderStats.bvhMissCount++;
 				}
 			}
 		}
 		else
 		{
-			renderStats->bvhMissCount += activeLaneCount;
+			context->renderStats.bvhMissCount += activeLaneCount;
 		}
 
 
 		testQueueIter += activeLaneCount;
 	}
 
-	free(testQueue);
-	renderStats->bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
+	crana_stack_free(&context->scratchStack, testQueueSize * sizeof(uint32_t));
+	context->renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
 	return iter;
 }
 
@@ -791,81 +823,89 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 
 	uint64_t intersectionStartTime = cranpl_timestamp_micro();
 
-	uint32_t candidates[1000]; // TODO: Max candidates of 1000?
-	uint32_t candidateCount = traverse_bvh(&context->renderStats, &scene->bvh, rayO, rayD, 0.0f, NoRayIntersection, candidates, 1000);
-	for (uint32_t i = 0; i < candidateCount; i++)
+	// Candidates
 	{
-		uint32_t candidateIndex = candidates[i];
-
-		cv3 instancePos = scene->instances.data[candidateIndex].pos;
-		uint32_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
-
-		cv3 rayInstanceO = cv3_sub(rayO, instancePos);
-
-		float intersectionDistance = 0.0f;
-
-		mesh_t* mesh = &scene->renderables[renderableIndex];
-		material_index_t* materialIndices = mesh->materialIndices;
-
-		uint32_t meshCandidates[1000]; // TODO:
-		uint32_t meshCandidateCount = traverse_bvh(&context->renderStats, &mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, meshCandidates, 1000);
-		for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
+		uint32_t* candidates;
+		uint32_t candidateCount = traverse_bvh(context, &scene->bvh, rayO, rayD, 0.0f, NoRayIntersection, &candidates);
+		for (uint32_t i = 0; i < candidateCount; i++)
 		{
-			// TODO: Lanes
-			uint32_t faceIndex = meshCandidates[faceCandidate];
+			uint32_t candidateIndex = candidates[i];
 
-			uint64_t triangleId = ((uint64_t)faceIndex | (uint64_t)candidateIndex << 32);
-			if (sourceTriangleId == triangleId) // disallow self intersection
+			cv3 instancePos = scene->instances.data[candidateIndex].pos;
+			uint32_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
+
+			cv3 rayInstanceO = cv3_sub(rayO, instancePos);
+
+			float intersectionDistance = 0.0f;
+
+			mesh_t* mesh = &scene->renderables[renderableIndex];
+			material_index_t* materialIndices = mesh->materialIndices;
+
 			{
-				continue;
-			}
-
-			uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
-			uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
-			uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
-
-			cv3 vertA, vertB, vertC;
-			memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(cv3));
-			memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(cv3));
-			memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(cv3));
-
-			float u, v, w;
-			intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, 0.0f, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
-			if (intersectionDistance < closestHitInfo.distance)
-			{
-				uint32_t materialIndex = 0;
-				for (; materialIndex < mesh->data.materials.count; materialIndex++)
+				uint32_t* meshCandidates;
+				uint32_t meshCandidateCount = traverse_bvh(context, &mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, &meshCandidates);
+				for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
 				{
-					if (faceIndex < mesh->data.materials.materialBoundaries[materialIndex])
+					// TODO: Lanes
+					uint32_t faceIndex = meshCandidates[faceCandidate];
+
+					uint64_t triangleId = ((uint64_t)faceIndex | (uint64_t)candidateIndex << 32);
+					if (sourceTriangleId == triangleId) // disallow self intersection
 					{
-						break;
+						continue;
+					}
+
+					uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
+					uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
+					uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
+
+					cv3 vertA, vertB, vertC;
+					memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(cv3));
+					memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(cv3));
+					memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(cv3));
+
+					float u, v, w;
+					intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, 0.0f, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
+					if (intersectionDistance < closestHitInfo.distance)
+					{
+						uint32_t materialIndex = 0;
+						for (; materialIndex < mesh->data.materials.count; materialIndex++)
+						{
+							if (faceIndex < mesh->data.materials.materialBoundaries[materialIndex])
+							{
+								break;
+							}
+						}
+						closestHitInfo.materialIndex = materialIndices[materialIndex - 1];
+						closestHitInfo.distance = intersectionDistance;
+						closestHitInfo.triangleId = triangleId;
+
+						uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
+						uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
+						uint32_t normalIndexC = mesh->data.faces.normalIndices[faceIndex * 3 + 2];
+						cv3 normalA, normalB, normalC;
+						memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(cv3));
+						memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(cv3));
+						memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(cv3));
+
+						closestHitInfo.normal = cv3_add(cv3_add(cv3_mulf(normalA, u), cv3_mulf(normalB, v)), cv3_mulf(normalC, w));
+
+						uint32_t uvIndexA = mesh->data.faces.uvIndices[faceIndex * 3 + 0];
+						uint32_t uvIndexB = mesh->data.faces.uvIndices[faceIndex * 3 + 1];
+						uint32_t uvIndexC = mesh->data.faces.uvIndices[faceIndex * 3 + 2];
+						cv2 uvA, uvB, uvC;
+						memcpy(&uvA, mesh->data.uvs.data + uvIndexA * 2, sizeof(cv2));
+						memcpy(&uvB, mesh->data.uvs.data + uvIndexB * 2, sizeof(cv2));
+						memcpy(&uvC, mesh->data.uvs.data + uvIndexC * 2, sizeof(cv2));
+
+						closestHitInfo.uv = cv2_add(cv2_add(cv2_mulf(uvA, u), cv2_mulf(uvB, v)), cv2_mulf(uvC, w));
 					}
 				}
-				closestHitInfo.materialIndex = materialIndices[materialIndex - 1];
-				closestHitInfo.distance = intersectionDistance;
-				closestHitInfo.triangleId = triangleId;
-
-				uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
-				uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
-				uint32_t normalIndexC = mesh->data.faces.normalIndices[faceIndex * 3 + 2];
-				cv3 normalA, normalB, normalC;
-				memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(cv3));
-				memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(cv3));
-				memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(cv3));
-
-				closestHitInfo.normal = cv3_add(cv3_add(cv3_mulf(normalA, u), cv3_mulf(normalB, v)), cv3_mulf(normalC, w));
-			
-				uint32_t uvIndexA = mesh->data.faces.uvIndices[faceIndex * 3 + 0];
-				uint32_t uvIndexB = mesh->data.faces.uvIndices[faceIndex * 3 + 1];
-				uint32_t uvIndexC = mesh->data.faces.uvIndices[faceIndex * 3 + 2];
-				cv2 uvA, uvB, uvC;
-				memcpy(&uvA, mesh->data.uvs.data + uvIndexA * 2, sizeof(cv2));
-				memcpy(&uvB, mesh->data.uvs.data + uvIndexB * 2, sizeof(cv2));
-				memcpy(&uvC, mesh->data.uvs.data + uvIndexC * 2, sizeof(cv2));
-
-				closestHitInfo.uv = cv2_add(cv2_add(cv2_mulf(uvA, u), cv2_mulf(uvB, v)), cv2_mulf(uvC, w));
+				crana_stack_free(&context->stack, meshCandidateCount * sizeof(uint32_t));
 			}
 		}
+
+		crana_stack_free(&context->stack, candidateCount * sizeof(uint32_t));
 	}
 	context->renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
 
@@ -1047,7 +1087,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 1,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -1149,9 +1189,11 @@ int main()
 		mainRenderQueue.count = mainRenderData.imgHeight;
 	}
 
+	uint64_t threadStackSize = 1024 * 1024 * 1024 / cranpl_get_core_count() / 2;
+
 	thread_context_t* threadContexts = malloc(sizeof(thread_context_t) * cranpl_get_core_count());
 	void** threadHandles = malloc(sizeof(void*) * cranpl_get_core_count() - 1);
-	for (uint32_t i = 0; i < cranpl_get_core_count() - 1; i++)
+	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
 	{
 		threadContexts[i] = (thread_context_t)
 		{
@@ -1159,25 +1201,27 @@ int main()
 			.renderQueue = &mainRenderQueue,
 			.context = 
 			{
-				.randomSeed = random(&mainRenderContext.randomSeed)
+				.randomSeed = random(&mainRenderContext.randomSeed),
+				.stack = 
+				{
+					.mem = malloc(threadStackSize),
+					.size = threadStackSize
+				},
+				.scratchStack = 
+				{
+					.mem = malloc(threadStackSize),
+					.size = threadStackSize
+				}
 			},
 			.hdrOutput = hdrImage
 		};
+	}
 
+	for (uint32_t i = 0; i < cranpl_get_core_count() - 1; i++)
+	{
 		threadHandles[i] = cranpl_create_thread(&render_scene_async, &threadContexts[i]);
 	}
 
-	// Start a render on our main thread as well.
-	threadContexts[cranpl_get_core_count() - 1] = (thread_context_t)
-	{
-		.renderData = &mainRenderData,
-		.renderQueue = &mainRenderQueue,
-		.context = 
-		{
-			.randomSeed = cranpl_get_core_count() - 1
-		},
-		.hdrOutput = hdrImage
-	};
 	render_scene_async(&threadContexts[cranpl_get_core_count() - 1]);
 
 	for (uint32_t i = 0; i < cranpl_get_core_count() - 1; i++)
@@ -1257,6 +1301,14 @@ int main()
 		printf("\tBVH Node Count: %" PRIu64 "\n", mainRenderContext.renderStats.bvhNodeCount);
 
 		system("pause");
+	}
+
+	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
+	{
+		assert(threadContexts[i].context.stack.top == 0);
+		assert(threadContexts[i].context.scratchStack.top == 0);
+		free(threadContexts[i].context.stack.mem);
+		free(threadContexts[i].context.scratchStack.mem);
 	}
 
 	free(threadContexts);
