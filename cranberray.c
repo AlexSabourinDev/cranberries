@@ -26,10 +26,12 @@ typedef struct
 	uint8_t* mem;
 	uint64_t top;
 	uint64_t size;
+	bool locked;
 } crana_stack_t;
 
 void* crana_stack_alloc(crana_stack_t* stack, uint64_t size)
 {
+	assert(!stack->locked);
 	uint8_t* ptr = stack->mem + stack->top;
 	stack->top += size;
 	assert(stack->top <= stack->size);
@@ -41,8 +43,36 @@ void* crana_stack_alloc(crana_stack_t* stack, uint64_t size)
 // pointer as long as no intermediate allocations are made to the allocator. (TODO: Likely want to either change the scheme, or add a key type mechanism)
 void crana_stack_free(crana_stack_t* stack, uint64_t size)
 {
+	assert(!stack->locked);
 	stack->top -= size;
 	assert(stack->top <= stack->size);
+}
+
+// Lock our stack, this means we have free range on the memory pointer
+// Commit the pointer back to the stack to complete the operation.
+// While the stack is locked, alloc and free cannot be called.
+void* crana_stack_lock(crana_stack_t* stack)
+{
+	assert(!stack->locked);
+	stack->locked = true;
+	return stack->mem + stack->top;
+}
+
+// Commit our new pointer. You can have moved it forward or backwards
+// Make sure that the pointer is still from the same memory pool as the stack
+void crana_stack_commit(crana_stack_t* stack, void* memory)
+{
+	assert(stack->locked);
+	assert((uint64_t)((uint8_t*)memory - stack->mem) <= stack->size);
+	stack->top = (uint8_t*)memory - stack->mem;
+	stack->locked = false;
+}
+
+// Cancel our lock, all the memory we were planning on commiting can be ignored
+void crana_stack_revert(crana_stack_t* stack)
+{
+	assert(stack->locked);
+	stack->locked = false;
 }
 
 typedef struct
@@ -516,7 +546,6 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	bvhWorkgroup[0].count = leafCount;
 	bvhWorkgroup[0].parentIndex = NULL;
 
-	uint32_t bvhWriteIter = 0;
 	// Add to this list first as a workspace, allows us to allocate one at a time
 	// Once we're done, we can split the data into a more memory efficient format
 	typedef struct
@@ -525,8 +554,9 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		bvh_jump_t jump;
 	} bvh_pair_t;
 
-	bvh_pair_t* buildingBVH = crana_stack_alloc(&context->scratchStack, sizeof(bvh_pair_t));
-
+	// Lock our stack, we're free to advance our pointer as much as we please
+	bvh_pair_t* buildingBVHStart = (bvh_pair_t*)crana_stack_lock(&context->scratchStack);
+	bvh_pair_t* buildingBVHIter = buildingBVHStart;
 	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % workgroupSize) // TODO: constant for workgroup size
 	{
 		index_aabb_pair_t* start = bvhWorkgroup[workgroupIter].start;
@@ -534,7 +564,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 		if (bvhWorkgroup[workgroupIter].parentIndex != NULL)
 		{
-			*(bvhWorkgroup[workgroupIter].parentIndex) = bvhWriteIter;
+			*(bvhWorkgroup[workgroupIter].parentIndex) = (uint32_t)(buildingBVHIter - buildingBVHStart);
 		}
 
 		caabb bounds = start[0].bound;
@@ -545,8 +575,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		}
 
 		bool isLeaf = (count == 1);
-		buildingBVH[bvhWriteIter].bound = bounds;
-		buildingBVH[bvhWriteIter].jump = (bvh_jump_t)
+		buildingBVHIter->bound = bounds;
+		buildingBVHIter->jump = (bvh_jump_t)
 		{
 			.indices.index = start[0].index,
 			.isLeaf = isLeaf
@@ -572,37 +602,39 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 			bvhWorkgroup[workgroupQueueEnd].start = start;
 			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
-			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVH[bvhWriteIter].jump.indices.jumps.left;
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.left;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			assert(workgroupQueueEnd != workgroupIter);
 
 			bvhWorkgroup[workgroupQueueEnd].start = start + centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
-			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVH[bvhWriteIter].jump.indices.jumps.right;
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.right;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			assert(workgroupQueueEnd != workgroupIter);
 		}
 
-		crana_stack_alloc(&context->scratchStack, sizeof(bvh_pair_t));
-		bvhWriteIter++;
+		buildingBVHIter++;
 	}
 
+	uint32_t bvhSize = (uint32_t)(buildingBVHIter - buildingBVHStart);
 	bvh_t builtBVH =
 	{
-		.bounds = crana_stack_alloc(&context->stack, sizeof(caabb) * bvhWriteIter), // allocate as we go
-		.jumps = crana_stack_alloc(&context->stack, sizeof(bvh_jump_t) * bvhWriteIter),
+		.bounds = crana_stack_alloc(&context->stack, sizeof(caabb) * bvhSize),
+		.jumps = crana_stack_alloc(&context->stack, sizeof(bvh_jump_t) * bvhSize),
 	};
 
-	for (uint32_t i = 0; i < bvhWriteIter; i++)
+	for (uint32_t i = 0; i < bvhSize; i++)
 	{
-		builtBVH.bounds[i] = buildingBVH[i].bound;
-		builtBVH.jumps[i] = buildingBVH[i].jump;
+		// TODO: Pack leaf nodes at the end
+		builtBVH.bounds[i] = buildingBVHStart[i].bound;
+		builtBVH.jumps[i] = buildingBVHStart[i].jump;
 	}
 
-	crana_stack_free(&context->scratchStack, sizeof(bvh_pair_t) * bvhWriteIter);
+	// Don't bother commiting our lock, we don't need this anymore
+	crana_stack_revert(&context->scratchStack);
 	crana_stack_free(&context->scratchStack, sizeof(bvh_workgroup_t) * workgroupSize);
 
-	context->renderStats.bvhNodeCount = bvhWriteIter;
+	context->renderStats.bvhNodeCount = bvhSize;
 	return builtBVH;
 }
 
@@ -611,26 +643,24 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 // TODO: Maybe 2 seperate stacks would be better than using a single stack with 2 apis
 static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 rayO, cv3 rayD, float rayMin, float rayMax, uint32_t** candidates)
 {
-	*candidates = crana_stack_alloc(&context->stack, 0); // Allocate nothing, but we're going to be growing it
+	*candidates = crana_stack_lock(&context->stack); // Allocate nothing, but we're going to be growing it
+	uint32_t* candidateIter = *candidates;
 
 	uint64_t traversalStartTime = cranpl_timestamp_micro();
 
-	uint32_t iter = 0;
+	uint32_t* testQueueIter = crana_stack_lock(&context->scratchStack);
+	uint32_t* testQueueEnd = testQueueIter+1;
 
-	uint32_t* testQueue = crana_stack_alloc(&context->scratchStack, sizeof(uint32_t));
-	uint32_t testQueueSize = 1;
-	uint32_t testQueueIter = 0;
-
-	testQueue[0] = 0;
-	while ((int32_t)testQueueSize - (int32_t)testQueueIter > 0)
+	*testQueueIter = 0;
+	while (testQueueEnd > testQueueIter)
 	{
 		cv3l boundMins = { 0 };
 		cv3l boundMaxs = { 0 };
 
-		uint32_t activeLaneCount = min(testQueueSize - testQueueIter, cran_lane_count);
+		uint32_t activeLaneCount = min((uint32_t)(testQueueEnd - testQueueIter), cran_lane_count);
 		for (uint32_t i = 0; i < activeLaneCount; i++)
 		{
-			uint32_t nodeIndex = testQueue[testQueueIter + i];
+			uint32_t nodeIndex = testQueueIter[i];
 			cv3l_set(&boundMins, bvh->bounds[nodeIndex].min, i);
 			cv3l_set(&boundMaxs, bvh->bounds[nodeIndex].max, i);
 		}
@@ -642,30 +672,28 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 			{
 				if (intersections & (1 << i))
 				{
-					uint32_t nodeIndex = testQueue[testQueueIter + i];
+					uint32_t nodeIndex = testQueueIter[i];
 
-					context->renderStats.bvhHitCount++;
+					context->renderStats.bvhHitCount++; 
 
-					// All our leaves are packed at the end of the 
+					// TODO: What if instead of testing our isLeaf flag, all leaf nodes were packed at the end of the
+					// tree array? Then we wouldn't need to wait to load our jump into memory and we can work purely with our index.
+					// We have to have loaded our index into memory recently for our bounds anyways.
 					bool isLeaf = bvh->jumps[nodeIndex].isLeaf;
 					if (isLeaf)
 					{
 						context->renderStats.bvhLeafHitCount++;
 
 						// Grows our candidate pointer
-						crana_stack_alloc(&context->stack, sizeof(uint32_t));
-						(*candidates)[iter] = bvh->jumps[nodeIndex].indices.index;
-						iter++;
+						*candidateIter = bvh->jumps[nodeIndex].indices.index;
+						candidateIter++;
 					}
 					else
 					{
-						// We know that our memory still started at our original allocation
-						crana_stack_alloc(&context->scratchStack, sizeof(uint32_t) * 2);
-
-						testQueue[testQueueSize] = bvh->jumps[nodeIndex].indices.jumps.left;
-						testQueueSize++;
-						testQueue[testQueueSize] = bvh->jumps[nodeIndex].indices.jumps.right;
-						testQueueSize++;
+						*testQueueEnd = bvh->jumps[nodeIndex].indices.jumps.left;
+						testQueueEnd++;
+						*testQueueEnd = bvh->jumps[nodeIndex].indices.jumps.right;
+						testQueueEnd++;
 					}
 				}
 				else
@@ -683,9 +711,11 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 		testQueueIter += activeLaneCount;
 	}
 
-	crana_stack_free(&context->scratchStack, testQueueSize * sizeof(uint32_t));
+	crana_stack_revert(&context->scratchStack);
+	crana_stack_commit(&context->stack, candidateIter);
+
 	context->renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
-	return iter;
+	return (uint32_t)(candidateIter - *candidates);
 }
 
 static void generate_scene(render_context_t* context, ray_scene_t* scene)
@@ -961,7 +991,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = (cv3) { 1.0f, 1.0f, 1.0f };// sample_hdr(rayD, backgroundSampler.image, backgroundSampler.width, backgroundSampler.height, backgroundSampler.stride);
+	cv3 skybox = sample_hdr(rayD, backgroundSampler);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
@@ -1115,7 +1145,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 1,
+		.samplesPerPixel = 10,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
