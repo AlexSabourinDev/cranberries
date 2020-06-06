@@ -120,7 +120,7 @@ void cranpr_terminate(void);
 cranpr_sample_t cranpr_create_sample(const char* category, const char* name, int64_t timeStamp, char eventType);
 void cranpr_write_sample(cranpr_sample_t sample);
 
-uint16_t cranpr_captured_size();
+uint16_t cranpr_captured_size(void);
 
 size_t cranpr_string_size(void);
 
@@ -166,10 +166,16 @@ void cranpr_write_to_file(const char* filePath);
 #include <stdbool.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 
 #if CRANPR_WIN
+#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+
+// grumble grumble near/far macros
+#undef near
+#undef far
 #endif
 
 #define cranpr_unused(a) (void)a
@@ -338,18 +344,27 @@ void cranpr_terminate( void )
 	}
 }
 
-uint16_t cranpr_captured_size()
+uint16_t cranpr_captured_size(void)
 {
 	return cranpr_buffer_list.listSize;
 }
 
 /* Not thread safe */
-static void cranpr_add_buffer(cranpr_buffer_t* buffer)
+// Call outside of lock
+static cranpr_buffer_node_t* cranpr_create_node(cranpr_buffer_t* buffer)
 {
 	cranpr_buffer_node_t* node = (cranpr_buffer_node_t*)malloc(sizeof(cranpr_buffer_node_t));
 	memcpy(&node->buffer, buffer, sizeof(cranpr_buffer_t));
 	node->next = NULL;
 
+	return node;
+}
+
+// Thread Safe
+// Requires buffer to be allocated externally, try to do as little as possible outside of lock
+static void cranpr_add_node_ts(cranpr_buffer_node_t* node)
+{
+	cranpr_lock_section(&cranpr_buffer_list.lock);
 	if (cranpr_buffer_list.first == NULL)
 	{
 		assert(cranpr_buffer_list.last == NULL);
@@ -366,6 +381,7 @@ static void cranpr_add_buffer(cranpr_buffer_t* buffer)
 		cranpr_buffer_list.last = node;
 		cranpr_buffer_list.listSize++;
 	}
+	cranpr_unlock_section(&cranpr_buffer_list.lock);
 }
 
 /* Format: process Id, thread Id,  timestamp, event, category, name */
@@ -563,26 +579,18 @@ void cranpr_write_sample(cranpr_sample_t sample)
 	cranpr_buffer.samples[cranpr_buffer.nextSampleWrite] = sample;
 
 	cranpr_buffer.nextSampleWrite++;
-	if (cranpr_buffer.nextSampleWrite == cranpr_buffer_size)
+	if (cranpr_buffer.nextSampleWrite == cranpr_buffer_size-1)
 	{
-		cranpr_lock_section(&cranpr_buffer_list.lock);
-
-		cranpr_add_buffer(&cranpr_buffer);
+		cranpr_add_node_ts(cranpr_create_node(&cranpr_buffer));
 		cranpr_buffer.nextSampleWrite = 0;
-
-		cranpr_unlock_section(&cranpr_buffer_list.lock);
 	}
 }
 
 /* Thread safe */
 void cranpr_flush_thread_buffer( void )
 {
-	cranpr_lock_section(&cranpr_buffer_list.lock);
-
-	cranpr_add_buffer(&cranpr_buffer);
+	cranpr_add_node_ts(cranpr_create_node(&cranpr_buffer));
 	cranpr_buffer.nextSampleWrite = 0;
-
-	cranpr_unlock_section(&cranpr_buffer_list.lock);
 }
 
 void cranpr_write_to_file(const char* filePath)
@@ -609,7 +617,7 @@ void cranpr_write_to_file(const char* filePath)
 	if (writtenSize > 0)
 	{
 		fprintf(fileHandle, "%s", cranpr_profile_preface);
-		fprintf(fileHandle, "%s", print);
+		fwrite(print, writtenSize, 1, fileHandle);
 		fprintf(fileHandle, "%s", cranpr_profile_postface);
 	}
 

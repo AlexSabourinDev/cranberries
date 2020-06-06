@@ -19,6 +19,10 @@
 #include "cranberry_loader.h"
 #include "cranberry_math.h"
 
+#define CRANPR_IMPLEMENTATION
+//#define CRANPR_ENABLED
+#include "cranberry_profiler.h"
+
 // Allocator
 typedef struct
 {
@@ -643,6 +647,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 // TODO: Maybe 2 seperate stacks would be better than using a single stack with 2 apis
 static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 rayO, cv3 rayD, float rayMin, float rayMax, uint32_t** candidates)
 {
+	cranpr_begin("bvh", "traverse");
+
 	*candidates = crana_stack_lock(&context->stack); // Allocate nothing, but we're going to be growing it
 	uint32_t* candidateIter = *candidates;
 
@@ -715,11 +721,14 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 	crana_stack_commit(&context->stack, candidateIter);
 
 	context->renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
+
+	cranpr_end("bvh", "traverse");
 	return (uint32_t)(candidateIter - *candidates);
 }
 
 static void generate_scene(render_context_t* context, ray_scene_t* scene)
 {
+	cranpr_begin("scene", "generate");
 	uint64_t startTime = cranpl_timestamp_micro();
 
 	static material_lambert_t lamberts[3] = { {.albedo = { 0.8f, 0.9f, 1.0f } },  {.albedo = { 0.1f, 0.1f, 0.1f } }, {.albedo = {1.0f, 1.0f, 1.0f} } };
@@ -844,6 +853,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	}
 
 	context->renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
+	cranpr_end("scene", "generate");
 }
 
 typedef struct
@@ -858,10 +868,13 @@ sampler_u8_t checkerboardSampler;
 
 static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD, uint64_t sourceTriangleId)
 {
+	cranpr_begin("scene", "cast");
+
 	context->depth++;
 	if (context->depth >= renderConfig.maxDepth)
 	{
 		context->depth--;
+		cranpr_end("scene", "cast");
 		return (ray_hit_t) { 0 };
 	}
 
@@ -902,6 +915,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			{
 				uint32_t* meshCandidates;
 				uint32_t meshCandidateCount = traverse_bvh(context, &mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, &meshCandidates);
+				
+				cranpr_begin("scene", "cast-triangles");
 				for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
 				{
 					// TODO: Lanes
@@ -959,6 +974,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 						closestHitInfo.uv = cv2_add(cv2_add(cv2_mulf(uvA, u), cv2_mulf(uvB, v)), cv2_mulf(uvC, w));
 					}
 				}
+				cranpr_end("scene", "cast-triangles");
 				crana_stack_free(&context->stack, meshCandidateCount * sizeof(uint32_t));
 			}
 		}
@@ -982,6 +998,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 				.triangleId = closestHitInfo.triangleId
 			});
 		context->depth--;
+
+		cranpr_end("scene", "cast");
 		return (ray_hit_t)
 		{
 			.light = light,
@@ -995,6 +1013,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
+
+	cranpr_end("scene", "cast");
 	return (ray_hit_t)
 	{
 		.light = skybox,
@@ -1006,6 +1026,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 // Do we want to handle this some other way?
 static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
+	cranpr_begin("shader", "lambert");
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 	// TODO: Consider iteration instead of recursion
 
@@ -1033,11 +1054,14 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 
 	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
 	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, inputs.normal), 0.0f) * attenuation);
+
+	cranpr_end("shader", "lambert");
 	return cv3_mul(light, cv3_mulf(albedo, cran_rpi));
 }
 
 static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
+	cranpr_begin("shader", "mirror");
 	material_mirror_t mirrorData = ((const material_mirror_t* cran_restrict)materialData)[materialIndex];
 
 	cv3 castDir = cv3_reflect(inputs.viewDir, inputs.normal);
@@ -1047,6 +1071,7 @@ static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materi
 	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
 	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), attenuation);
 
+	cranpr_end("shader", "mirror");
 	return cv3_mul(sceneCast, mirrorData.color);
 }
 
@@ -1138,14 +1163,19 @@ static void render_scene_async(void* cran_restrict data)
 			}
 		}
 	}
+
+	cranpr_flush_thread_buffer();
 }
 
 int main()
 {
+	cranpr_init();
+	cranpr_begin("cranberray","main");
+
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 1,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -1349,29 +1379,34 @@ int main()
 	{
 		system("cls");
 		printf("Total Time: %f\n", micro_to_seconds(mainRenderContext.renderStats.totalTime));
-		printf("\tScene Generation Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.sceneGenerationTime), (float)mainRenderContext.renderStats.sceneGenerationTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
-		printf("\tRender Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.renderTime), (float)mainRenderContext.renderStats.renderTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
+		printf("\tScene Generation Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.sceneGenerationTime), (float)mainRenderContext.renderStats.sceneGenerationTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
+		printf("\tRender Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.renderTime), (float)mainRenderContext.renderStats.renderTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
 		printf("----------\n");
 		printf("Accumulated Threading Data\n");
-		printf("\t\tIntersection Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.intersectionTime), (float)mainRenderContext.renderStats.intersectionTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
-		printf("\t\t\tBVH Traversal Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.bvhTraversalTime), (float)mainRenderContext.renderStats.bvhTraversalTime / (float)mainRenderContext.renderStats.intersectionTime * 100.0f);
+		printf("\t\tIntersection Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.intersectionTime), (float)mainRenderContext.renderStats.intersectionTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
+		printf("\t\t\tBVH Traversal Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.bvhTraversalTime), (float)mainRenderContext.renderStats.bvhTraversalTime / (float)mainRenderContext.renderStats.intersectionTime * 100.0f);
 		printf("\t\t\t\tBVH Tests: %" PRIu64 "\n", mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount);
-		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%f%%]\n", mainRenderContext.renderStats.bvhHitCount, (float)mainRenderContext.renderStats.bvhHitCount/(float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
-		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%f%%]\n", mainRenderContext.renderStats.bvhLeafHitCount, (float)mainRenderContext.renderStats.bvhLeafHitCount/(float)mainRenderContext.renderStats.bvhHitCount * 100.0f);
-		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%f%%]\n", mainRenderContext.renderStats.bvhMissCount, (float)mainRenderContext.renderStats.bvhMissCount/(float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
-		printf("\t\tSkybox Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.skyboxTime), (float)mainRenderContext.renderStats.skyboxTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
+		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%.2f%%]\n", mainRenderContext.renderStats.bvhHitCount, (float)mainRenderContext.renderStats.bvhHitCount/(float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
+		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%.2f%%]\n", mainRenderContext.renderStats.bvhLeafHitCount, (float)mainRenderContext.renderStats.bvhLeafHitCount/(float)mainRenderContext.renderStats.bvhHitCount * 100.0f);
+		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%.2f%%]\n", mainRenderContext.renderStats.bvhMissCount, (float)mainRenderContext.renderStats.bvhMissCount/(float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
+		printf("\t\tSkybox Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.skyboxTime), (float)mainRenderContext.renderStats.skyboxTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
 		printf("----------\n");
-		printf("\tImage Space Time: %f [%f%%]\n", micro_to_seconds(mainRenderContext.renderStats.imageSpaceTime), (float)mainRenderContext.renderStats.imageSpaceTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
+		printf("\tImage Space Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.imageSpaceTime), (float)mainRenderContext.renderStats.imageSpaceTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
 		printf("\n");
 		printf("MRays/seconds: %f\n", (float)mainRenderContext.renderStats.rayCount / micro_to_seconds(mainRenderContext.renderStats.renderTime) / 1000000.0f);
 		printf("Rays Fired: %" PRIu64 "\n", mainRenderContext.renderStats.rayCount);
-		printf("\tCamera Rays Fired: %" PRIu64 " [%f%%]\n", mainRenderContext.renderStats.primaryRayCount, (float)mainRenderContext.renderStats.primaryRayCount / (float)mainRenderContext.renderStats.rayCount * 100.0f);
-		printf("\tBounce Rays Fired: %" PRIu64 " [%f%%]\n", mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount, (float)(mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount) / (float)mainRenderContext.renderStats.rayCount * 100.0f);
+		printf("\tCamera Rays Fired: %" PRIu64 " [%.2f%%]\n", mainRenderContext.renderStats.primaryRayCount, (float)mainRenderContext.renderStats.primaryRayCount / (float)mainRenderContext.renderStats.rayCount * 100.0f);
+		printf("\tBounce Rays Fired: %" PRIu64 " [%.2f%%]\n", mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount, (float)(mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount) / (float)mainRenderContext.renderStats.rayCount * 100.0f);
 		printf("\n");
 		printf("BVH\n");
 		printf("\tBVH Node Count: %" PRIu64 "\n", mainRenderContext.renderStats.bvhNodeCount);
-
-		system("pause");
+		printf("Memory\n");
+		printf("\tMain Stack\n");
+		printf("\t\tStack Size: %" PRIu64 "\n", mainRenderContext.stack.size);
+		printf("\t\tFinal Stack Top: %" PRIu64 " [%.2f%%]\n", mainRenderContext.stack.top, (float)mainRenderContext.stack.top/(float)mainRenderContext.stack.size*100.0f);
+		printf("\tScratch Stack\n");
+		printf("\t\tStack Size: %" PRIu64 "\n", mainRenderContext.scratchStack.size);
+		printf("\t\tStack Top: %" PRIu64 " [%.2f%%]\n", mainRenderContext.scratchStack.top, (float)mainRenderContext.scratchStack.top/(float)mainRenderContext.scratchStack.size*100.0f);
 	}
 
 	// Not worrying about individual memory cleanup, stack allocator is cleaned up in one swoop anyways.
@@ -1380,5 +1415,11 @@ int main()
 
 	stbi_image_free(checkerboardSampler.image);
 	stbi_image_free(backgroundSampler.image);
+
+	cranpr_end("cranberray","main");
+	cranpr_flush_thread_buffer();
+	cranpr_write_to_file("cranberray_profile.json");
+
+	cranpr_terminate();
 	return 0;
 }
