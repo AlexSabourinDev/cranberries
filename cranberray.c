@@ -36,12 +36,14 @@ void* crana_stack_alloc(crana_stack_t* stack, uint64_t size)
 	return ptr;
 }
 
+// TODO: Deallocation is error prone, what if we change the size of the alloc but not the release?
+// Tricky because I've decided to allow the allocations to grow and still reference the initial allocation
+// pointer as long as no intermediate allocations are made to the allocator. (TODO: Likely want to either change the scheme, or add a key type mechanism)
 void crana_stack_free(crana_stack_t* stack, uint64_t size)
 {
 	stack->top -= size;
 	assert(stack->top <= stack->size);
 }
-
 
 typedef struct
 {
@@ -496,8 +498,6 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 {
 	assert(leafCount > 0);
 
-#define bvh_workgroup_size 10000000
-
 	int(*sortFuncs[3])(const void* cran_restrict l, const void* cran_restrict r) = { index_aabb_sort_min_x, index_aabb_sort_min_y, index_aabb_sort_min_z };
 
 	typedef struct
@@ -506,7 +506,10 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		uint32_t count;
 		uint32_t* parentIndex;
 	} bvh_workgroup_t;
-	bvh_workgroup_t* bvhWorkgroup = (bvh_workgroup_t*)malloc(sizeof(bvh_workgroup_t) * bvh_workgroup_size);
+
+	// Simple ring buffer
+	uint32_t workgroupSize = 100000;
+	bvh_workgroup_t* bvhWorkgroup = (bvh_workgroup_t*)crana_stack_alloc(&context->scratchStack, sizeof(bvh_workgroup_t) * workgroupSize);
 	uint32_t workgroupQueueEnd = 1;
 
 	bvhWorkgroup[0].start = leafs;
@@ -514,13 +517,17 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	bvhWorkgroup[0].parentIndex = NULL;
 
 	uint32_t bvhWriteIter = 0;
-	bvh_t builtBVH =
+	// Add to this list first as a workspace, allows us to allocate one at a time
+	// Once we're done, we can split the data into a more memory efficient format
+	typedef struct
 	{
-		.bounds = malloc(sizeof(caabb) * bvh_workgroup_size), // TODO: Actually get an accurate size?/Release this memory.
-		.jumps = malloc(sizeof(bvh_jump_t) * bvh_workgroup_size),
-	};
+		caabb bound;
+		bvh_jump_t jump;
+	} bvh_pair_t;
 
-	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % bvh_workgroup_size) // TODO: constant for workgroup size
+	bvh_pair_t* buildingBVH = crana_stack_alloc(&context->scratchStack, sizeof(bvh_pair_t));
+
+	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % workgroupSize) // TODO: constant for workgroup size
 	{
 		index_aabb_pair_t* start = bvhWorkgroup[workgroupIter].start;
 		uint32_t count = bvhWorkgroup[workgroupIter].count;
@@ -538,8 +545,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		}
 
 		bool isLeaf = (count == 1);
-		builtBVH.bounds[bvhWriteIter] = bounds;
-		builtBVH.jumps[bvhWriteIter] = (bvh_jump_t)
+		buildingBVH[bvhWriteIter].bound = bounds;
+		buildingBVH[bvhWriteIter].jump = (bvh_jump_t)
 		{
 			.indices.index = start[0].index,
 			.isLeaf = isLeaf
@@ -565,22 +572,35 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 			bvhWorkgroup[workgroupQueueEnd].start = start;
 			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
-			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH.jumps[bvhWriteIter].indices.jumps.left;
-			workgroupQueueEnd = (workgroupQueueEnd + 1) % bvh_workgroup_size; // TODO: Constant for workgroup size
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVH[bvhWriteIter].jump.indices.jumps.left;
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			assert(workgroupQueueEnd != workgroupIter);
 
 			bvhWorkgroup[workgroupQueueEnd].start = start + centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
-			bvhWorkgroup[workgroupQueueEnd].parentIndex = &builtBVH.jumps[bvhWriteIter].indices.jumps.right;
-			workgroupQueueEnd = (workgroupQueueEnd + 1) % bvh_workgroup_size; // TODO: Constant for workgroup size
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVH[bvhWriteIter].jump.indices.jumps.right;
+			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			assert(workgroupQueueEnd != workgroupIter);
 		}
 
+		crana_stack_alloc(&context->scratchStack, sizeof(bvh_pair_t));
 		bvhWriteIter++;
-		assert(bvhWriteIter < bvh_workgroup_size);
 	}
 
-	free(bvhWorkgroup);
+	bvh_t builtBVH =
+	{
+		.bounds = crana_stack_alloc(&context->stack, sizeof(caabb) * bvhWriteIter), // allocate as we go
+		.jumps = crana_stack_alloc(&context->stack, sizeof(bvh_jump_t) * bvhWriteIter),
+	};
+
+	for (uint32_t i = 0; i < bvhWriteIter; i++)
+	{
+		builtBVH.bounds[i] = buildingBVH[i].bound;
+		builtBVH.jumps[i] = buildingBVH[i].jump;
+	}
+
+	crana_stack_free(&context->scratchStack, sizeof(bvh_pair_t) * bvhWriteIter);
+	crana_stack_free(&context->scratchStack, sizeof(bvh_workgroup_t) * workgroupSize);
 
 	context->renderStats.bvhNodeCount = bvhWriteIter;
 	return builtBVH;
@@ -688,9 +708,17 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 	// Mesh
 	{
-		mesh.data = cranl_obj_load("mitsuba-sphere.obj", cranl_flip_yz);
+		// TODO: We likely don't want a stack allocator here
+		// clean up would be too tedious, think of a way to encapsulate meshes
+		mesh.data = cranl_obj_load("mitsuba-sphere.obj", cranl_flip_yz,
+			(cranl_allocator_t)
+			{
+				.instance = &context->stack,
+				.alloc = &crana_stack_alloc,
+				.free = &crana_stack_free
+			});
 		uint32_t meshLeafCount = mesh.data.faces.count;
-		index_aabb_pair_t* leafs = malloc(sizeof(index_aabb_pair_t) * meshLeafCount);
+		index_aabb_pair_t* leafs = crana_stack_alloc(&context->scratchStack, sizeof(index_aabb_pair_t) * meshLeafCount);
 
 		for (uint32_t i = 0; i < meshLeafCount; i++)
 		{
@@ -729,7 +757,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		}
 
 		mesh.bvh = build_bvh(context, leafs, meshLeafCount);
-		free(leafs);
+		crana_stack_free(&context->scratchStack, sizeof(index_aabb_pair_t) * meshLeafCount);
 	}
 	mesh.materialIndices = materialIndices;
 
@@ -761,7 +789,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	// BVH
 	{
 		uint32_t leafCount = scene->instances.count;
-		index_aabb_pair_t* leafs = malloc(sizeof(index_aabb_pair_t) * leafCount);
+		index_aabb_pair_t* leafs = crana_stack_alloc(&context->scratchStack, sizeof(index_aabb_pair_t) * leafCount);
 		for (uint32_t i = 0; i < leafCount; i++)
 		{
 			cv3 pos = scene->instances.data[i].pos;
@@ -782,7 +810,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		}
 
 		scene->bvh = build_bvh(context, leafs, leafCount);
-		free(leafs);
+		crana_stack_free(&context->scratchStack, sizeof(index_aabb_pair_t) * leafCount);
 	}
 
 	context->renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
@@ -1092,6 +1120,23 @@ int main()
 		.renderHeight = 768
 	};
 
+	// 3GB for persistent memory
+	// 1GB for scratch
+	render_context_t mainRenderContext =
+	{
+		.randomSeed = (uint32_t)time(0),
+		.stack =
+		{
+			.mem = malloc(1024ull * 1024ull * 1024ull * 3),
+			.size = 1024ull*1024ull*1024ull*3
+		},
+		.scratchStack =
+		{
+			.mem = malloc(1024 * 1024 * 1024),
+			.size = 1024*1024*1024
+		}
+	};
+
 	static render_data_t mainRenderData;
 	uint64_t startTime = cranpl_timestamp_micro();
 
@@ -1103,11 +1148,11 @@ int main()
 	// Environment map
 	{
 		backgroundSampler.image = stbi_loadf("background_4k.hdr", &backgroundSampler.width, &backgroundSampler.height, &backgroundSampler.stride, 0);
-		backgroundSampler.cdf2d = (float*)malloc(sizeof(float) * backgroundSampler.width * backgroundSampler.height);
-		backgroundSampler.luminance2d = (float*)malloc(sizeof(float) * backgroundSampler.width * backgroundSampler.height);
+		backgroundSampler.cdf2d = (float*)crana_stack_alloc(&mainRenderContext.stack, sizeof(float) * backgroundSampler.width * backgroundSampler.height);
+		backgroundSampler.luminance2d = (float*)crana_stack_alloc(&mainRenderContext.stack, sizeof(float) * backgroundSampler.width * backgroundSampler.height);
 
-		backgroundSampler.cdf1d = (float*)malloc(sizeof(float) * backgroundSampler.height);
-		backgroundSampler.sum1d = (float*)malloc(sizeof(float) * backgroundSampler.height);
+		backgroundSampler.cdf1d = (float*)crana_stack_alloc(&mainRenderContext.stack, sizeof(float) * backgroundSampler.height);
+		backgroundSampler.sum1d = (float*)crana_stack_alloc(&mainRenderContext.stack, sizeof(float) * backgroundSampler.height);
 
 		float ysum = 0.0f;
 		for (int y = 0; y < backgroundSampler.height; y++)
@@ -1144,10 +1189,6 @@ int main()
 		backgroundSampler.sumTotal = ysum;
 	}
 
-	render_context_t mainRenderContext =
-	{
-		.randomSeed = (uint32_t)time(0)
-	};
 	generate_scene(&mainRenderContext, &mainRenderData.scene);
 
 	mainRenderData.imgWidth = renderConfig.renderWidth;
@@ -1169,13 +1210,13 @@ int main()
 	mainRenderData.right = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
 
-	float* cran_restrict hdrImage = malloc(mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride * sizeof(float));
+	float* cran_restrict hdrImage = crana_stack_alloc(&mainRenderContext.stack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride * sizeof(float));
 
 	uint64_t renderStartTime = cranpl_timestamp_micro();
 
 	static render_queue_t mainRenderQueue = { 0 };
 	{
-		mainRenderQueue.chunks = malloc(sizeof(render_chunk_t) * mainRenderData.imgHeight);
+		mainRenderQueue.chunks = crana_stack_alloc(&mainRenderContext.stack, sizeof(render_chunk_t) * mainRenderData.imgHeight);
 		for (int32_t i = 0; i < mainRenderData.imgHeight; i++)
 		{
 			mainRenderQueue.chunks[i] = (render_chunk_t)
@@ -1191,8 +1232,8 @@ int main()
 
 	uint64_t threadStackSize = 1024 * 1024 * 1024 / cranpl_get_core_count() / 2;
 
-	thread_context_t* threadContexts = malloc(sizeof(thread_context_t) * cranpl_get_core_count());
-	void** threadHandles = malloc(sizeof(void*) * cranpl_get_core_count() - 1);
+	thread_context_t* threadContexts = crana_stack_alloc(&mainRenderContext.stack, sizeof(thread_context_t) * cranpl_get_core_count());
+	void** threadHandles = crana_stack_alloc(&mainRenderContext.stack, sizeof(void*) * cranpl_get_core_count() - 1);
 	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
 	{
 		threadContexts[i] = (thread_context_t)
@@ -1204,12 +1245,12 @@ int main()
 				.randomSeed = random(&mainRenderContext.randomSeed),
 				.stack = 
 				{
-					.mem = malloc(threadStackSize),
+					.mem = crana_stack_alloc(&mainRenderContext.stack, threadStackSize),
 					.size = threadStackSize
 				},
 				.scratchStack = 
 				{
-					.mem = malloc(threadStackSize),
+					.mem = crana_stack_alloc(&mainRenderContext.stack, threadStackSize),
 					.size = threadStackSize
 				}
 			},
@@ -1255,7 +1296,7 @@ int main()
 
 	// Convert HDR to 8 bit bitmap
 	{
-		uint8_t* cran_restrict bitmap = malloc(mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride);
+		uint8_t* cran_restrict bitmap = crana_stack_alloc(&mainRenderContext.scratchStack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride);
 		for (int32_t i = 0; i < mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride; i+=mainRenderData.imgStride)
 		{
 			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(fminf(hdrImage[i + 2], 1.0f)));
@@ -1265,8 +1306,8 @@ int main()
 		}
 
 		cranpl_write_bmp("render.bmp", bitmap, mainRenderData.imgWidth, mainRenderData.imgHeight);
-		system("render.bmp");
-		free(bitmap);
+		cranpl_open_file_with_default_app("render.bmp");
+		crana_stack_free(&mainRenderContext.scratchStack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride);
 	}
 
 	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
@@ -1303,22 +1344,10 @@ int main()
 		system("pause");
 	}
 
-	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
-	{
-		assert(threadContexts[i].context.stack.top == 0);
-		assert(threadContexts[i].context.scratchStack.top == 0);
-		free(threadContexts[i].context.stack.mem);
-		free(threadContexts[i].context.scratchStack.mem);
-	}
+	// Not worrying about individual memory cleanup, stack allocator is cleaned up in one swoop anyways.
+	free(mainRenderContext.stack.mem);
+	free(mainRenderContext.scratchStack.mem);
 
-	free(threadContexts);
-	free(threadHandles);
-	free(mainRenderQueue.chunks);
-	free(hdrImage);
-	free(backgroundSampler.cdf2d);
-	free(backgroundSampler.luminance2d);
-	free(backgroundSampler.cdf1d);
-	free(backgroundSampler.sum1d);
 	stbi_image_free(checkerboardSampler.image);
 	stbi_image_free(backgroundSampler.image);
 	return 0;

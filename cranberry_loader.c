@@ -7,7 +7,7 @@
 #include <ctype.h>
 #include <assert.h>
 
-cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
+cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, cranl_allocator_t allocator)
 {
 	cranpl_file_map_t fileMap = cranpl_map_file(filepath);
 
@@ -62,14 +62,14 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
 		}
 	}
 
-	float* cran_restrict vertices = (float* cran_restrict)malloc(sizeof(float) * 3 * vertexCount);
-	float* cran_restrict normals = (float* cran_restrict)malloc(sizeof(float) * 3 * normalCount);
-	float* cran_restrict uvs = (float* cran_restrict)malloc(sizeof(float) * 2 * uvCount);
-	uint32_t* cran_restrict vertexIndices = (uint32_t* cran_restrict)malloc(sizeof(uint32_t) * faceCount * 3);
-	uint32_t* cran_restrict normalIndices = (uint32_t* cran_restrict)malloc(sizeof(uint32_t) * faceCount * 3);
-	uint32_t* cran_restrict uvIndices = (uint32_t* cran_restrict)malloc(sizeof(uint32_t) * faceCount * 3);
-	uint32_t* cran_restrict materialBoundaries = (uint32_t* cran_restrict)malloc(sizeof(uint32_t) * materialCount * 3);
-	char** cran_restrict materialNames = (char** cran_restrict)malloc(sizeof(char*) * materialCount * 3);
+	float* cran_restrict vertices = (float* cran_restrict)allocator.alloc(allocator.instance, sizeof(float) * 3 * vertexCount);
+	float* cran_restrict normals = (float* cran_restrict)allocator.alloc(allocator.instance, sizeof(float) * 3 * normalCount);
+	float* cran_restrict uvs = (float* cran_restrict)allocator.alloc(allocator.instance, sizeof(float) * 2 * uvCount);
+	uint32_t* cran_restrict vertexIndices = (uint32_t* cran_restrict)allocator.alloc(allocator.instance, sizeof(uint32_t) * faceCount * 3);
+	uint32_t* cran_restrict normalIndices = (uint32_t* cran_restrict)allocator.alloc(allocator.instance, sizeof(uint32_t) * faceCount * 3);
+	uint32_t* cran_restrict uvIndices = (uint32_t* cran_restrict)allocator.alloc(allocator.instance, sizeof(uint32_t) * faceCount * 3);
+	uint32_t* cran_restrict materialBoundaries = (uint32_t* cran_restrict)allocator.alloc(allocator.instance, sizeof(uint32_t) * materialCount * 3);
+	char** cran_restrict materialNames = (char** cran_restrict)allocator.alloc(allocator.instance, sizeof(char*) * materialCount * 3);
 
 	uint32_t vertexIndex = 0;
 	uint32_t normalIndex = 0;
@@ -233,19 +233,17 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags)
 	};
 }
 
-void cranl_obj_free(cranl_mesh_t const* mesh)
+void cranl_obj_free(cranl_mesh_t const* mesh, cranl_allocator_t allocator)
 {
-	free(mesh->vertices.data);
-	free(mesh->normals.data);
-	free(mesh->uvs.data);
-	free(mesh->faces.vertexIndices);
-	free(mesh->faces.normalIndices);
-	free(mesh->faces.uvIndices);
-	free(mesh->materials.materialBoundaries);
+	allocator.free(allocator.instance, mesh->vertices.count * sizeof(float) * 3);
+	allocator.free(allocator.instance, mesh->normals.count * sizeof(float) * 3);
+	allocator.free(allocator.instance, mesh->uvs.count * sizeof(float) * 2);
+	allocator.free(allocator.instance, mesh->faces.count * sizeof(uint32_t) * 3);
+	allocator.free(allocator.instance, mesh->materials.count * sizeof(uint32_t));
 
 	for (uint32_t i = 0; i < mesh->materials.count; i++)
 	{
-		free(mesh->materials.materialNames[i]);
+		allocator.free(allocator.instance, strlen(mesh->materials.materialNames[i]) + 1);
 	}
-	free(mesh->materials.materialNames);
+	allocator.free(allocator.instance, mesh->materials.count * sizeof(char*));
 }

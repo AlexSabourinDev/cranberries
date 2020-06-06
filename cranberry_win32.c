@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wingdi.h>
+#include <shellapi.h>
 
 void cranpl_write_bmp(char const* cran_restrict fileName, uint8_t* cran_restrict pixels, uint32_t width, uint32_t height)
 {
@@ -197,4 +198,9 @@ void cranpl_wait_on_thread(void* threadHandle)
 long cranpl_atomic_increment(cranpl_atomic_int_t* atomic)
 {
 	return InterlockedIncrement(&atomic->value);
+}
+
+void cranpl_open_file_with_default_app(char const* cran_restrict fileName)
+{
+	ShellExecuteA(0, 0, fileName, 0, 0, SW_SHOW);
 }

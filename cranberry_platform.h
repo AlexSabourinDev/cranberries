@@ -35,3 +35,5 @@ typedef struct
 	volatile long value;
 } cranpl_atomic_int_t;
 long cranpl_atomic_increment(cranpl_atomic_int_t* atomic);
+
+void cranpl_open_file_with_default_app(char const* cran_restrict fileName);

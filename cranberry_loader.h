@@ -49,5 +49,12 @@ enum
 	cranl_flip_yz = 0x01
 };
 
-cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags);
-void cranl_obj_free(cranl_mesh_t const* mesh);
+typedef struct
+{
+	void* instance;
+	void*(*alloc)(void* allocator, uint64_t size);
+	void(*free)(void* allocator, uint64_t size);
+} cranl_allocator_t;
+
+cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, cranl_allocator_t allocator);
+void cranl_obj_free(cranl_mesh_t const* mesh, cranl_allocator_t allocator);
