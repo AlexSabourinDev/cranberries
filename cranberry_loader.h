@@ -46,7 +46,8 @@ typedef struct
 
 enum
 {
-	cranl_flip_yz = 0x01
+	cranl_flip_yz = 0x01,
+	cranl_cm_to_m = 0x02
 };
 
 typedef struct

@@ -432,6 +432,7 @@ typedef enum
 {
 	material_lambert,
 	material_mirror,
+	material_directional,
 	material_count
 } material_type_e;
 
@@ -503,10 +504,12 @@ typedef cv3(material_shader_t)(const void* cran_restrict materialData, uint32_t 
 
 static material_shader_t shader_lambert;
 static material_shader_t shader_mirror;
+static material_shader_t shader_directional;
 material_shader_t* shaders[material_count] =
 {
 	shader_lambert,
-	shader_mirror
+	shader_mirror,
+	shader_directional,
 };
 
 static int index_aabb_sort_min_x(const void* cran_restrict l, const void* cran_restrict r)
@@ -556,7 +559,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	} bvh_workgroup_t;
 
 	// Simple ring buffer
-	uint32_t workgroupSize = 100000;
+	uint32_t workgroupSize = 1000000;
 	bvh_workgroup_t* bvhWorkgroup = (bvh_workgroup_t*)crana_stack_alloc(&context->scratchStack, sizeof(bvh_workgroup_t) * workgroupSize);
 	bvh_workgroup_t* leafWorkgroup = (bvh_workgroup_t*)crana_stack_alloc(&context->scratchStack, sizeof(bvh_workgroup_t) * leafCount);
 	uint32_t workgroupQueueEnd = 0;
@@ -803,13 +806,11 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	static material_lambert_t lamberts[3] = { {.albedo = { 0.8f, 0.9f, 1.0f } },  {.albedo = { 0.1f, 0.1f, 0.1f } }, {.albedo = {1.0f, 1.0f, 1.0f} } };
 	static material_mirror_t mirrors[2] = { {.color = { 1.0f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
 
-	static material_index_t materialIndices[] = 
+	static material_index_t materialIndices[400];
+	for (uint32_t i = 0; i < 400; i++)
 	{
-		{.dataIndex = 0,.typeIndex = material_mirror },
-		{.dataIndex = 2,.typeIndex = material_lambert },
-		{.dataIndex = 2,.typeIndex = material_lambert },
-		{.dataIndex = 0,.typeIndex = material_lambert },
-	};
+		materialIndices[i] = (material_index_t) { .dataIndex = 2, .typeIndex = material_lambert };
+	}
 
 	static instance_t instances[1];
 	static mesh_t mesh;
@@ -818,7 +819,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	{
 		// TODO: We likely don't want a stack allocator here
 		// clean up would be too tedious, think of a way to encapsulate meshes
-		mesh.data = cranl_obj_load("mitsuba-sphere.obj", cranl_flip_yz,
+		mesh.data = cranl_obj_load("sponza.obj", cranl_flip_yz | cranl_cm_to_m,
 			(cranl_allocator_t)
 			{
 				.instance = &context->stack,
@@ -1093,7 +1094,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 200.0f, 200.0f, 200.0f };// sample_hdr(rayD, backgroundSampler);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
@@ -1102,9 +1103,19 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	return (ray_hit_t)
 	{
 		.light = skybox,
-		.surface = cv3_add(rayO, cv3_mulf(rayD, 10000.0f)),
+		.surface = cv3_add(rayO, cv3_mulf(rayD, 1000.0f)),
 		.hit = false
 	};
+}
+
+static cv3 shader_directional(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
+{
+	(void)materialData;
+	(void)materialIndex;
+	(void)context;
+	(void)scene;
+
+	return cv3_mulf((cv3) { 1.0f, 1.0f, 1.0f }, fmaxf(cv3_dot(inputs.normal, (cv3) { 0.0f, 0.707f, 0.707f }), 0.2f));
 }
 
 // Do we want to handle this some other way?
@@ -1259,8 +1270,8 @@ int main()
 
 	renderConfig = (render_config_t)
 	{
-		.maxDepth = 99,
-		.samplesPerPixel = 10,
+		.maxDepth = 10,
+		.samplesPerPixel = 32,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -1350,9 +1361,9 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ 0.0f, -3.5f, 0.0f };
-	mainRenderData.forward = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
-	mainRenderData.right = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
+	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 1.0f };
+	mainRenderData.forward = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
+	mainRenderData.right = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
 
 	float* cran_restrict hdrImage = crana_stack_alloc(&mainRenderContext.stack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride * sizeof(float));

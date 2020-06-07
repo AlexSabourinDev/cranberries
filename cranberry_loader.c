@@ -19,7 +19,7 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 	uint32_t uvCount = 0;
 	uint32_t faceCount = 0;
 	uint32_t materialCount = 0;
-	for (char const* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter++)
+	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter++)
 	{
 		if (fileIter == fileStart || fileIter[-1] == '\n')
 		{
@@ -48,7 +48,26 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 
 			case 'f':
 			case 'F':
-				faceCount++;
+				{
+					uint32_t vertCount = 0;
+					fileIter+=1;
+					for (uint32_t i = 0; i < 4; i++)
+					{
+						int32_t v = strtol(fileIter, &fileIter, 10);
+						if (v != 0)
+						{
+							strtol(fileIter + 1, &fileIter, 10);
+							strtol(fileIter + 1, &fileIter, 10);
+							vertCount++;
+						}
+						else
+						{
+							break;
+						}
+					}
+					assert(vertCount == 3 || vertCount == 4);
+					faceCount += vertCount == 3 ? 1 : 2;
+				}
 				break;
 			default:
 				{
@@ -121,7 +140,12 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 						uint32_t startingIndex = vertexIndex;
 						for (uint32_t i = 0; i < 3; i++)
 						{
-							vertices[vertexIndex++] = strtof(fileIter, &fileIter);
+							vertices[vertexIndex] = strtof(fileIter, &fileIter);
+							if (flags & cranl_cm_to_m)
+							{
+								vertices[vertexIndex] /= 100.0f;
+							}
+							vertexIndex++;
 						}
 
 						if (flags & cranl_flip_yz)
@@ -140,32 +164,61 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 				{
 					fileIter += 1;
 
-					uint32_t startingIndex = faceIndex;
-					for (uint32_t i = 0; i < 3; i++)
-					{
-						int32_t vertex = strtol(fileIter, &fileIter, 10);
-						int32_t uv = strtol(fileIter + 1, &fileIter, 10);
-						int32_t normal = strtol(fileIter + 1, &fileIter, 10);
+					int32_t v[4];
+					int32_t u[4];
+					int32_t n[4];
 
-						vertexIndices[faceIndex] = vertex > 0 ? (vertex - 1) : vertexIndex / 3 + vertex;
-						uvIndices[faceIndex] = uv > 0 ? (uv - 1) : uvIndex / 2 + uv;
-						normalIndices[faceIndex] = normal > 0 ? (normal - 1) : normalIndex / 3 + normal;
-						faceIndex++;
+					uint32_t vCount = 0;
+					for (uint32_t i = 0; i < 4; i++)
+					{
+						v[i] = strtol(fileIter, &fileIter, 10);
+						if (v[i] != 0)
+						{
+							u[i] = strtol(fileIter + 1, &fileIter, 10);
+							n[i] = strtol(fileIter + 1, &fileIter, 10);
+							vCount++;
+						}
+						else
+						{
+							break;
+						}
 					}
+					assert(vCount == 3 || vCount == 4);
 
-					if (flags & cranl_flip_yz)
+					uint32_t triangulationCount = vCount == 3 ? 1 : 2;
+					for(uint32_t tr = 0; tr < triangulationCount; tr++)
 					{
-						uint32_t temp = vertexIndices[startingIndex + 1];
-						vertexIndices[startingIndex + 1] = vertexIndices[startingIndex + 2];
-						vertexIndices[startingIndex + 2] = temp;
+						int32_t triangleTable[2][3] =
+						{
+							{ 0, 1, 2},
+							{ 0, 2, 3}
+						};
 
-						temp = uvIndices[startingIndex + 1];
-						uvIndices[startingIndex + 1] = uvIndices[startingIndex + 2];
-						uvIndices[startingIndex + 2] = temp;
+						uint32_t startingIndex = faceIndex;
+						for (uint32_t i = 0; i < 3; i++)
+						{
+							int32_t index = triangleTable[tr][i];
 
-						temp = normalIndices[startingIndex + 1];
-						normalIndices[startingIndex + 1] = normalIndices[startingIndex + 2];
-						normalIndices[startingIndex + 2] = temp;
+							vertexIndices[faceIndex] = v[index] > 0 ? (v[index] - 1) : vertexIndex / 3 + v[index];
+							uvIndices[faceIndex] = u[index] > 0 ? (u[index] - 1) : uvIndex / 2 + u[index];
+							normalIndices[faceIndex] = n[index] > 0 ? (n[index] - 1) : normalIndex / 3 + n[index];
+							faceIndex++;
+						}
+
+						if (flags & cranl_flip_yz)
+						{
+							uint32_t temp = vertexIndices[startingIndex + 1];
+							vertexIndices[startingIndex + 1] = vertexIndices[startingIndex + 2];
+							vertexIndices[startingIndex + 2] = temp;
+
+							temp = uvIndices[startingIndex + 1];
+							uvIndices[startingIndex + 1] = uvIndices[startingIndex + 2];
+							uvIndices[startingIndex + 2] = temp;
+
+							temp = normalIndices[startingIndex + 1];
+							normalIndices[startingIndex + 1] = normalIndices[startingIndex + 2];
+							normalIndices[startingIndex + 2] = temp;
+						}
 					}
 				}
 				break;
