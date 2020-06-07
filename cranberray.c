@@ -899,6 +899,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	{
 		float distance;
 		cv3 normal;
+		cv3 barycentric;
 		cv2 uv;
 		material_index_t materialIndex;
 		uint64_t triangleId;
@@ -923,8 +924,6 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			float intersectionDistance = 0.0f;
 
 			mesh_t* mesh = &scene->renderables[renderableIndex];
-			material_index_t* materialIndices = mesh->materialIndices;
-
 			{
 				uint32_t* meshCandidates;
 				uint32_t meshCandidateCount = traverse_bvh(context, &mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, &meshCandidates);
@@ -954,42 +953,58 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 					intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, 0.0f, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
 					if (intersectionDistance < closestHitInfo.distance)
 					{
-						uint32_t materialIndex = 0;
-						for (; materialIndex < mesh->data.materials.count; materialIndex++)
-						{
-							if (faceIndex < mesh->data.materials.materialBoundaries[materialIndex])
-							{
-								break;
-							}
-						}
-						closestHitInfo.materialIndex = materialIndices[materialIndex - 1];
 						closestHitInfo.distance = intersectionDistance;
 						closestHitInfo.triangleId = triangleId;
-
-						uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
-						uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
-						uint32_t normalIndexC = mesh->data.faces.normalIndices[faceIndex * 3 + 2];
-						cv3 normalA, normalB, normalC;
-						memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(cv3));
-						memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(cv3));
-						memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(cv3));
-
-						closestHitInfo.normal = cv3_add(cv3_add(cv3_mulf(normalA, u), cv3_mulf(normalB, v)), cv3_mulf(normalC, w));
-
-						uint32_t uvIndexA = mesh->data.faces.uvIndices[faceIndex * 3 + 0];
-						uint32_t uvIndexB = mesh->data.faces.uvIndices[faceIndex * 3 + 1];
-						uint32_t uvIndexC = mesh->data.faces.uvIndices[faceIndex * 3 + 2];
-						cv2 uvA, uvB, uvC;
-						memcpy(&uvA, mesh->data.uvs.data + uvIndexA * 2, sizeof(cv2));
-						memcpy(&uvB, mesh->data.uvs.data + uvIndexB * 2, sizeof(cv2));
-						memcpy(&uvC, mesh->data.uvs.data + uvIndexC * 2, sizeof(cv2));
-
-						closestHitInfo.uv = cv2_add(cv2_add(cv2_mulf(uvA, u), cv2_mulf(uvB, v)), cv2_mulf(uvC, w));
+						closestHitInfo.barycentric = (cv3) { u, v, w };
 					}
 				}
 				cranpr_end("scene", "cast-triangles");
 				crana_stack_free(&context->stack, meshCandidateCount * sizeof(uint32_t));
 			}
+		}
+
+		// Only populate the rest of our closest hit info object after we traversed our BVH and mesh
+		if (closestHitInfo.triangleId != 0)
+		{
+			uint32_t candidateIndex = closestHitInfo.triangleId >> 32ull;
+			uint32_t faceIndex = closestHitInfo.triangleId & 0xFFFFFFFF;
+			uint32_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
+			mesh_t* mesh = &scene->renderables[renderableIndex];
+
+			uint32_t materialIndex = 0;
+			material_index_t* materialIndices = mesh->materialIndices;
+			for (; materialIndex < mesh->data.materials.count; materialIndex++)
+			{
+				if (faceIndex < mesh->data.materials.materialBoundaries[materialIndex])
+				{
+					break;
+				}
+			}
+			closestHitInfo.materialIndex = materialIndices[materialIndex - 1];
+
+			float u = closestHitInfo.barycentric.x;
+			float v = closestHitInfo.barycentric.y;
+			float w = closestHitInfo.barycentric.z;
+
+			uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
+			uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
+			uint32_t normalIndexC = mesh->data.faces.normalIndices[faceIndex * 3 + 2];
+			cv3 normalA, normalB, normalC;
+			memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(cv3));
+			memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(cv3));
+			memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(cv3));
+
+			closestHitInfo.normal = cv3_add(cv3_add(cv3_mulf(normalA, u), cv3_mulf(normalB, v)), cv3_mulf(normalC, w));
+
+			uint32_t uvIndexA = mesh->data.faces.uvIndices[faceIndex * 3 + 0];
+			uint32_t uvIndexB = mesh->data.faces.uvIndices[faceIndex * 3 + 1];
+			uint32_t uvIndexC = mesh->data.faces.uvIndices[faceIndex * 3 + 2];
+			cv2 uvA, uvB, uvC;
+			memcpy(&uvA, mesh->data.uvs.data + uvIndexA * 2, sizeof(cv2));
+			memcpy(&uvB, mesh->data.uvs.data + uvIndexB * 2, sizeof(cv2));
+			memcpy(&uvC, mesh->data.uvs.data + uvIndexC * 2, sizeof(cv2));
+
+			closestHitInfo.uv = cv2_add(cv2_add(cv2_mulf(uvA, u), cv2_mulf(uvB, v)), cv2_mulf(uvC, w));
 		}
 
 		crana_stack_free(&context->stack, candidateCount * sizeof(uint32_t));
@@ -1022,7 +1037,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = (cv3) { 1.0f, 1.0f, 1.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = sample_hdr(rayD, backgroundSampler);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
@@ -1063,7 +1078,7 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 		result.light = cv3_mulf(result.light, cf_rcp(pdf));
 	}
 
-	cv3 albedo = (cv3) {1.0f,1.0f,1.0f};// sample_rgb_f32(inputs.uv, checkerboardSampler);
+	cv3 albedo = sample_rgb_f32(inputs.uv, checkerboardSampler);
 	albedo = cv3_mul(albedo,lambertData.albedo);
 
 	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
@@ -1189,7 +1204,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 4,
+		.samplesPerPixel = 10,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
@@ -1198,7 +1213,7 @@ int main()
 	// 1GB for scratch
 	render_context_t mainRenderContext =
 	{
-		.randomSeed = (uint32_t)time(0),
+		.randomSeed = 57,
 		.stack =
 		{
 			.mem = malloc(1024ull * 1024ull * 1024ull * 3),
