@@ -418,13 +418,14 @@ typedef struct
 
 		uint32_t index;
 	} indices;
-	bool isLeaf;
 } bvh_jump_t;
 
 typedef struct
 {
 	caabb* bounds;
 	bvh_jump_t* jumps;
+	uint32_t count;
+	uint32_t leafCount;
 } bvh_t;
 
 typedef enum
@@ -557,11 +558,24 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	// Simple ring buffer
 	uint32_t workgroupSize = 100000;
 	bvh_workgroup_t* bvhWorkgroup = (bvh_workgroup_t*)crana_stack_alloc(&context->scratchStack, sizeof(bvh_workgroup_t) * workgroupSize);
-	uint32_t workgroupQueueEnd = 1;
+	bvh_workgroup_t* leafWorkgroup = (bvh_workgroup_t*)crana_stack_alloc(&context->scratchStack, sizeof(bvh_workgroup_t) * leafCount);
+	uint32_t workgroupQueueEnd = 0;
+	uint32_t leafWorkgroupEnd = 0;
 
-	bvhWorkgroup[0].start = leafs;
-	bvhWorkgroup[0].count = leafCount;
-	bvhWorkgroup[0].parentIndex = NULL;
+	if (leafCount == 1)
+	{
+		leafWorkgroup[0].start = leafs;
+		leafWorkgroup[0].count = leafCount;
+		leafWorkgroup[0].parentIndex = NULL;
+		leafWorkgroupEnd = 1;
+	}
+	else
+	{
+		bvhWorkgroup[0].start = leafs;
+		bvhWorkgroup[0].count = leafCount;
+		bvhWorkgroup[0].parentIndex = NULL;
+		workgroupQueueEnd = 1;
+	}
 
 	// Add to this list first as a workspace, allows us to allocate one at a time
 	// Once we're done, we can split the data into a more memory efficient format
@@ -591,44 +605,86 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			bounds.max = cv3_max(start[i].bound.max, bounds.max);
 		}
 
-		bool isLeaf = (count == 1);
+		assert(count > 1);
 		buildingBVHIter->bound = bounds;
 		buildingBVHIter->jump = (bvh_jump_t)
 		{
 			.indices.index = start[0].index,
-			.isLeaf = isLeaf
 		};
 
+		// TODO: Since we're doing all the iteration work in the sort, maybe we could also do the partitioning in the sort?
+		uint32_t axis = randomRange(&context->randomSeed, 0, 3);
+		qsort(start, count, sizeof(index_aabb_pair_t), sortFuncs[axis]);
+
+		float boundsCenter = ((&bounds.max.x)[axis] - (&bounds.min.x)[axis]) * 0.5f;
+		uint32_t centerIndex = count / 2;
+		for (uint32_t i = 0; i < count; i++)
+		{
+			float centroid = ((&start[i].bound.max.x)[axis] - (&start[i].bound.min.x)[axis]) * 0.5f;
+			if (centroid > boundsCenter)
+			{
+				centerIndex = i;
+				break;
+			}
+		}
+
+		bool isLeaf = centerIndex == 1;
 		if (!isLeaf)
 		{
-			// TODO: Since we're doing all the iteration work in the sort, maybe we could also do the partitioning in the sort?
-			uint32_t axis = randomRange(&context->randomSeed, 0, 3);
-			qsort(start, count, sizeof(index_aabb_pair_t), sortFuncs[axis]);
-
-			float boundsCenter = ((&bounds.max.x)[axis] - (&bounds.min.x)[axis]) * 0.5f;
-			uint32_t centerIndex = count / 2;
-			for (uint32_t i = 0; i < count; i++)
-			{
-				float centroid = ((&start[i].bound.max.x)[axis] - (&start[i].bound.min.x)[axis]) * 0.5f;
-				if (centroid > boundsCenter)
-				{
-					centerIndex = i;
-					break;
-				}
-			}
-
 			bvhWorkgroup[workgroupQueueEnd].start = start;
 			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.left;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			assert(workgroupQueueEnd != workgroupIter);
+		}
+		else
+		{
+			leafWorkgroup[leafWorkgroupEnd].start = start;
+			leafWorkgroup[leafWorkgroupEnd].count = centerIndex;
+			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.left;
+			leafWorkgroupEnd++;
+			assert(leafWorkgroupEnd <= leafCount);
+		}
 
+		isLeaf = (count - centerIndex == 1);
+		if (!isLeaf)
+		{
 			bvhWorkgroup[workgroupQueueEnd].start = start + centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.right;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			assert(workgroupQueueEnd != workgroupIter);
 		}
+		else
+		{
+			leafWorkgroup[leafWorkgroupEnd].start = start + centerIndex;
+			leafWorkgroup[leafWorkgroupEnd].count = count - centerIndex;
+			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.right;
+			leafWorkgroupEnd++;
+			assert(leafWorkgroupEnd <= leafCount);
+		}
+		buildingBVHIter++;
+	}
+
+	// Add all the leafs to the end of it
+	assert(leafWorkgroupEnd == leafCount);
+	for (uint32_t i = 0; i < leafCount; i++)
+	{
+		index_aabb_pair_t* start = leafWorkgroup[i].start;
+		uint32_t count = leafWorkgroup[i].count;
+
+		if (leafWorkgroup[i].parentIndex != NULL)
+		{
+			*(leafWorkgroup[i].parentIndex) = (uint32_t)(buildingBVHIter - buildingBVHStart);
+		}
+
+		caabb bounds = start[0].bound;
+		assert(count == 1);
+		buildingBVHIter->bound = bounds;
+		buildingBVHIter->jump = (bvh_jump_t)
+		{
+			.indices.index = start[0].index,
+		};
 
 		buildingBVHIter++;
 	}
@@ -638,17 +694,19 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	{
 		.bounds = crana_stack_alloc(&context->stack, sizeof(caabb) * bvhSize),
 		.jumps = crana_stack_alloc(&context->stack, sizeof(bvh_jump_t) * bvhSize),
+		.count = bvhSize,
+		.leafCount = leafCount
 	};
 
 	for (uint32_t i = 0; i < bvhSize; i++)
 	{
-		// TODO: Pack leaf nodes at the end
 		builtBVH.bounds[i] = buildingBVHStart[i].bound;
 		builtBVH.jumps[i] = buildingBVHStart[i].jump;
 	}
 
 	// Don't bother commiting our lock, we don't need this anymore
 	crana_stack_revert(&context->scratchStack);
+	crana_stack_free(&context->scratchStack, sizeof(bvh_workgroup_t) * leafCount);
 	crana_stack_free(&context->scratchStack, sizeof(bvh_workgroup_t) * workgroupSize);
 
 	context->renderStats.bvhNodeCount = bvhSize;
@@ -667,6 +725,7 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 
 	uint64_t traversalStartTime = cranpl_timestamp_micro();
 
+	// TODO: Could be a ring buffer
 	uint32_t* testQueueIter = crana_stack_lock(&context->scratchStack);
 	uint32_t* testQueueEnd = testQueueIter+1;
 
@@ -695,10 +754,7 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 
 					context->renderStats.bvhHitCount++; 
 
-					// TODO: What if instead of testing our isLeaf flag, all leaf nodes were packed at the end of the
-					// tree array? Then we wouldn't need to wait to load our jump into memory and we can work purely with our index.
-					// We have to have loaded our index into memory recently for our bounds anyways.
-					bool isLeaf = bvh->jumps[nodeIndex].isLeaf;
+					bool isLeaf = nodeIndex >= bvh->count - bvh->leafCount;
 					if (isLeaf)
 					{
 						context->renderStats.bvhLeafHitCount++;
