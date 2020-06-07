@@ -276,13 +276,26 @@ static cv3 sphere_random(random_seed_t* seed)
 	return p;
 }
 
-static cv3 hemisphere_surface_random_uniform(float r1, float r2)
+static cv3 hemisphere_surface_random_uniform(float r1, float r2, float* pdf)
 {
 	float sinTheta = sqrtf(1.0f - r1 * r1); 
 	float phi = cran_tao * r2;
 	float x = sinTheta * cosf(phi);
 	float y = sinTheta * sinf(phi);
+
+	*pdf = cf_rcp(cran_tao);
 	return (cv3) { x, y, r1 };
+}
+
+static cv3 hemisphere_surface_random_lambert(float r1, float r2, float* pdf)
+{
+	float theta = acosf(1.0f - 2.0f*r1) * 0.5f;
+	float cosTheta = cosf(theta);
+	float sinTheta = sinf(theta);
+	float phi = cran_tao * r2;
+
+	*pdf = cosTheta * cf_rcp(cran_pi);
+	return (cv3) { sinTheta*cosf(phi), sinTheta*sinf(phi), cosTheta };
 }
 
 static cv3 box_random(random_seed_t* seed)
@@ -1009,7 +1022,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 1.0f, 1.0f, 1.0f };// sample_hdr(rayD, backgroundSampler);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
@@ -1032,7 +1045,8 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 
 	float r1 = random01f(&context->randomSeed);
 	float r2 = random01f(&context->randomSeed);
-	cv3 castDir = hemisphere_surface_random_uniform(r1,r2);
+	float pdf;
+	cv3 castDir = hemisphere_surface_random_lambert(r1,r2,&pdf);
 	castDir = cm3_rotate_cv3(cm3_basis_from_normal(inputs.normal), castDir);
 	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 
@@ -1046,10 +1060,10 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 	}
 	else
 	{
-		result.light = cv3_mulf(result.light, cran_tao);
+		result.light = cv3_mulf(result.light, cf_rcp(pdf));
 	}
 
-	cv3 albedo = sample_rgb_f32(inputs.uv, checkerboardSampler);
+	cv3 albedo = (cv3) {1.0f,1.0f,1.0f};// sample_rgb_f32(inputs.uv, checkerboardSampler);
 	albedo = cv3_mul(albedo,lambertData.albedo);
 
 	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
@@ -1175,7 +1189,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 99,
-		.samplesPerPixel = 1,
+		.samplesPerPixel = 4,
 		.renderWidth = 1024,
 		.renderHeight = 768
 	};
