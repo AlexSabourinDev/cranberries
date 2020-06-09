@@ -37,18 +37,20 @@ void* crana_stack_alloc(crana_stack_t* stack, uint64_t size)
 {
 	assert(!stack->locked);
 	uint8_t* ptr = stack->mem + stack->top;
-	stack->top += size;
+	stack->top += size + sizeof(uint64_t);
 	assert(stack->top <= stack->size);
-	return ptr;
+
+	*(uint64_t*)ptr = size + sizeof(uint64_t);
+	return ptr + sizeof(uint64_t);
 }
 
 // TODO: Deallocation is error prone, what if we change the size of the alloc but not the release?
 // Tricky because I've decided to allow the allocations to grow and still reference the initial allocation
 // pointer as long as no intermediate allocations are made to the allocator. (TODO: Likely want to either change the scheme, or add a key type mechanism)
-void crana_stack_free(crana_stack_t* stack, uint64_t size)
+void crana_stack_free(crana_stack_t* stack, void* memory)
 {
 	assert(!stack->locked);
-	stack->top -= size;
+	stack->top -= *((uint64_t*)memory - 1);
 	assert(stack->top <= stack->size);
 }
 
@@ -59,7 +61,7 @@ void* crana_stack_lock(crana_stack_t* stack)
 {
 	assert(!stack->locked);
 	stack->locked = true;
-	return stack->mem + stack->top;
+	return stack->mem + stack->top + sizeof(uint64_t);
 }
 
 // Commit our new pointer. You can have moved it forward or backwards
@@ -68,6 +70,7 @@ void crana_stack_commit(crana_stack_t* stack, void* memory)
 {
 	assert(stack->locked);
 	assert((uint64_t)((uint8_t*)memory - stack->mem) <= stack->size);
+	*(uint64_t*)(stack->mem + stack->top) = (uint8_t*)memory - (stack->mem + stack->top);
 	stack->top = (uint8_t*)memory - stack->mem;
 	stack->locked = false;
 }
@@ -119,6 +122,7 @@ typedef struct
 	uint32_t samplesPerPixel;
 	uint32_t renderWidth;
 	uint32_t renderHeight;
+	bool useDirectionalMat; // Force Shader To Directional
 } render_config_t;
 render_config_t renderConfig;
 
@@ -709,8 +713,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 	// Don't bother commiting our lock, we don't need this anymore
 	crana_stack_revert(&context->scratchStack);
-	crana_stack_free(&context->scratchStack, sizeof(bvh_workgroup_t) * leafCount);
-	crana_stack_free(&context->scratchStack, sizeof(bvh_workgroup_t) * workgroupSize);
+	crana_stack_free(&context->scratchStack, bvhWorkgroup);
+	crana_stack_free(&context->scratchStack, leafWorkgroup);
 
 	context->renderStats.bvhNodeCount = bvhSize;
 	return builtBVH;
@@ -803,15 +807,6 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	cranpr_begin("scene", "generate");
 	uint64_t startTime = cranpl_timestamp_micro();
 
-	static material_lambert_t lamberts[3] = { {.albedo = { 0.8f, 0.9f, 1.0f } },  {.albedo = { 0.1f, 0.1f, 0.1f } }, {.albedo = {1.0f, 1.0f, 1.0f} } };
-	static material_mirror_t mirrors[2] = { {.color = { 1.0f, 1.0f, 1.0f } }, { .color = { 0.1f, 0.8f, 0.5f } } };
-
-	static material_index_t materialIndices[400];
-	for (uint32_t i = 0; i < 400; i++)
-	{
-		materialIndices[i] = (material_index_t) { .dataIndex = 2, .typeIndex = material_lambert };
-	}
-
 	static instance_t instances[1];
 	static mesh_t mesh;
 
@@ -826,6 +821,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 				.alloc = &crana_stack_alloc,
 				.free = &crana_stack_free
 			});
+
 		uint32_t meshLeafCount = mesh.data.faces.count;
 		index_aabb_pair_t* leafs = crana_stack_alloc(&context->scratchStack, sizeof(index_aabb_pair_t) * meshLeafCount);
 
@@ -866,9 +862,46 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		}
 
 		mesh.bvh = build_bvh(context, leafs, meshLeafCount);
-		crana_stack_free(&context->scratchStack, sizeof(index_aabb_pair_t) * meshLeafCount);
+		crana_stack_free(&context->scratchStack, leafs);
 	}
-	mesh.materialIndices = materialIndices;
+
+	// materials
+	material_lambert_t* lamberts;
+	static material_mirror_t mirror;
+	{
+		mirror = (material_mirror_t){ .color = (cv3) {1.0f, 1.0f, 1.0f} };
+
+		assert(mesh.data.materialLibraries.count == 1); // Assume only one material library for now
+		cranl_material_lib_t matLib = cranl_obj_mat_load(mesh.data.materialLibraries.names[0], (cranl_allocator_t)
+			{
+				.instance = &context->stack,
+				.alloc = &crana_stack_alloc,
+				.free = &crana_stack_free
+			});
+
+		lamberts = crana_stack_alloc(&context->stack, sizeof(material_lambert_t) * matLib.count);
+		for (uint32_t i = 0; i < matLib.count; i++)
+		{
+			lamberts[i].albedo = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
+		}
+
+		material_index_t* materialIndices = crana_stack_alloc(&context->stack, sizeof(material_lambert_t) * mesh.data.materials.count);
+		for (uint32_t i = 0; i < mesh.data.materials.count; i++)
+		{
+			uint16_t dataIndex = 0;
+			for (; dataIndex < matLib.count; dataIndex++)
+			{
+				if (strcmp(matLib.materials[dataIndex].name, mesh.data.materials.materialNames[i]) == 0)
+				{
+					break;
+				}
+			}
+
+			materialIndices[i] = (material_index_t) { .dataIndex = dataIndex, .typeIndex = material_lambert };
+		}
+
+		mesh.materialIndices = materialIndices;
+	}
 
 	for (uint32_t i = 0; i < 1; i++)
 	{
@@ -891,7 +924,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		.materials =
 		{
 			[material_lambert] = lamberts,
-			[material_mirror] = mirrors
+			[material_mirror] = &mirror
 		}
 	};
 
@@ -919,7 +952,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		}
 
 		scene->bvh = build_bvh(context, leafs, leafCount);
-		crana_stack_free(&context->scratchStack, sizeof(index_aabb_pair_t) * leafCount);
+		crana_stack_free(&context->scratchStack, leafs);
 	}
 
 	context->renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
@@ -1016,7 +1049,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 					}
 				}
 				cranpr_end("scene", "cast-triangles");
-				crana_stack_free(&context->stack, meshCandidateCount * sizeof(uint32_t));
+				crana_stack_free(&context->stack, meshCandidates);
 			}
 		}
 
@@ -1064,7 +1097,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			closestHitInfo.uv = cv2_add(cv2_add(cv2_mulf(uvA, u), cv2_mulf(uvB, v)), cv2_mulf(uvC, w));
 		}
 
-		crana_stack_free(&context->stack, candidateCount * sizeof(uint32_t));
+		crana_stack_free(&context->stack, candidates);
 	}
 	context->renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
 
@@ -1073,7 +1106,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		material_index_t materialIndex = closestHitInfo.materialIndex;
 		cv3 intersectionPoint = cv3_add(rayO, cv3_mulf(rayD, closestHitInfo.distance));
 
-		cv3 light = shaders[materialIndex.typeIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
+		uint32_t shaderIndex = renderConfig.useDirectionalMat ? material_directional : materialIndex.typeIndex;
+		cv3 light = shaders[shaderIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
 			(shader_inputs_t)
 			{
 				.surface = intersectionPoint,
@@ -1145,8 +1179,7 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 		result.light = cv3_mulf(result.light, cf_rcp(pdf));
 	}
 
-	cv3 albedo = sample_rgb_f32(inputs.uv, checkerboardSampler);
-	albedo = cv3_mul(albedo,lambertData.albedo);
+	cv3 albedo = lambertData.albedo;
 
 	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
 	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, inputs.normal), 0.0f) * attenuation);
@@ -1271,9 +1304,10 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 32,
-		.renderWidth = 1024,
-		.renderHeight = 768
+		.samplesPerPixel = 1024,
+		.renderWidth = 420,
+		.renderHeight = 360,
+		.useDirectionalMat = false
 	};
 
 	// 3GB for persistent memory
@@ -1463,7 +1497,7 @@ int main()
 
 		cranpl_write_bmp("render.bmp", bitmap, mainRenderData.imgWidth, mainRenderData.imgHeight);
 		cranpl_open_file_with_default_app("render.bmp");
-		crana_stack_free(&mainRenderContext.scratchStack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride);
+		crana_stack_free(&mainRenderContext.scratchStack, bitmap);
 	}
 
 	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)

@@ -42,7 +42,25 @@ typedef struct
 		char** cran_restrict materialNames;
 		uint32_t count;
 	} materials;
+
+	struct
+	{
+		char** cran_restrict names;
+		uint32_t count;
+	} materialLibraries;
 } cranl_mesh_t;
+
+typedef struct
+{
+	char* name;
+	float albedo[3]; // kD in mtl file format
+} cranl_material_t;
+
+typedef struct
+{
+	cranl_material_t* materials;
+	uint32_t count;
+} cranl_material_lib_t;
 
 enum
 {
@@ -54,8 +72,11 @@ typedef struct
 {
 	void* instance;
 	void*(*alloc)(void* allocator, uint64_t size);
-	void(*free)(void* allocator, uint64_t size);
+	void(*free)(void* allocator, void* memory);
 } cranl_allocator_t;
 
 cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, cranl_allocator_t allocator);
 void cranl_obj_free(cranl_mesh_t const* mesh, cranl_allocator_t allocator);
+
+cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cranl_allocator_t allocator);
+void cranl_obj_mat_free(cranl_material_lib_t materialLibrary, cranl_allocator_t allocator);
