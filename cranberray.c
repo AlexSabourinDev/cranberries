@@ -1304,7 +1304,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 1024,
+		.samplesPerPixel = 1,
 		.renderWidth = 420,
 		.renderHeight = 360,
 		.useDirectionalMat = false

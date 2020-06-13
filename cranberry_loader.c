@@ -4,8 +4,41 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <ctype.h>
 #include <assert.h>
+
+bool in_str(char c, char const* cran_restrict delim)
+{
+	for (char const* cran_restrict i = delim; *i != 0; i++)
+	{
+		if (*i == c)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+char* cran_restrict token(char* cran_restrict str, char* cran_restrict strEnd, char const* cran_restrict delim)
+{
+	for (;str != strEnd; str++)
+	{
+		if (in_str(*str, delim))
+		{
+			return str + 1;
+		}
+	}
+
+	return strEnd;
+}
+
+char* cran_restrict advance_to(char* cran_restrict str, char* cran_restrict strEnd, char const* cran_restrict delim)
+{
+	for (; str != strEnd && !in_str(*str, delim); str++) {}
+	return str;
+}
 
 cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, cranl_allocator_t allocator)
 {
@@ -20,71 +53,54 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 	uint32_t faceCount = 0;
 	uint32_t materialCount = 0;
 	uint32_t materialLibCount = 0;
-	// TODO: Skip comments
-	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter++)
+
+	char const* delim = " \n\t";
+	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
 	{
-		if (fileIter == fileStart || fileIter[-1] == '\n')
+		if (memcmp(fileIter, "vt ", 3) == 0)
 		{
-			switch (fileIter[0])
+			uvCount++;
+		}
+		else if (memcmp(fileIter, "vn ", 3) == 0)
+		{
+			normalCount++;
+		}
+		else if (memcmp(fileIter, "v ", 2) == 0)
+		{
+			vertexCount++;
+		}
+		else if (memcmp(fileIter, "f ", 2) == 0)
+		{
+			uint32_t vertCount = 0;
+			fileIter += 1;
+			for (uint32_t i = 0; i < 4; i++)
 			{
-			case 'v':
-			case 'V':
-				switch (fileIter[1])
+				int32_t v = strtol(fileIter, &fileIter, 10);
+				if (v != 0)
 				{
-				case 't':
-				case 'T':
-					uvCount++;
-					break;
-				case 'n':
-				case 'N':
-					normalCount++;
-					break;
-				default:
-					if (isspace(fileIter[1]))
-					{
-						vertexCount++;
-					}
+					strtol(fileIter + 1, &fileIter, 10);
+					strtol(fileIter + 1, &fileIter, 10);
+					vertCount++;
+				}
+				else
+				{
 					break;
 				}
-				break;
-
-			case 'f':
-			case 'F':
-				{
-					uint32_t vertCount = 0;
-					fileIter+=1;
-					for (uint32_t i = 0; i < 4; i++)
-					{
-						int32_t v = strtol(fileIter, &fileIter, 10);
-						if (v != 0)
-						{
-							strtol(fileIter + 1, &fileIter, 10);
-							strtol(fileIter + 1, &fileIter, 10);
-							vertCount++;
-						}
-						else
-						{
-							break;
-						}
-					}
-					assert(vertCount == 3 || vertCount == 4);
-					faceCount += vertCount == 3 ? 1 : 2;
-				}
-				break;
-			default:
-				{
-					if(memcmp(fileIter, "usemtl", strlen("usemtl")) == 0)
-					{
-						materialCount++;
-					}
-
-					if(memcmp(fileIter, "mtllib", strlen("mtllib")) == 0)
-					{
-						materialLibCount++;
-					}
-				}
-				break;
 			}
+			assert(vertCount == 3 || vertCount == 4);
+			faceCount += vertCount == 3 ? 1 : 2;
+		}
+		else if (memcmp(fileIter, "usemtl ", 7) == 0)
+		{
+			materialCount++;
+		}
+		else if (memcmp(fileIter, "mtllib ", 7) == 0)
+		{
+			materialLibCount++;
+		}
+		else if (memcmp(fileIter, "# ", 2) == 0)
+		{
+			fileIter = advance_to(fileIter, fileEnd, "\n");
 		}
 	}
 
@@ -104,171 +120,147 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 	uint32_t faceIndex = 0;
 	uint32_t materialIndex = 0;
 	uint32_t materialLibIndex = 0;
-	for (char* fileIter = fileStart; fileIter != fileEnd; fileIter++)
+
+	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
 	{
-		if (fileIter == fileStart || fileIter[-1] == '\n')
+		if (memcmp(fileIter, "vt ", 3) == 0)
 		{
-			switch (fileIter[0])
+			fileIter += 2;
+			for (uint32_t i = 0; i < 2; i++)
 			{
-			case 'v':
-			case 'V':
-				switch (fileIter[1])
-				{
-				case 't':
-				case 'T':
-					fileIter += 2;
-					for (uint32_t i = 0; i < 2; i++)
-					{
-						uvs[uvIndex++] = strtof(fileIter, &fileIter);
-					}
-					break;
-				case 'n':
-				case 'N':
-					{
-						fileIter += 2;
-
-						uint32_t startingIndex = normalIndex;
-						for (uint32_t i = 0; i < 3; i++)
-						{
-							normals[normalIndex++] = strtof(fileIter, &fileIter);
-						}
-
-						if (flags & cranl_flip_yz)
-						{
-							float temp = normals[startingIndex + 1];
-							normals[startingIndex + 1] = normals[startingIndex + 2];
-							normals[startingIndex + 2] = temp;
-						}
-					}
-					break;
-				default:
-					if (isspace(fileIter[1]))
-					{
-						fileIter += 1;
-
-						uint32_t startingIndex = vertexIndex;
-						for (uint32_t i = 0; i < 3; i++)
-						{
-							vertices[vertexIndex] = strtof(fileIter, &fileIter);
-							if (flags & cranl_cm_to_m)
-							{
-								vertices[vertexIndex] /= 100.0f;
-							}
-							vertexIndex++;
-						}
-
-						if (flags & cranl_flip_yz)
-						{
-							float temp = vertices[startingIndex + 1];
-							vertices[startingIndex + 1] = vertices[startingIndex + 2];
-							vertices[startingIndex + 2] = temp;
-						}
-					}
-					break;
-				}
-				break;
-
-			case 'f':
-			case 'F':
-				{
-					fileIter += 1;
-
-					int32_t v[4];
-					int32_t u[4];
-					int32_t n[4];
-
-					uint32_t vCount = 0;
-					for (uint32_t i = 0; i < 4; i++)
-					{
-						v[i] = strtol(fileIter, &fileIter, 10);
-						if (v[i] != 0)
-						{
-							u[i] = strtol(fileIter + 1, &fileIter, 10);
-							n[i] = strtol(fileIter + 1, &fileIter, 10);
-							vCount++;
-						}
-						else
-						{
-							break;
-						}
-					}
-					assert(vCount == 3 || vCount == 4);
-
-					uint32_t triangulationCount = vCount == 3 ? 1 : 2;
-					for(uint32_t tr = 0; tr < triangulationCount; tr++)
-					{
-						int32_t triangleTable[2][3] =
-						{
-							{ 0, 1, 2},
-							{ 0, 2, 3}
-						};
-
-						uint32_t startingIndex = faceIndex;
-						for (uint32_t i = 0; i < 3; i++)
-						{
-							int32_t index = triangleTable[tr][i];
-
-							vertexIndices[faceIndex] = v[index] > 0 ? (v[index] - 1) : vertexIndex / 3 + v[index];
-							uvIndices[faceIndex] = u[index] > 0 ? (u[index] - 1) : uvIndex / 2 + u[index];
-							normalIndices[faceIndex] = n[index] > 0 ? (n[index] - 1) : normalIndex / 3 + n[index];
-							faceIndex++;
-						}
-
-						if (flags & cranl_flip_yz)
-						{
-							uint32_t temp = vertexIndices[startingIndex + 1];
-							vertexIndices[startingIndex + 1] = vertexIndices[startingIndex + 2];
-							vertexIndices[startingIndex + 2] = temp;
-
-							temp = uvIndices[startingIndex + 1];
-							uvIndices[startingIndex + 1] = uvIndices[startingIndex + 2];
-							uvIndices[startingIndex + 2] = temp;
-
-							temp = normalIndices[startingIndex + 1];
-							normalIndices[startingIndex + 1] = normalIndices[startingIndex + 2];
-							normalIndices[startingIndex + 2] = temp;
-						}
-					}
-				}
-				break;
-			default:
-				{
-					if(memcmp(fileIter, "usemtl", strlen("usemtl")) == 0)
-					{
-						char const* materialName = fileIter + strlen("usemtl") + 1;
-
-						char const* materialNameEnd = materialName;
-						for (; !isspace(materialNameEnd[0]); materialNameEnd++);
-						assert(materialNameEnd != NULL);
-
-						materialBoundaries[materialIndex] = faceIndex / 3;
-
-						uint64_t nameLength = (materialNameEnd - materialName);
-						materialNames[materialIndex] = allocator.alloc(allocator.instance, nameLength + 1);
-						memcpy(materialNames[materialIndex], materialName, nameLength);
-						materialNames[materialIndex][nameLength] = '\0';
-
-						materialIndex++;
-					}
-
-					if(memcmp(fileIter, "mtllib", strlen("mtllib")) == 0)
-					{
-						char const* materialLibName = fileIter + strlen("mtllib") + 1;
-
-						char const* materialLibNameEnd = materialLibName;
-						for (; !isspace(materialLibNameEnd[0]); materialLibNameEnd++);
-						assert(materialLibNameEnd != NULL);
-
-						uint64_t nameLength = (materialLibNameEnd - materialLibName);
-						materialLibNames[materialLibIndex] = allocator.alloc(allocator.instance, nameLength + 1);
-						memcpy(materialLibNames[materialLibIndex], materialLibName, nameLength);
-						materialLibNames[materialLibIndex][nameLength] = '\0';
-
-						materialLibIndex++;
-					}
-				}
-				break;
+				uvs[uvIndex++] = strtof(fileIter, &fileIter);
 			}
+		}
+		else if (memcmp(fileIter, "vn ", 3) == 0)
+		{
+			fileIter += 2;
+			uint32_t startingIndex = normalIndex;
+			for (uint32_t i = 0; i < 3; i++)
+			{
+				normals[normalIndex++] = strtof(fileIter, &fileIter);
+			}
+
+			if (flags & cranl_flip_yz)
+			{
+				float temp = normals[startingIndex + 1];
+				normals[startingIndex + 1] = normals[startingIndex + 2];
+				normals[startingIndex + 2] = temp;
+			}
+		}
+		else if (memcmp(fileIter, "v ", 2) == 0)
+		{
+			fileIter += 1;
+			uint32_t startingIndex = vertexIndex;
+			for (uint32_t i = 0; i < 3; i++)
+			{
+				vertices[vertexIndex] = strtof(fileIter, &fileIter);
+				if (flags & cranl_cm_to_m)
+				{
+					vertices[vertexIndex] /= 100.0f;
+				}
+				vertexIndex++;
+			}
+
+			if (flags & cranl_flip_yz)
+			{
+				float temp = vertices[startingIndex + 1];
+				vertices[startingIndex + 1] = vertices[startingIndex + 2];
+				vertices[startingIndex + 2] = temp;
+			}
+		}
+		else if (memcmp(fileIter, "f ", 2) == 0)
+		{
+			fileIter += 1;
+			int32_t v[4];
+			int32_t u[4];
+			int32_t n[4];
+
+			uint32_t vCount = 0;
+			for (uint32_t i = 0; i < 4; i++)
+			{
+				v[i] = strtol(fileIter, &fileIter, 10);
+				if (v[i] != 0)
+				{
+					u[i] = strtol(fileIter + 1, &fileIter, 10);
+					n[i] = strtol(fileIter + 1, &fileIter, 10);
+					vCount++;
+				}
+				else
+				{
+					break;
+				}
+			}
+			assert(vCount == 3 || vCount == 4);
+
+			uint32_t triangulationCount = vCount == 3 ? 1 : 2;
+			for(uint32_t tr = 0; tr < triangulationCount; tr++)
+			{
+				int32_t triangleTable[2][3] =
+				{
+					{ 0, 1, 2},
+					{ 0, 2, 3}
+				};
+
+				uint32_t startingIndex = faceIndex;
+				for (uint32_t i = 0; i < 3; i++)
+				{
+					int32_t index = triangleTable[tr][i];
+
+					vertexIndices[faceIndex] = v[index] > 0 ? (v[index] - 1) : vertexIndex / 3 + v[index];
+					uvIndices[faceIndex] = u[index] > 0 ? (u[index] - 1) : uvIndex / 2 + u[index];
+					normalIndices[faceIndex] = n[index] > 0 ? (n[index] - 1) : normalIndex / 3 + n[index];
+					faceIndex++;
+				}
+
+				if (flags & cranl_flip_yz)
+				{
+					uint32_t temp = vertexIndices[startingIndex + 1];
+					vertexIndices[startingIndex + 1] = vertexIndices[startingIndex + 2];
+					vertexIndices[startingIndex + 2] = temp;
+
+					temp = uvIndices[startingIndex + 1];
+					uvIndices[startingIndex + 1] = uvIndices[startingIndex + 2];
+					uvIndices[startingIndex + 2] = temp;
+
+					temp = normalIndices[startingIndex + 1];
+					normalIndices[startingIndex + 1] = normalIndices[startingIndex + 2];
+					normalIndices[startingIndex + 2] = temp;
+				}
+			}
+		}
+		else if (memcmp(fileIter, "usemtl ", 7) == 0)
+		{
+			char* materialName = fileIter + strlen("usemtl") + 1;
+
+			char const* materialNameEnd = advance_to(materialName, fileEnd, delim);
+			assert(materialNameEnd != NULL);
+
+			materialBoundaries[materialIndex] = faceIndex / 3;
+
+			uint64_t nameLength = (materialNameEnd - materialName);
+			materialNames[materialIndex] = allocator.alloc(allocator.instance, nameLength + 1);
+			memcpy(materialNames[materialIndex], materialName, nameLength);
+			materialNames[materialIndex][nameLength] = '\0';
+
+			materialIndex++;
+		}
+		else if (memcmp(fileIter, "mtllib ", 7) == 0)
+		{
+			char* materialLibName = fileIter + strlen("mtllib") + 1;
+
+			char const* materialLibNameEnd = advance_to(materialLibName, fileEnd, delim);;
+			assert(materialLibNameEnd != NULL);
+
+			uint64_t nameLength = (materialLibNameEnd - materialLibName);
+			materialLibNames[materialLibIndex] = allocator.alloc(allocator.instance, nameLength + 1);
+			memcpy(materialLibNames[materialLibIndex], materialLibName, nameLength);
+			materialLibNames[materialLibIndex][nameLength] = '\0';
+
+			materialLibIndex++;
+		}
+		else if (memcmp(fileIter, "# ", 2) == 0)
+		{
+			fileIter = advance_to(fileIter, fileEnd, "\n");
 		}
 	}
 
@@ -348,59 +340,56 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 	char* cran_restrict fileStart = (char* cran_restrict)fileMap.fileData;
 	char* cran_restrict fileEnd = (char* cran_restrict)fileStart + fileMap.fileSize;
 
+	char const* delim = " \n\t";
+
 	uint32_t materialCount = 0;
-	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter++)
+	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
 	{
-		if (fileIter == fileStart || fileIter[-1] == '\n')
+		if(memcmp(fileIter, "newmtl ", 7) == 0)
 		{
-			if(memcmp(fileIter, "newmtl", strlen("newmtl")) == 0)
-			{
-				materialCount++;
-			}
+			materialCount++;
+		}
+		else if (memcmp(fileIter, "# ", 2) == 0)
+		{
+			fileIter = advance_to(fileIter, fileEnd, "\n");
 		}
 	}
 
 	cranl_material_t* materials = allocator.alloc(allocator.instance, materialCount * sizeof(cranl_material_t));
 	uint32_t materialIndex = 0;
-	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter++)
+	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
 	{
-		if (fileIter == fileStart || fileIter[-1] == '\n')
+		if(memcmp(fileIter, "newmtl ", 7) == 0)
 		{
-			if(memcmp(fileIter, "newmtl", strlen("newmtl")) == 0)
+			char* materialName = fileIter + strlen("newmtl") + 1;
+
+			char const* materialNameEnd = advance_to(materialName, fileEnd, delim);
+			assert(materialNameEnd != NULL);
+
+			uint64_t nameLength = (materialNameEnd - materialName);
+			materials[materialIndex].name = allocator.alloc(allocator.instance, nameLength + 1);
+			memcpy(materials[materialIndex].name, materialName, nameLength);
+			materials[materialIndex].name[nameLength] = '\0';
+
+			for (fileIter += strlen("newmtl"); fileIter+1 != fileEnd && memcmp(fileIter+1, "newmtl", strlen("newmtl")) != 0; fileIter = token(fileIter, fileEnd, delim))
 			{
-				char const* materialName = fileIter + strlen("newmtl") + 1;
-
-				char const* materialNameEnd = materialName;
-				for (; !isspace(materialNameEnd[0]); materialNameEnd++);
-				assert(materialNameEnd != NULL);
-
-				uint64_t nameLength = (materialNameEnd - materialName);
-				materials[materialIndex].name = allocator.alloc(allocator.instance, nameLength + 1);
-				memcpy(materials[materialIndex].name, materialName, nameLength);
-				materials[materialIndex].name[nameLength] = '\0';
-
-				for (fileIter += strlen("newmtl"); (fileIter + 1) != fileEnd && memcmp(fileIter+1, "newmtl", strlen("newmtl")) != 0; fileIter++)
+				if (memcmp(fileIter, "Kd ", 3) == 0)
 				{
-					switch (*fileIter)
-					{
-					case 'K':
-						{
-							if (*(fileIter + 1) == 'd' && isspace(*(fileIter - 1)))
-							{
-								float r=strtof(fileIter + 2, &fileIter);
-								float g=strtof(fileIter + 1, &fileIter);
-								float b=strtof(fileIter + 1, &fileIter);
+					float r=strtof(fileIter + 2, &fileIter);
+					float g=strtof(fileIter + 1, &fileIter);
+					float b=strtof(fileIter + 1, &fileIter);
 
-								materials[materialIndex].albedo[0] = r;
-								materials[materialIndex].albedo[1] = g;
-								materials[materialIndex].albedo[2] = b;
-							}
-						}
-					}
+					materials[materialIndex].albedo[0] = r;
+					materials[materialIndex].albedo[1] = g;
+					materials[materialIndex].albedo[2] = b;
 				}
-
-				materialIndex++;
 			}
+
+			materialIndex++;
+		}
+		else if (memcmp(fileIter, "# ", 2) == 0)
+		{
+			fileIter = advance_to(fileIter, fileEnd, "\n");
 		}
 	}
 
