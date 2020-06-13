@@ -54,6 +54,7 @@ typedef struct
 {
 	char* name;
 	char* albedoMap; // map_Kd
+	char* bumpMap;
 	float albedo[3]; // Kd
 } cranl_material_t;
 

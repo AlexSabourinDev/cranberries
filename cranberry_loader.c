@@ -400,6 +400,18 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					memcpy(materials[materialIndex].albedoMap, albedoMap, nameLength);
 					materials[materialIndex].albedoMap[nameLength] = '\0';
 				}
+				else if (memcmp(fileIter, "map_bump ", 7) == 0)
+				{
+					char* bumpMap = fileIter + strlen("map_bump") + 1;
+
+					char const* bumpMapEnd = advance_to(bumpMap, fileEnd, delim);
+					assert(bumpMapEnd != NULL);
+
+					uint64_t nameLength = (bumpMapEnd - bumpMap);
+					materials[materialIndex].bumpMap = allocator.alloc(allocator.instance, nameLength + 1);
+					memcpy(materials[materialIndex].bumpMap, bumpMap, nameLength);
+					materials[materialIndex].bumpMap[nameLength] = '\0';
+				}
 			}
 
 			fileIter--; // Move fileIter back, we don't want to increment past our newmtl token

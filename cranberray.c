@@ -10,9 +10,15 @@
 #include <math.h>
 #include <float.h>
 #include <inttypes.h>
-#include <assert.h>
 #include <string.h>
 #include <time.h>
+
+#if 1
+#include <assert.h>
+#define cran_assert(a) assert(a)
+#else
+# define cran_assert(a)
+#endif
 
 #include "stb_image.h"
 #include "cranberry_platform.h"
@@ -47,10 +53,10 @@ typedef struct
 
 void* crana_stack_alloc(crana_stack_t* stack, uint64_t size)
 {
-	assert(!stack->locked);
+	cran_assert(!stack->locked);
 	uint8_t* ptr = stack->mem + stack->top;
 	stack->top += size + sizeof(uint64_t);
-	assert(stack->top <= stack->size);
+	cran_assert(stack->top <= stack->size);
 
 	*(uint64_t*)ptr = size + sizeof(uint64_t);
 	return ptr + sizeof(uint64_t);
@@ -58,9 +64,9 @@ void* crana_stack_alloc(crana_stack_t* stack, uint64_t size)
 
 void crana_stack_free(crana_stack_t* stack, void* memory)
 {
-	assert(!stack->locked);
+	cran_assert(!stack->locked);
 	stack->top -= *((uint64_t*)memory - 1);
-	assert(stack->top <= stack->size);
+	cran_assert(stack->top <= stack->size);
 }
 
 // Lock our stack, this means we have free range on the memory pointer
@@ -68,7 +74,7 @@ void crana_stack_free(crana_stack_t* stack, void* memory)
 // While the stack is locked, alloc and free cannot be called.
 void* crana_stack_lock(crana_stack_t* stack)
 {
-	assert(!stack->locked);
+	cran_assert(!stack->locked);
 	stack->locked = true;
 	return stack->mem + stack->top + sizeof(uint64_t);
 }
@@ -77,8 +83,8 @@ void* crana_stack_lock(crana_stack_t* stack)
 // Make sure that the pointer is still from the same memory pool as the stack
 void crana_stack_commit(crana_stack_t* stack, void* memory)
 {
-	assert(stack->locked);
-	assert((uint64_t)((uint8_t*)memory - stack->mem) <= stack->size);
+	cran_assert(stack->locked);
+	cran_assert((uint64_t)((uint8_t*)memory - stack->mem) <= stack->size);
 	*(uint64_t*)(stack->mem + stack->top) = (uint8_t*)memory - (stack->mem + stack->top);
 	stack->top = (uint8_t*)memory - stack->mem;
 	stack->locked = false;
@@ -87,7 +93,7 @@ void crana_stack_commit(crana_stack_t* stack, void* memory)
 // Cancel our lock, all the memory we were planning on commiting can be ignored
 void crana_stack_revert(crana_stack_t* stack)
 {
-	assert(stack->locked);
+	cran_assert(stack->locked);
 	stack->locked = false;
 }
 
@@ -316,7 +322,7 @@ static cv3 box_random(random_seed_t* seed)
 	return cv3_mulf((cv3) { random01f(seed)-0.5f, random01f(seed)-0.5f, random01f(seed)-0.5f }, 2.0f);
 }
 
-static cv4 sample_rgb_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height)
+static cv4 sample_rgb_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
 	// TODO: Bilerp
 	uv.y = cf_frac(uv.y);
@@ -327,7 +333,12 @@ static cv4 sample_rgb_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height
 
 	float readY = uv.y * (float)height;
 	float readX = uv.x * (float)width;
-	int32_t readIndex = ((int32_t)floorf(readY) * width + (int32_t)floorf(readX)) * 3;
+
+	uint32_t y = (uint32_t)floorf(readY) + offsetY;
+	y = y >= height ? height - 1 : y;
+	uint32_t x = (uint32_t)floorf(readX) + offsetX;
+	x = x >= width ? width - 1 : x;
+	uint32_t readIndex = (y * width + x) * 3;
 
 	cv4 color;
 	color.x = (float)image[readIndex + 0] / 255.0f;
@@ -338,7 +349,7 @@ static cv4 sample_rgb_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height
 	return color;
 }
 
-static cv4 sample_rgba_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height)
+static cv4 sample_bump_r_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
 	// TODO: Bilerp
 	uv.y = cf_frac(uv.y);
@@ -349,7 +360,33 @@ static cv4 sample_rgba_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t heigh
 
 	float readY = uv.y * (float)height;
 	float readX = uv.x * (float)width;
-	int32_t readIndex = ((int32_t)floorf(readY) * width + (int32_t)floorf(readX)) * 4;
+
+	uint32_t y = (uint32_t)floorf(readY) + offsetY;
+	y = y >= height ? height - 1 : y;
+	uint32_t x = (uint32_t)floorf(readX) + offsetX;
+	x = x >= width ? width - 1 : x;
+	uint32_t readIndex = y * width + x;
+
+	return (cv4) { (float)image[readIndex] / 255.0f, 0.0f, 0.0f, 0.0f };
+}
+
+static cv4 sample_rgba_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
+{
+	// TODO: Bilerp
+	uv.y = cf_frac(uv.y);
+	uv.x = cf_frac(uv.x);
+
+	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
+	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
+
+	float readY = uv.y * (float)height;
+	float readX = uv.x * (float)width;
+
+	uint32_t y = (uint32_t)floorf(readY) + offsetY;
+	y = y >= height ? height - 1 : y;
+	uint32_t x = (uint32_t)floorf(readX) + offsetX;
+	x = x >= width ? width - 1 : x;
+	uint32_t readIndex = (y * width + x) * 4;
 
 	cv4 color;
 	color.x = (float)image[readIndex + 0] / 255.0f;
@@ -362,6 +399,7 @@ static cv4 sample_rgba_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t heigh
 
 typedef enum
 {
+	texture_r_u8,
 	texture_rgb_u8,
 	texture_rgb_f32,
 	texture_rgba_u8
@@ -401,7 +439,7 @@ texture_store_t textureStore;
 
 texture_id_t texture_request(char const* cran_restrict path)
 {
-	assert(textureStore.nextTexture != max_texture_count);
+	cran_assert(textureStore.nextTexture != max_texture_count);
 
 	uint32_t textureHash = hash(path);
 
@@ -419,8 +457,15 @@ texture_id_t texture_request(char const* cran_restrict path)
 	int stride;
 	texture->data = stbi_load(path, &texture->width, &texture->height, &stride, 0);
 
-	assert(stride == 3 || stride == 4);
-	texture->format = stride == 3 ? texture_rgb_u8 : texture_rgba_u8;
+	cran_assert(stride == 3 || stride == 4 || stride == 1);
+
+	texture_format_e formats[] =
+	{
+		[1] = texture_r_u8,
+		[3] = texture_rgb_u8,
+		[4] = texture_rgba_u8
+	};
+	texture->format = formats[stride];
 
 	return (texture_id_t) { ++textureStore.nextTexture };
 }
@@ -438,20 +483,58 @@ cv4 sampler_sample(sampler_t sampler, cv2 uv)
 		return (cv4) { 1.0f, 1.0f, 1.0f, 1.0f };
 	}
 
-	assert(sampler.texture.id <= textureStore.nextTexture);
+	cran_assert(sampler.texture.id <= textureStore.nextTexture);
 
 	// TODO: Support different texture formats
 	texture_t* texture = &textureStore.textures[sampler.texture.id - 1];
 	switch (texture->format)
 	{
 	case texture_rgb_u8:
-		return sample_rgb_u8(uv, texture->data, texture->width, texture->height);
+		return sample_rgb_u8(uv, texture->data, texture->width, texture->height, 0, 0);
 	case texture_rgba_u8:
-		return sample_rgba_u8(uv, texture->data, texture->width, texture->height);
+		return sample_rgba_u8(uv, texture->data, texture->width, texture->height, 0, 0);
 	default:
-		assert(false);
+		cran_assert(false);
 		return (cv4) { 0.0f };
 	}
+}
+
+cv2 sampler_bump(sampler_t sampler, cv2 uv)
+{
+	if (sampler.texture.id == 0)
+	{
+		// No texture is no derivative
+		return (cv2) { 0.0f,0.0f };
+	}
+
+	texture_t* texture = &textureStore.textures[sampler.texture.id - 1];
+
+	float s00;
+	float s01;
+	float s10;
+	switch (texture->format)
+	{
+	case texture_rgb_u8:
+		s00 = sample_rgb_u8(uv, texture->data, texture->width, texture->height, 0, 0).x;
+		s10 = sample_rgb_u8(uv, texture->data, texture->width, texture->height, 1, 0).x;
+		s01 = sample_rgb_u8(uv, texture->data, texture->width, texture->height, 0, 1).x;
+		break;
+	case texture_rgba_u8:
+		s00 = sample_rgba_u8(uv, texture->data, texture->width, texture->height, 0, 0).x;
+		s10 = sample_rgba_u8(uv, texture->data, texture->width, texture->height, 1, 0).x;
+		s01 = sample_rgba_u8(uv, texture->data, texture->width, texture->height, 0, 1).x;
+		break;
+	case texture_r_u8:
+		s00 = sample_bump_r_u8(uv, texture->data, texture->width, texture->height, 0, 0).x;
+		s10 = sample_bump_r_u8(uv, texture->data, texture->width, texture->height, 1, 0).x;
+		s01 = sample_bump_r_u8(uv, texture->data, texture->width, texture->height, 0, 1).x;
+		break;
+	default:
+		cran_assert(false);
+		return (cv2) { 0.0f };
+	}
+
+	return (cv2) { s10 - s00, s01 - s00 };
 }
 
 typedef struct
@@ -560,6 +643,7 @@ typedef struct
 {
 	cv3 albedoTint;
 	sampler_t albedoSampler;
+	sampler_t bumpSampler;
 } material_lambert_t;
 
 typedef struct
@@ -616,6 +700,8 @@ typedef struct
 {
 	cv3 surface;
 	cv3 normal;
+	cv3 tangent;
+	cv3 bitangent;
 	cv3 viewDir;
 	cv2 uv;
 	uint64_t triangleId;
@@ -668,7 +754,7 @@ static int index_aabb_sort_min_z(const void* cran_restrict l, const void* cran_r
 
 static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint32_t leafCount)
 {
-	assert(leafCount > 0);
+	cran_assert(leafCount > 0);
 
 	int(*sortFuncs[3])(const void* cran_restrict l, const void* cran_restrict r) = { index_aabb_sort_min_x, index_aabb_sort_min_y, index_aabb_sort_min_z };
 
@@ -729,7 +815,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			bounds.max = cv3_max(start[i].bound.max, bounds.max);
 		}
 
-		assert(count > 1);
+		cran_assert(count > 1);
 		buildingBVHIter->bound = bounds;
 		buildingBVHIter->jump = (bvh_jump_t)
 		{
@@ -759,7 +845,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.left;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
-			assert(workgroupQueueEnd != workgroupIter);
+			cran_assert(workgroupQueueEnd != workgroupIter);
 		}
 		else
 		{
@@ -767,7 +853,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			leafWorkgroup[leafWorkgroupEnd].count = centerIndex;
 			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.left;
 			leafWorkgroupEnd++;
-			assert(leafWorkgroupEnd <= leafCount);
+			cran_assert(leafWorkgroupEnd <= leafCount);
 		}
 
 		isLeaf = (count - centerIndex == 1);
@@ -777,7 +863,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.right;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
-			assert(workgroupQueueEnd != workgroupIter);
+			cran_assert(workgroupQueueEnd != workgroupIter);
 		}
 		else
 		{
@@ -785,13 +871,13 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			leafWorkgroup[leafWorkgroupEnd].count = count - centerIndex;
 			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.right;
 			leafWorkgroupEnd++;
-			assert(leafWorkgroupEnd <= leafCount);
+			cran_assert(leafWorkgroupEnd <= leafCount);
 		}
 		buildingBVHIter++;
 	}
 
 	// Add all the leafs to the end of it
-	assert(leafWorkgroupEnd == leafCount);
+	cran_assert(leafWorkgroupEnd == leafCount);
 	for (uint32_t i = 0; i < leafCount; i++)
 	{
 		index_aabb_pair_t* start = leafWorkgroup[i].start;
@@ -803,7 +889,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		}
 
 		caabb bounds = start[0].bound;
-		assert(count == 1);
+		cran_assert(count == 1);
 		buildingBVHIter->bound = bounds;
 		buildingBVHIter->jump = (bvh_jump_t)
 		{
@@ -988,7 +1074,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	{
 		mirror = (material_mirror_t){ .color = (cv3) {1.0f, 1.0f, 1.0f} };
 
-		assert(mesh.data.materialLibraries.count == 1); // Assume only one material library for now
+		cran_assert(mesh.data.materialLibraries.count == 1); // Assume only one material library for now
 		cranl_material_lib_t matLib = cranl_obj_mat_load(mesh.data.materialLibraries.names[0], (cranl_allocator_t)
 			{
 				.instance = &context->stack,
@@ -997,6 +1083,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			});
 
 		lamberts = crana_stack_alloc(&context->stack, sizeof(material_lambert_t) * matLib.count);
+		memset(lamberts, 0, sizeof(material_lambert_t) * matLib.count);
 		for (uint32_t i = 0; i < matLib.count; i++)
 		{
 			lamberts[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
@@ -1004,6 +1091,12 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			{
 				texture_id_t texture = texture_request(matLib.materials[i].albedoMap);
 				lamberts[i].albedoSampler = sampler_create(texture);
+			}
+
+			if (matLib.materials[i].bumpMap != NULL)
+			{
+				texture_id_t texture = texture_request(matLib.materials[i].bumpMap);
+				lamberts[i].bumpSampler = sampler_create(texture);
 			}
 		}
 
@@ -1110,6 +1203,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	{
 		float distance;
 		cv3 normal;
+		cv3 tangent;
+		cv3 bitangent;
 		cv3 barycentric;
 		cv2 uv;
 		material_index_t materialIndex;
@@ -1216,6 +1311,48 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			memcpy(&uvC, mesh->data.uvs.data + uvIndexC * 2, sizeof(cv2));
 
 			closestHitInfo.uv = cv2_add(cv2_add(cv2_mulf(uvA, u), cv2_mulf(uvB, v)), cv2_mulf(uvC, w));
+
+			uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
+			uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
+			uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
+
+			cv3 vertA, vertB, vertC;
+			memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(cv3));
+			memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(cv3));
+			memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(cv3));
+
+			float du0 = uvB.x - uvA.x;
+			float dv0 = uvB.y - uvA.y;
+			float du1 = uvC.x - uvA.x;
+			float dv1 = uvC.y - uvA.y;
+
+			// TODO: Hack, will have to find a better way to do this.
+			// Getting repeating UV value indices causing 0s to appear
+			du0 = du0 == 0.0f ? 0.0001f : du0;
+			dv0 = dv0 == 0.0f ? 0.0001f : dv0;
+			du1 = du1 == 0.0f ? 0.0001f : du1;
+			dv1 = dv1 == 0.0f ? 0.0001f : dv1;
+
+			cv3 e0 = cv3_sub(vertB, vertA);
+			cv3 e1 = cv3_sub(vertC, vertA);
+
+			// e0=du0T+dv0B (1)
+			// e1=du1T+dv1B (2)
+			// solve for B
+			// (e0-du0T)/dv0
+			// plug into (2)
+			// e1=du1T+dv1(e0-du0T)/dv0
+			// solve for T
+			// e1=du1dv0T/dv0+dv1e0/dv0-dv1du0T/dv0
+			// dv0e1=du1dv0T+dv1e0-dv1du0T
+			// dv0e1-dv1e0=du1dv0T-dv1du0T
+			// dv0e1-dv1e0=T(du1dv0-dv1du0)
+			// T = (dv0e1-dv1e0)/(dv0du1-dv1du0)
+
+			closestHitInfo.tangent = cv3_mulf(cv3_sub(cv3_mulf(e1, dv0), cv3_mulf(e0, dv1)), cf_rcp(fmaxf(dv0*du1 - dv1*du0, 0.0001f)));
+			cran_assert(cv3_sqrlength(closestHitInfo.tangent) > 0.0f);
+			closestHitInfo.tangent = cv3_normalize(closestHitInfo.tangent);
+			closestHitInfo.bitangent = cv3_normalize(cv3_cross(closestHitInfo.normal, closestHitInfo.tangent));
 		}
 
 		crana_stack_free(&context->stack, candidates);
@@ -1233,6 +1370,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			{
 				.surface = intersectionPoint,
 				.normal = closestHitInfo.normal,
+				.tangent = closestHitInfo.tangent,
+				.bitangent = closestHitInfo.bitangent,
 				.viewDir = rayD,
 				.uv = closestHitInfo.uv,
 				.triangleId = closestHitInfo.triangleId
@@ -1249,7 +1388,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = (cv3) { 200.0f, 200.0f, 200.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 50.0f, 50.0f, 50.0f };// sample_hdr(rayD, backgroundSampler);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
@@ -1280,11 +1419,17 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
 	// TODO: Consider iteration instead of recursion
 
+	cv3 normal = cv3_normalize(inputs.normal);
+	cv2 partialDerivative = sampler_bump(lambertData.bumpSampler, inputs.uv);
+	normal = cv3_cross(cv3_add(inputs.tangent, cv3_mulf(normal, partialDerivative.x)), cv3_add(inputs.bitangent, cv3_mulf(normal, partialDerivative.y)));
+	normal = cv3_normalize(normal);
+	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
+
 	float r1 = random01f(&context->randomSeed);
 	float r2 = random01f(&context->randomSeed);
 	float pdf;
 	cv3 castDir = hemisphere_surface_random_lambert(r1,r2,&pdf);
-	castDir = cm3_rotate_cv3(cm3_basis_from_normal(inputs.normal), castDir);
+	castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
 	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 
 	const bool ImportanceSampling = false;
@@ -1306,7 +1451,7 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 	cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
 
 	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
-	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, inputs.normal), 0.0f) * attenuation);
+	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f) * attenuation);
 
 	cranpr_end("shader", "lambert");
 	return cv3_mul(light, cv3_mulf(albedo, cran_rpi));
@@ -1428,7 +1573,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 16,
+		.samplesPerPixel = 4,
 		.renderWidth = 420,
 		.renderHeight = 360,
 		.useDirectionalMat = false
@@ -1514,7 +1659,7 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 1.0f };
+	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 2.0f };
 	mainRenderData.forward = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
 	mainRenderData.right = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
