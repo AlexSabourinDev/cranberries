@@ -53,7 +53,8 @@ typedef struct
 typedef struct
 {
 	char* name;
-	float albedo[3]; // kD in mtl file format
+	char* albedoMap; // map_Kd
+	float albedo[3]; // Kd
 } cranl_material_t;
 
 typedef struct

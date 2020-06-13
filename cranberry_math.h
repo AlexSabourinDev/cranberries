@@ -38,6 +38,11 @@ typedef struct
 
 typedef struct
 {
+	float x, y, z, w;
+} cv4;
+
+typedef struct
+{
 	cfl x;
 	cfl y;
 	cfl z;

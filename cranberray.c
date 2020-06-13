@@ -23,6 +23,18 @@
 //#define CRANPR_ENABLED
 #include "cranberry_profiler.h"
 
+// Hash a string at compile time, Source on: https://stackoverflow.com/questions/7666509/hash-function-for-string
+// Algorithm Source: http://www.cse.yorku.ca/~oz/hash.html by Dan Bernstein
+uint32_t djb2(char const* cran_restrict string, uint32_t hash)
+{
+	return (string[0] == '\0') ? 0 : ((hash << 5) + hash) + string[1] + djb2(&string[1], hash);
+}
+
+uint32_t hash(const char* string)
+{
+	return djb2(string, 5381);
+}
+
 // Allocator
 typedef struct
 {
@@ -44,9 +56,6 @@ void* crana_stack_alloc(crana_stack_t* stack, uint64_t size)
 	return ptr + sizeof(uint64_t);
 }
 
-// TODO: Deallocation is error prone, what if we change the size of the alloc but not the release?
-// Tricky because I've decided to allow the allocations to grow and still reference the initial allocation
-// pointer as long as no intermediate allocations are made to the allocator. (TODO: Likely want to either change the scheme, or add a key type mechanism)
 void crana_stack_free(crana_stack_t* stack, void* memory)
 {
 	assert(!stack->locked);
@@ -307,6 +316,144 @@ static cv3 box_random(random_seed_t* seed)
 	return cv3_mulf((cv3) { random01f(seed)-0.5f, random01f(seed)-0.5f, random01f(seed)-0.5f }, 2.0f);
 }
 
+static cv4 sample_rgb_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height)
+{
+	// TODO: Bilerp
+	uv.y = cf_frac(uv.y);
+	uv.x = cf_frac(uv.x);
+
+	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
+	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
+
+	float readY = uv.y * (float)height;
+	float readX = uv.x * (float)width;
+	int32_t readIndex = ((int32_t)floorf(readY) * width + (int32_t)floorf(readX)) * 3;
+
+	cv4 color;
+	color.x = (float)image[readIndex + 0] / 255.0f;
+	color.y = (float)image[readIndex + 1] / 255.0f;
+	color.z = (float)image[readIndex + 2] / 255.0f;
+	color.w = 1.0f;
+
+	return color;
+}
+
+static cv4 sample_rgba_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height)
+{
+	// TODO: Bilerp
+	uv.y = cf_frac(uv.y);
+	uv.x = cf_frac(uv.x);
+
+	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
+	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
+
+	float readY = uv.y * (float)height;
+	float readX = uv.x * (float)width;
+	int32_t readIndex = ((int32_t)floorf(readY) * width + (int32_t)floorf(readX)) * 4;
+
+	cv4 color;
+	color.x = (float)image[readIndex + 0] / 255.0f;
+	color.y = (float)image[readIndex + 1] / 255.0f;
+	color.z = (float)image[readIndex + 2] / 255.0f;
+	color.w = (float)image[readIndex + 3] / 255.0f;
+
+	return color;
+}
+
+typedef enum
+{
+	texture_rgb_u8,
+	texture_rgb_f32,
+	texture_rgba_u8
+} texture_format_e;
+
+typedef struct
+{
+	// 0 is an invalid texture. [1->max_texture_count] is our valid range
+	uint32_t id;
+} texture_id_t;
+
+typedef struct
+{
+	texture_id_t texture;
+} sampler_t;
+
+typedef struct
+{
+	uint8_t* cran_restrict data;
+	int32_t width;
+	int32_t height;
+	texture_format_e format;
+} texture_t;
+
+// TODO: Improve our texture cache system,
+// We likely want a set amount of memory and page out textures as needed
+#define max_texture_count 100
+typedef struct
+{
+	uint32_t hashes[max_texture_count];
+	texture_t textures[max_texture_count];
+	uint32_t nextTexture;
+} texture_store_t;
+
+// TODO: Do we want this to be global?
+texture_store_t textureStore;
+
+texture_id_t texture_request(char const* cran_restrict path)
+{
+	assert(textureStore.nextTexture != max_texture_count);
+
+	uint32_t textureHash = hash(path);
+
+	for (uint32_t i = 0; i < textureStore.nextTexture; i++)
+	{
+		if (textureStore.hashes[i] == textureHash)
+		{
+			return (texture_id_t) { i + 1 };
+		}
+	}
+
+	textureStore.hashes[textureStore.nextTexture] = textureHash;
+	texture_t* texture = &textureStore.textures[textureStore.nextTexture];
+
+	int stride;
+	texture->data = stbi_load(path, &texture->width, &texture->height, &stride, 0);
+
+	assert(stride == 3 || stride == 4);
+	texture->format = stride == 3 ? texture_rgb_u8 : texture_rgba_u8;
+
+	return (texture_id_t) { ++textureStore.nextTexture };
+}
+
+sampler_t sampler_create(texture_id_t texture)
+{
+	return (sampler_t) { texture };
+}
+
+cv4 sampler_sample(sampler_t sampler, cv2 uv)
+{
+	if (sampler.texture.id == 0)
+	{
+		// No texture is fully white because it makes shaders easier to write.
+		return (cv4) { 1.0f, 1.0f, 1.0f, 1.0f };
+	}
+
+	assert(sampler.texture.id <= textureStore.nextTexture);
+
+	// TODO: Support different texture formats
+	texture_t* texture = &textureStore.textures[sampler.texture.id - 1];
+	switch (texture->format)
+	{
+	case texture_rgb_u8:
+		return sample_rgb_u8(uv, texture->data, texture->width, texture->height);
+	case texture_rgba_u8:
+		return sample_rgba_u8(uv, texture->data, texture->width, texture->height);
+	default:
+		assert(false);
+		return (cv4) { 0.0f };
+	}
+}
+
 typedef struct
 {
 	float* cran_restrict image;
@@ -322,37 +469,6 @@ typedef struct
 	int32_t height;
 	int32_t stride;
 } sampler_hdr_t;
-
-typedef struct
-{
-	uint8_t* cran_restrict image;
-
-	int32_t width;
-	int32_t height;
-	int32_t stride;
-} sampler_u8_t;
-
-static cv3 sample_rgb_f32(cv2 uv, sampler_u8_t sampler)
-{
-	// TODO: Bilerp
-	uv.y = cf_frac(uv.y);
-	uv.x = cf_frac(uv.x);
-
-	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
-	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
-
-	float readY = uv.y * (float)sampler.height;
-	float readX = uv.x * (float)sampler.width;
-	int32_t readIndex = ((int32_t)floorf(readY) * sampler.width + (int32_t)floorf(readX)) * sampler.stride;
-
-	cv3 color;
-	color.x = (float)sampler.image[readIndex + 0] / 255.0f;
-	color.y = (float)sampler.image[readIndex + 1] / 255.0f;
-	color.z = (float)sampler.image[readIndex + 2] / 255.0f;
-
-	return color;
-}
-
 
 static cv3 sample_hdr(cv3 v, sampler_hdr_t sampler)
 {
@@ -442,7 +558,8 @@ typedef enum
 
 typedef struct
 {
-	cv3 albedo;
+	cv3 albedoTint;
+	sampler_t albedoSampler;
 } material_lambert_t;
 
 typedef struct
@@ -882,7 +999,12 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		lamberts = crana_stack_alloc(&context->stack, sizeof(material_lambert_t) * matLib.count);
 		for (uint32_t i = 0; i < matLib.count; i++)
 		{
-			lamberts[i].albedo = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
+			lamberts[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
+			if (matLib.materials[i].albedoMap != NULL)
+			{
+				texture_id_t texture = texture_request(matLib.materials[i].albedoMap);
+				lamberts[i].albedoSampler = sampler_create(texture);
+			}
 		}
 
 		material_index_t* materialIndices = crana_stack_alloc(&context->stack, sizeof(material_lambert_t) * mesh.data.materials.count);
@@ -967,7 +1089,6 @@ typedef struct
 } ray_hit_t;
 
 sampler_hdr_t backgroundSampler;
-sampler_u8_t checkerboardSampler;
 
 static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD, uint64_t sourceTriangleId)
 {
@@ -1179,7 +1300,10 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 		result.light = cv3_mulf(result.light, cf_rcp(pdf));
 	}
 
-	cv3 albedo = lambertData.albedo;
+	cv3 albedoTint = lambertData.albedoTint;
+	cv4 samplerAlbedo = sampler_sample(lambertData.albedoSampler, inputs.uv);
+
+	cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
 
 	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
 	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, inputs.normal), 0.0f) * attenuation);
@@ -1304,7 +1428,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 1,
+		.samplesPerPixel = 16,
 		.renderWidth = 420,
 		.renderHeight = 360,
 		.useDirectionalMat = false
@@ -1329,11 +1453,6 @@ int main()
 
 	static render_data_t mainRenderData;
 	uint64_t startTime = cranpl_timestamp_micro();
-
-	// Checkerboad
-	{
-		checkerboardSampler.image = stbi_load("checkerboard.png", &checkerboardSampler.width, &checkerboardSampler.height, &checkerboardSampler.stride, 0);
-	}
 
 	// Environment map
 	{
@@ -1543,7 +1662,10 @@ int main()
 	free(mainRenderContext.stack.mem);
 	free(mainRenderContext.scratchStack.mem);
 
-	stbi_image_free(checkerboardSampler.image);
+	for (uint32_t i = 0; i < textureStore.nextTexture; i++)
+	{
+		stbi_image_free(textureStore.textures[i].data);
+	}
 	stbi_image_free(backgroundSampler.image);
 
 	cranpr_end("cranberray","main");

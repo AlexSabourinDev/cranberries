@@ -356,22 +356,27 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 	}
 
 	cranl_material_t* materials = allocator.alloc(allocator.instance, materialCount * sizeof(cranl_material_t));
+	memset(materials, 0, materialCount * sizeof(cranl_material_t));
+
 	uint32_t materialIndex = 0;
 	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
 	{
 		if(memcmp(fileIter, "newmtl ", 7) == 0)
 		{
-			char* materialName = fileIter + strlen("newmtl") + 1;
+			// Set the material name
+			{
+				char* materialName = fileIter + strlen("newmtl") + 1;
 
-			char const* materialNameEnd = advance_to(materialName, fileEnd, delim);
-			assert(materialNameEnd != NULL);
+				char const* materialNameEnd = advance_to(materialName, fileEnd, delim);
+				assert(materialNameEnd != NULL);
 
-			uint64_t nameLength = (materialNameEnd - materialName);
-			materials[materialIndex].name = allocator.alloc(allocator.instance, nameLength + 1);
-			memcpy(materials[materialIndex].name, materialName, nameLength);
-			materials[materialIndex].name[nameLength] = '\0';
+				uint64_t nameLength = (materialNameEnd - materialName);
+				materials[materialIndex].name = allocator.alloc(allocator.instance, nameLength + 1);
+				memcpy(materials[materialIndex].name, materialName, nameLength);
+				materials[materialIndex].name[nameLength] = '\0';
+			}
 
-			for (fileIter += strlen("newmtl"); fileIter+1 != fileEnd && memcmp(fileIter+1, "newmtl", strlen("newmtl")) != 0; fileIter = token(fileIter, fileEnd, delim))
+			for (fileIter += strlen("newmtl"); fileIter != fileEnd && memcmp(fileIter, "newmtl", strlen("newmtl")) != 0; fileIter = token(fileIter, fileEnd, delim))
 			{
 				if (memcmp(fileIter, "Kd ", 3) == 0)
 				{
@@ -383,8 +388,21 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					materials[materialIndex].albedo[1] = g;
 					materials[materialIndex].albedo[2] = b;
 				}
+				else if (memcmp(fileIter, "map_Kd ", 7) == 0)
+				{
+					char* albedoMap = fileIter + strlen("map_Kd") + 1;
+
+					char const* albedoMapEnd = advance_to(albedoMap, fileEnd, delim);
+					assert(albedoMapEnd != NULL);
+
+					uint64_t nameLength = (albedoMapEnd - albedoMap);
+					materials[materialIndex].albedoMap = allocator.alloc(allocator.instance, nameLength + 1);
+					memcpy(materials[materialIndex].albedoMap, albedoMap, nameLength);
+					materials[materialIndex].albedoMap[nameLength] = '\0';
+				}
 			}
 
+			fileIter--; // Move fileIter back, we don't want to increment past our newmtl token
 			materialIndex++;
 		}
 		else if (memcmp(fileIter, "# ", 2) == 0)
