@@ -590,7 +590,7 @@ cran_forceinline cv3 cmi_fresnel_schlick_r0(cv3 r0, cv3 n, cv3 i)
 {
 	cv3 f0 = r0;
 	f0 = cv3_mul(f0,f0);
-	float a = 1.0f - fmaxf(cv3_dot(n, i), 0.0f);
+	float a = fminf(1.0f + cv3_dot(n, i), 1.0f);
 	return cv3_add(f0, cv3_mulf(cv3_sub((cv3) { 1.0f, 1.0f, 1.0f }, f0), a*a*a*a*a));
 }
 
@@ -600,6 +600,6 @@ cran_forceinline float cmi_fresnel_schlick(float r1, float r2, cv3 n, cv3 i)
 {
 	float r0 = (r1 - r2) / (r1 + r2);
 	r0 *= r0;
-	float a = 1.0f - fmaxf(cv3_dot(n, i), 0.0f);
+	float a = fminf(1.0f + cv3_dot(n, i), 1.0f);
 	return r0 + (1.0f - r0)*a*a*a*a*a;
 }

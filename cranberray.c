@@ -660,6 +660,7 @@ typedef struct
 typedef struct
 {
 	cv3 albedoTint;
+	cv3 specularTint;
 	sampler_t albedoSampler;
 	sampler_t bumpSampler;
 	sampler_t glossSampler;
@@ -1111,7 +1112,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		{
 			microfacets[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
 			microfacets[i].refractiveIndex = matLib.materials[i].refractiveIndex;
-			microfacets[i].gloss = 0.5f;
+			microfacets[i].specularTint = (cv3) { matLib.materials[i].specular[0], matLib.materials[i].specular[1], matLib.materials[i].specular[2] };
+			microfacets[i].gloss = 0.0f;
 			if (matLib.materials[i].albedoMap != NULL)
 			{
 				texture_id_t texture = texture_request(matLib.materials[i].albedoMap);
@@ -1419,7 +1421,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = (cv3) { 200.0f, 200.0f, 200.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 500.0f, 500.0f, 500.0f };// sample_hdr(rayD, backgroundSampler);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
@@ -1500,17 +1502,21 @@ static cv3 shader_microfacet(const void* cran_restrict materialData, uint32_t ma
 	normal = cv3_normalize(normal);
 	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
 
-	float roughness = fmaxf(1.0f - microfacetData.gloss, 0.001f);
+	float gloss = microfacetData.gloss;
 	if (microfacetData.glossSampler.texture.id != 0)
 	{
-		roughness = 1.0f - sampler_sample(microfacetData.glossSampler, inputs.uv).x;
+		gloss = sampler_sample(microfacetData.glossSampler, cv2_mulf(inputs.uv, 2.0f)).x;
 	}
+	float roughness = fmaxf(1.0f - gloss, 0.01f);
+
 	float r1 = random01f(&context->randomSeed);
 	float r2 = random01f(&context->randomSeed);
 	cv3 h = hemisphere_surface_random_ggx_h(r1, r2, roughness);
 	h = cm3_rotate_cv3(cm3_basis_from_normal(normal), h);
 
-	float F = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, h, viewDir);
+	// If we don't want any specular, don't bother.
+	float specularAmount = cv3_sqrlength(microfacetData.specularTint) > 0.0f ? 1.0f : 0.0f;
+	float F = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, h, viewDir) * specularAmount;
 
 	float pdf = 0.0f;
 	cv3 light;
@@ -1557,6 +1563,7 @@ static cv3 shader_microfacet(const void* cran_restrict materialData, uint32_t ma
 		
 		ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 		light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
+		light = cv3_mul(light, microfacetData.specularTint);
 
 		pdf = D*chn*cf_rcp(4.0f*cv3_dot(castDir,h))*F;
 	}
@@ -1655,8 +1662,8 @@ static void render_scene_async(void* cran_restrict data)
 				{
 					renderContext->renderStats.primaryRayCount++;
 
-					float randX = xOff + renderData->xStep * (random01f(&renderContext->randomSeed) * 0.5f - 0.5f);
-					float randY = yOff + renderData->yStep * (random01f(&renderContext->randomSeed) * 0.5f - 0.5f);
+					float randX = xOff + renderData->xStep * (random01f(&renderContext->randomSeed) - 0.5f);
+					float randY = yOff + renderData->yStep * (random01f(&renderContext->randomSeed) - 0.5f);
 
 					// Construct our ray as a vector going from our origin to our near plane
 					// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
@@ -1686,9 +1693,9 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 50,
-		.renderWidth = 1024,
-		.renderHeight = 748,
+		.samplesPerPixel = 512,
+		.renderWidth = 448,
+		.renderHeight = 360,
 		.useDirectionalMat = false
 	};
 
@@ -1772,9 +1779,9 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 3.0f };
+	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 2.0f };
 	mainRenderData.forward = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
-	mainRenderData.right = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
+	mainRenderData.right = (cv3){ .x = 0.0f,.y = -1.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
 
 	float* cran_restrict hdrImage = crana_stack_alloc(&mainRenderContext.stack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride * sizeof(float));
