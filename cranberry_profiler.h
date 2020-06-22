@@ -286,7 +286,7 @@ cranpr_sample_t cranpr_create_sample(const char* category, const char* name, int
 }
 
 /* Bigger buffers mean less contention for the list, but also means longer flushes and more memory usage */
-#define cranpr_buffer_size 1024
+#define cranpr_buffer_size (1024*1014)
 
 typedef struct
 {
@@ -617,7 +617,7 @@ void cranpr_write_to_file(const char* filePath)
 	if (writtenSize > 0)
 	{
 		fprintf(fileHandle, "%s", cranpr_profile_preface);
-		fwrite(print, writtenSize, 1, fileHandle);
+		fwrite(print, writtenSize - 1, 1, fileHandle);
 		fprintf(fileHandle, "%s", cranpr_profile_postface);
 	}
 

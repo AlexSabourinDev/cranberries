@@ -54,7 +54,7 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 	uint32_t materialCount = 0;
 	uint32_t materialLibCount = 0;
 
-	char const* delim = " \n\t";
+	char const* delim = " \n\t\r";
 	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
 	{
 		if (memcmp(fileIter, "vt ", 3) == 0)
@@ -248,7 +248,7 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 		{
 			char* materialLibName = fileIter + strlen("mtllib") + 1;
 
-			char const* materialLibNameEnd = advance_to(materialLibName, fileEnd, delim);;
+			char const* materialLibNameEnd = advance_to(materialLibName, fileEnd, delim);
 			assert(materialLibNameEnd != NULL);
 
 			uint64_t nameLength = (materialLibNameEnd - materialLibName);
@@ -340,7 +340,7 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 	char* cran_restrict fileStart = (char* cran_restrict)fileMap.fileData;
 	char* cran_restrict fileEnd = (char* cran_restrict)fileStart + fileMap.fileSize;
 
-	char const* delim = " \n\t";
+	char const* delim = " \n\t\r";
 
 	uint32_t materialCount = 0;
 	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
@@ -388,6 +388,22 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					materials[materialIndex].albedo[1] = g;
 					materials[materialIndex].albedo[2] = b;
 				}
+				else if (memcmp(fileIter, "Ks ", 3) == 0)
+				{
+					float r=strtof(fileIter + 2, &fileIter);
+					float g=strtof(fileIter + 1, &fileIter);
+					float b=strtof(fileIter + 1, &fileIter);
+
+					materials[materialIndex].specular[0] = r;
+					materials[materialIndex].specular[1] = g;
+					materials[materialIndex].specular[2] = b;
+				}
+				else if (memcmp(fileIter, "Ni ", 3) == 0)
+				{
+					float r=strtof(fileIter + 2, &fileIter);
+
+					materials[materialIndex].refractiveIndex = r;
+				}
 				else if (memcmp(fileIter, "map_Kd ", 7) == 0)
 				{
 					char* albedoMap = fileIter + strlen("map_Kd") + 1;
@@ -411,6 +427,18 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					materials[materialIndex].bumpMap = allocator.alloc(allocator.instance, nameLength + 1);
 					memcpy(materials[materialIndex].bumpMap, bumpMap, nameLength);
 					materials[materialIndex].bumpMap[nameLength] = '\0';
+				}
+				else if (memcmp(fileIter, "map_ks ", 7) == 0)
+				{
+					char* map = fileIter + strlen("map_ks") + 1;
+
+					char const* mapEnd = advance_to(map, fileEnd, delim);
+					assert(mapEnd != NULL);
+
+					uint64_t nameLength = (mapEnd - map);
+					materials[materialIndex].glossMap = allocator.alloc(allocator.instance, nameLength + 1);
+					memcpy(materials[materialIndex].glossMap, map, nameLength);
+					materials[materialIndex].glossMap[nameLength] = '\0';
 				}
 			}
 

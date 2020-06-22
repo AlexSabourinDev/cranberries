@@ -54,8 +54,11 @@ typedef struct
 {
 	char* name;
 	char* albedoMap; // map_Kd
-	char* bumpMap;
+	char* bumpMap; // map_bump
+	char* glossMap; // map_ks
 	float albedo[3]; // Kd
+	float specular[3]; // Ks
+	float refractiveIndex; // Ni
 } cranl_material_t;
 
 typedef struct

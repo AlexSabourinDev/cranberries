@@ -1,5 +1,13 @@
 #pragma once
 
+// Convention
+// cf = floating point
+// cfl = floating point lanes
+// cv# = vector math (i.e. cv2, cv3)
+// cvl = vector lane math (i.e. cv3l)
+// cm# = matrix math
+// cmi = miscellaneous
+
 #include <math.h>
 #include <immintrin.h>
 
@@ -105,7 +113,9 @@ cran_forceinline cv3 cv3_min(cv3 v, cv3 m);
 cran_forceinline cv3 cv3_max(cv3 v, cv3 m);
 cran_forceinline cv3 cv3_rcp(cv3 v);
 cran_forceinline cv3 cv3_fast_rcp(cv3 v);
+// Expecting i to be incident. (i.n < 0)
 cran_forceinline cv3 cv3_reflect(cv3 i, cv3 n);
+cran_forceinline cv3 cv3_inverse(cv3 i);
 // a is between 0 and 2 PI
 // t is between 0 and PI (0 being the bottom, PI being the top)
 cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_restrict t);
@@ -131,6 +141,12 @@ cran_forceinline cv3 cm3_rotate_cv3(cm3 m, cv3 v);
 // AABB API
 cran_forceinline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin, float rayMax, caabb aabb);
 cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax);
+
+// Miscellaneous API
+cran_forceinline cv3 cmi_fresnel_schlick_r0(cv3 r0, cv3 n, cv3 i);
+// r1 = exiting refractive index (usually air)
+// r2 = entering refactive index
+cran_forceinline float cmi_fresnel_schlick(float r1, float r2, cv3 n, cv3 i);
 
 // Single Implementation
 cran_forceinline float cf_rcp(float f)
@@ -382,6 +398,11 @@ cran_forceinline cv3 cv3_reflect(cv3 i, cv3 n)
 	return cv3_sub(i, cv3_mulf(n, 2.0f * cv3_dot(i, n)));
 }
 
+cran_forceinline cv3 cv3_inverse(cv3 i)
+{
+	return (cv3) { -i.x, -i.y, -i.z };
+}
+
 cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_restrict t)
 {
 	float rlenght = cv3_rlength(v);
@@ -562,4 +583,23 @@ cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, flo
 	cfl tmax = cfl_min(rayMaxLane, cfl_min(tbigger.x, cfl_min(tbigger.y, tbigger.z)));
 	cfl result = cfl_less(tmin, tmax);
 	return cfl_mask(result);
+}
+
+// Miscellaneous Implementation
+cran_forceinline cv3 cmi_fresnel_schlick_r0(cv3 r0, cv3 n, cv3 i)
+{
+	cv3 f0 = r0;
+	f0 = cv3_mul(f0,f0);
+	float a = 1.0f - fmaxf(cv3_dot(n, i), 0.0f);
+	return cv3_add(f0, cv3_mulf(cv3_sub((cv3) { 1.0f, 1.0f, 1.0f }, f0), a*a*a*a*a));
+}
+
+// r1 = exiting refractive index (usually air)
+// r2 = entering refactive index
+cran_forceinline float cmi_fresnel_schlick(float r1, float r2, cv3 n, cv3 i)
+{
+	float r0 = (r1 - r2) / (r1 + r2);
+	r0 *= r0;
+	float a = 1.0f - fmaxf(cv3_dot(n, i), 0.0f);
+	return r0 + (1.0f - r0)*a*a*a*a*a;
 }

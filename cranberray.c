@@ -17,7 +17,7 @@
 #include <assert.h>
 #define cran_assert(a) assert(a)
 #else
-# define cran_assert(a)
+# define cran_assert(a) (void)(a)
 #endif
 
 #include "stb_image.h"
@@ -314,6 +314,14 @@ static cv3 hemisphere_surface_random_lambert(float r1, float r2, float* pdf)
 	float phi = cran_tao * r2;
 
 	*pdf = cosTheta * cf_rcp(cran_pi);
+	return (cv3) { sinTheta*cosf(phi), sinTheta*sinf(phi), cosTheta };
+}
+
+static cv3 hemisphere_surface_random_ggx_h(float r1, float r2, float a)
+{
+	float cosTheta = sqrtf((1.0f-r1)*cf_rcp(r1*(a*a-1.0f)+1.0f));
+	float sinTheta = sqrtf(1.0f - cosTheta*cosTheta);
+	float phi = cran_tao * r2;
 	return (cv3) { sinTheta*cosf(phi), sinTheta*sinf(phi), cosTheta };
 }
 
@@ -636,6 +644,7 @@ typedef enum
 	material_lambert,
 	material_mirror,
 	material_directional,
+	material_microfacet,
 	material_count
 } material_type_e;
 
@@ -645,6 +654,16 @@ typedef struct
 	sampler_t albedoSampler;
 	sampler_t bumpSampler;
 } material_lambert_t;
+
+typedef struct
+{
+	cv3 albedoTint;
+	sampler_t albedoSampler;
+	sampler_t bumpSampler;
+	sampler_t glossSampler;
+	float refractiveIndex;
+	float gloss;
+} material_microfacet_t;
 
 typedef struct
 {
@@ -712,11 +731,13 @@ typedef cv3(material_shader_t)(const void* cran_restrict materialData, uint32_t 
 static material_shader_t shader_lambert;
 static material_shader_t shader_mirror;
 static material_shader_t shader_directional;
+static material_shader_t shader_microfacet;
 material_shader_t* shaders[material_count] =
 {
 	shader_lambert,
 	shader_mirror,
 	shader_directional,
+	shader_microfacet,
 };
 
 static int index_aabb_sort_min_x(const void* cran_restrict l, const void* cran_restrict r)
@@ -1069,7 +1090,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	}
 
 	// materials
-	material_lambert_t* lamberts;
+	material_microfacet_t* microfacets;
 	static material_mirror_t mirror;
 	{
 		mirror = (material_mirror_t){ .color = (cv3) {1.0f, 1.0f, 1.0f} };
@@ -1082,25 +1103,33 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 				.free = &crana_stack_free
 			});
 
-		lamberts = crana_stack_alloc(&context->stack, sizeof(material_lambert_t) * matLib.count);
-		memset(lamberts, 0, sizeof(material_lambert_t) * matLib.count);
+		microfacets = crana_stack_alloc(&context->stack, sizeof(material_microfacet_t) * matLib.count);
+		memset(microfacets, 0, sizeof(material_microfacet_t) * matLib.count);
 		for (uint32_t i = 0; i < matLib.count; i++)
 		{
-			lamberts[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
+			microfacets[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
+			microfacets[i].refractiveIndex = matLib.materials[i].refractiveIndex;
+			microfacets[i].gloss = 0.5f;
 			if (matLib.materials[i].albedoMap != NULL)
 			{
 				texture_id_t texture = texture_request(matLib.materials[i].albedoMap);
-				lamberts[i].albedoSampler = sampler_create(texture);
+				microfacets[i].albedoSampler = sampler_create(texture);
 			}
 
 			if (matLib.materials[i].bumpMap != NULL)
 			{
 				texture_id_t texture = texture_request(matLib.materials[i].bumpMap);
-				lamberts[i].bumpSampler = sampler_create(texture);
+				microfacets[i].bumpSampler = sampler_create(texture);
+			}
+
+			if (matLib.materials[i].glossMap != NULL)
+			{
+				texture_id_t texture = texture_request(matLib.materials[i].glossMap);
+				microfacets[i].glossSampler = sampler_create(texture);
 			}
 		}
 
-		material_index_t* materialIndices = crana_stack_alloc(&context->stack, sizeof(material_lambert_t) * mesh.data.materials.count);
+		material_index_t* materialIndices = crana_stack_alloc(&context->stack, sizeof(material_index_t) * mesh.data.materials.count);
 		for (uint32_t i = 0; i < mesh.data.materials.count; i++)
 		{
 			uint16_t dataIndex = 0;
@@ -1112,7 +1141,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 				}
 			}
 
-			materialIndices[i] = (material_index_t) { .dataIndex = dataIndex, .typeIndex = material_lambert };
+			materialIndices[i] = (material_index_t) { .dataIndex = dataIndex, .typeIndex = material_microfacet };
 		}
 
 		mesh.materialIndices = materialIndices;
@@ -1138,7 +1167,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		.renderables = &mesh,
 		.materials =
 		{
-			[material_lambert] = lamberts,
+			[material_microfacet] = microfacets,
 			[material_mirror] = &mirror
 		}
 	};
@@ -1359,7 +1388,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 	context->renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
 
-	if (closestHitInfo.distance != NoRayIntersection)
+	if (closestHitInfo.triangleId != 0)
 	{
 		material_index_t materialIndex = closestHitInfo.materialIndex;
 		cv3 intersectionPoint = cv3_add(rayO, cv3_mulf(rayD, closestHitInfo.distance));
@@ -1381,14 +1410,14 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		cranpr_end("scene", "cast");
 		return (ray_hit_t)
 		{
-			.light = light,
+			.light = cv3_mulf(light, light_attenuation(intersectionPoint, rayO)),
 			.surface = intersectionPoint,
 			.hit = true
 		};
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = (cv3) { 50.0f, 50.0f, 50.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 200.0f, 200.0f, 200.0f };// sample_hdr(rayD, backgroundSampler);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
@@ -1449,12 +1478,90 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 	cv4 samplerAlbedo = sampler_sample(lambertData.albedoSampler, inputs.uv);
 
 	cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
-
-	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
-	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f) * attenuation);
+	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
 
 	cranpr_end("shader", "lambert");
 	return cv3_mul(light, cv3_mulf(albedo, cran_rpi));
+}
+
+static cv3 shader_microfacet(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
+{
+	cranpr_begin("shader", "microfacet");
+	material_microfacet_t microfacetData = ((const material_microfacet_t* cran_restrict)materialData)[materialIndex];
+	// TODO: Consider iteration instead of recursion
+
+	cv3 viewDir = cv3_inverse(cv3_normalize(inputs.viewDir));
+
+	cv3 normal = cv3_normalize(inputs.normal);
+	cv2 partialDerivative = sampler_bump(microfacetData.bumpSampler, inputs.uv);
+	normal = cv3_cross(cv3_add(inputs.tangent, cv3_mulf(normal, partialDerivative.x)), cv3_add(inputs.bitangent, cv3_mulf(normal, partialDerivative.y)));
+	normal = cv3_normalize(normal);
+	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
+
+	float roughness = fmaxf(1.0f - microfacetData.gloss, 0.001f);
+	if (microfacetData.glossSampler.texture.id != 0)
+	{
+		roughness = sampler_sample(microfacetData.glossSampler, inputs.uv).x;
+	}
+	float r1 = random01f(&context->randomSeed);
+	float r2 = random01f(&context->randomSeed);
+	cv3 h = hemisphere_surface_random_ggx_h(r1, r2, roughness);
+	h = cm3_rotate_cv3(cm3_basis_from_normal(normal), h);
+
+	float F = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, h, viewDir);
+
+	float pdf = 0.0f;
+	cv3 light;
+	if(random01f(&context->randomSeed) >= F)
+	{
+		float lr1 = random01f(&context->randomSeed);
+		float lr2 = random01f(&context->randomSeed);
+		float diffusePDF;
+		cv3 castDir = hemisphere_surface_random_lambert(lr1, lr2, &diffusePDF);
+		castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
+
+		ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
+		light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
+
+		cv3 albedoTint = microfacetData.albedoTint;
+		cv4 samplerAlbedo = sampler_sample(microfacetData.albedoSampler, inputs.uv);
+
+		cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
+		light = cv3_mul(light, cv3_mulf(albedo, cran_rpi));
+
+		pdf = diffusePDF * (1.0f - F);
+	}
+	else
+	{
+		// https://schuttejoe.github.io/post/ggximportancesamplingpart1/
+		// https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf
+		// specular BRDF
+		cv3 castDir = cv3_reflect(cv3_inverse(viewDir), h);
+
+		float chn = cv3_dot(h, normal);
+		float cvn = cv3_dot(viewDir, normal);
+		float cln = cv3_dot(castDir, normal);
+
+		// GGX
+		float t = chn * chn*(roughness*roughness - 1.0f) + 1.0f;
+		float D = (roughness*roughness)*cf_rcp(cran_pi*t*t);
+		// Smith shadowing
+		float Gv = cvn*sqrtf(roughness*roughness+(1.0f - roughness*roughness)*cln*cln);
+		float Gl = cln*sqrtf(roughness*roughness+(1.0f - roughness*roughness)*cvn*cvn);
+		float G = 2.0f*cln*cvn / (Gv + Gl);
+
+		// F(L,H)D(H)G(L,V,H)/(4*N.L*V.N)
+		float brdf = F*G*D*cf_rcp(4.0f*cv3_dot(castDir, normal)*cv3_dot(viewDir, normal));
+		
+		ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
+		light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
+
+		pdf = D*chn*cf_rcp(4.0f*cv3_dot(castDir,h))*F;
+	}
+	light = cv3_mulf(light, cf_rcp(pdf));
+
+	cranpr_end("shader", "microfacet");
+	return light;
 }
 
 static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
@@ -1466,8 +1573,12 @@ static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materi
 	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 
 	float lambertCosine = fmaxf(0.0f, cv3_dot(cv3_normalize(castDir), inputs.normal));
-	float attenuation = result.hit ? light_attenuation(result.surface, inputs.surface) : 1.0f;
-	cv3 sceneCast = cv3_mulf(cv3_mulf(result.light, lambertCosine), attenuation);
+
+	// \int_\omega c*dirac(v,reflect(l,n))*v.n d\omega = 1
+	// c*reflect(l,n).n=1
+	// c=1/reflect(l,n)
+	float normalization = cf_rcp(lambertCosine); // cancels our lambert cosine
+	cv3 sceneCast = cv3_mulf(result.light, lambertCosine * normalization);
 
 	cranpr_end("shader", "mirror");
 	return cv3_mul(sceneCast, mirrorData.color);
@@ -1573,8 +1684,8 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 4,
-		.renderWidth = 420,
+		.samplesPerPixel = 10,
+		.renderWidth = 480,
 		.renderHeight = 360,
 		.useDirectionalMat = false
 	};
@@ -1659,7 +1770,7 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 2.0f };
+	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 0.0f };
 	mainRenderData.forward = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
 	mainRenderData.right = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
@@ -1771,36 +1882,41 @@ int main()
 
 	// Print stats
 	{
-		system("cls");
-		printf("Total Time: %f\n", micro_to_seconds(mainRenderContext.renderStats.totalTime));
-		printf("\tScene Generation Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.sceneGenerationTime), (float)mainRenderContext.renderStats.sceneGenerationTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
-		printf("\tRender Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.renderTime), (float)mainRenderContext.renderStats.renderTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
-		printf("----------\n");
-		printf("Accumulated Threading Data\n");
-		printf("\t\tIntersection Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.intersectionTime), (float)mainRenderContext.renderStats.intersectionTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
-		printf("\t\t\tBVH Traversal Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.bvhTraversalTime), (float)mainRenderContext.renderStats.bvhTraversalTime / (float)mainRenderContext.renderStats.intersectionTime * 100.0f);
-		printf("\t\t\t\tBVH Tests: %" PRIu64 "\n", mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount);
-		printf("\t\t\t\t\tBVH Hits: %" PRIu64 "[%.2f%%]\n", mainRenderContext.renderStats.bvhHitCount, (float)mainRenderContext.renderStats.bvhHitCount/(float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
-		printf("\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%.2f%%]\n", mainRenderContext.renderStats.bvhLeafHitCount, (float)mainRenderContext.renderStats.bvhLeafHitCount/(float)mainRenderContext.renderStats.bvhHitCount * 100.0f);
-		printf("\t\t\t\t\tBVH Misses: %" PRIu64 "[%.2f%%]\n", mainRenderContext.renderStats.bvhMissCount, (float)mainRenderContext.renderStats.bvhMissCount/(float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
-		printf("\t\tSkybox Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.skyboxTime), (float)mainRenderContext.renderStats.skyboxTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
-		printf("----------\n");
-		printf("\tImage Space Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.imageSpaceTime), (float)mainRenderContext.renderStats.imageSpaceTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
-		printf("\n");
-		printf("MRays/seconds: %f\n", (float)mainRenderContext.renderStats.rayCount / micro_to_seconds(mainRenderContext.renderStats.renderTime) / 1000000.0f);
-		printf("Rays Fired: %" PRIu64 "\n", mainRenderContext.renderStats.rayCount);
-		printf("\tCamera Rays Fired: %" PRIu64 " [%.2f%%]\n", mainRenderContext.renderStats.primaryRayCount, (float)mainRenderContext.renderStats.primaryRayCount / (float)mainRenderContext.renderStats.rayCount * 100.0f);
-		printf("\tBounce Rays Fired: %" PRIu64 " [%.2f%%]\n", mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount, (float)(mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount) / (float)mainRenderContext.renderStats.rayCount * 100.0f);
-		printf("\n");
-		printf("BVH\n");
-		printf("\tBVH Node Count: %" PRIu64 "\n", mainRenderContext.renderStats.bvhNodeCount);
-		printf("Memory\n");
-		printf("\tMain Stack\n");
-		printf("\t\tStack Size: %" PRIu64 "\n", mainRenderContext.stack.size);
-		printf("\t\tFinal Stack Top: %" PRIu64 " [%.2f%%]\n", mainRenderContext.stack.top, (float)mainRenderContext.stack.top/(float)mainRenderContext.stack.size*100.0f);
-		printf("\tScratch Stack\n");
-		printf("\t\tStack Size: %" PRIu64 "\n", mainRenderContext.scratchStack.size);
-		printf("\t\tStack Top: %" PRIu64 " [%.2f%%]\n", mainRenderContext.scratchStack.top, (float)mainRenderContext.scratchStack.top/(float)mainRenderContext.scratchStack.size*100.0f);
+		FILE* fileHandle;
+		errno_t error = fopen_s(&fileHandle, "cranberray_stats.txt", "w");
+		if (error == 0)
+		{
+			fprintf(fileHandle, "Total Time: %f\n", micro_to_seconds(mainRenderContext.renderStats.totalTime));
+			fprintf(fileHandle, "\tScene Generation Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.sceneGenerationTime), (float)mainRenderContext.renderStats.sceneGenerationTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
+			fprintf(fileHandle, "\tRender Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.renderTime), (float)mainRenderContext.renderStats.renderTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
+			fprintf(fileHandle, "----------\n");
+			fprintf(fileHandle, "Accumulated Threading Data\n");
+			fprintf(fileHandle, "\t\tIntersection Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.intersectionTime), (float)mainRenderContext.renderStats.intersectionTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
+			fprintf(fileHandle, "\t\t\tBVH Traversal Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.bvhTraversalTime), (float)mainRenderContext.renderStats.bvhTraversalTime / (float)mainRenderContext.renderStats.intersectionTime * 100.0f);
+			fprintf(fileHandle, "\t\t\t\tBVH Tests: %" PRIu64 "\n", mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount);
+			fprintf(fileHandle, "\t\t\t\t\tBVH Hits: %" PRIu64 "[%.2f%%]\n", mainRenderContext.renderStats.bvhHitCount, (float)mainRenderContext.renderStats.bvhHitCount / (float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
+			fprintf(fileHandle, "\t\t\t\t\t\tBVH Leaf Hits: %" PRIu64 "[%.2f%%]\n", mainRenderContext.renderStats.bvhLeafHitCount, (float)mainRenderContext.renderStats.bvhLeafHitCount / (float)mainRenderContext.renderStats.bvhHitCount * 100.0f);
+			fprintf(fileHandle, "\t\t\t\t\tBVH Misses: %" PRIu64 "[%.2f%%]\n", mainRenderContext.renderStats.bvhMissCount, (float)mainRenderContext.renderStats.bvhMissCount / (float)(mainRenderContext.renderStats.bvhHitCount + mainRenderContext.renderStats.bvhMissCount) * 100.0f);
+			fprintf(fileHandle, "\t\tSkybox Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.skyboxTime), (float)mainRenderContext.renderStats.skyboxTime / (float)mainRenderContext.renderStats.renderTime * 100.0f);
+			fprintf(fileHandle, "----------\n");
+			fprintf(fileHandle, "\tImage Space Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.imageSpaceTime), (float)mainRenderContext.renderStats.imageSpaceTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
+			fprintf(fileHandle, "\n");
+			fprintf(fileHandle, "MRays/seconds: %f\n", (float)mainRenderContext.renderStats.rayCount / micro_to_seconds(mainRenderContext.renderStats.renderTime) / 1000000.0f);
+			fprintf(fileHandle, "Rays Fired: %" PRIu64 "\n", mainRenderContext.renderStats.rayCount);
+			fprintf(fileHandle, "\tCamera Rays Fired: %" PRIu64 " [%.2f%%]\n", mainRenderContext.renderStats.primaryRayCount, (float)mainRenderContext.renderStats.primaryRayCount / (float)mainRenderContext.renderStats.rayCount * 100.0f);
+			fprintf(fileHandle, "\tBounce Rays Fired: %" PRIu64 " [%.2f%%]\n", mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount, (float)(mainRenderContext.renderStats.rayCount - mainRenderContext.renderStats.primaryRayCount) / (float)mainRenderContext.renderStats.rayCount * 100.0f);
+			fprintf(fileHandle, "\n");
+			fprintf(fileHandle, "BVH\n");
+			fprintf(fileHandle, "\tBVH Node Count: %" PRIu64 "\n", mainRenderContext.renderStats.bvhNodeCount);
+			fprintf(fileHandle, "Memory\n");
+			fprintf(fileHandle, "\tMain Stack\n");
+			fprintf(fileHandle, "\t\tStack Size: %" PRIu64 "\n", mainRenderContext.stack.size);
+			fprintf(fileHandle, "\t\tFinal Stack Top: %" PRIu64 " [%.2f%%]\n", mainRenderContext.stack.top, (float)mainRenderContext.stack.top / (float)mainRenderContext.stack.size*100.0f);
+			fprintf(fileHandle, "\tScratch Stack\n");
+			fprintf(fileHandle, "\t\tStack Size: %" PRIu64 "\n", mainRenderContext.scratchStack.size);
+			fprintf(fileHandle, "\t\tStack Top: %" PRIu64 " [%.2f%%]\n", mainRenderContext.scratchStack.top, (float)mainRenderContext.scratchStack.top / (float)mainRenderContext.scratchStack.size*100.0f);
+			fclose(fileHandle);
+		}
 	}
 
 	// Not worrying about individual memory cleanup, stack allocator is cleaned up in one swoop anyways.
