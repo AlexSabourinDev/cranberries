@@ -428,9 +428,9 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					memcpy(materials[materialIndex].bumpMap, bumpMap, nameLength);
 					materials[materialIndex].bumpMap[nameLength] = '\0';
 				}
-				else if (memcmp(fileIter, "map_ks ", 7) == 0)
+				else if (memcmp(fileIter, "map_Ks ", 7) == 0)
 				{
-					char* map = fileIter + strlen("map_ks") + 1;
+					char* map = fileIter + strlen("map_Ks") + 1;
 
 					char const* mapEnd = advance_to(map, fileEnd, delim);
 					assert(mapEnd != NULL);

@@ -352,12 +352,12 @@ static cv4 sample_rgb_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height
 	color.x = (float)image[readIndex + 0] / 255.0f;
 	color.y = (float)image[readIndex + 1] / 255.0f;
 	color.z = (float)image[readIndex + 2] / 255.0f;
-	color.w = 1.0f;
+	color.w = 0.0f;
 
 	return color;
 }
 
-static cv4 sample_bump_r_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
+static cv4 sample_r_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
 	// TODO: Bilerp
 	uv.y = cf_frac(uv.y);
@@ -497,6 +497,8 @@ cv4 sampler_sample(sampler_t sampler, cv2 uv)
 	texture_t* texture = &textureStore.textures[sampler.texture.id - 1];
 	switch (texture->format)
 	{
+	case texture_r_u8:
+		return sample_r_u8(uv, texture->data, texture->width, texture->height, 0, 0);
 	case texture_rgb_u8:
 		return sample_rgb_u8(uv, texture->data, texture->width, texture->height, 0, 0);
 	case texture_rgba_u8:
@@ -533,9 +535,9 @@ cv2 sampler_bump(sampler_t sampler, cv2 uv)
 		s01 = sample_rgba_u8(uv, texture->data, texture->width, texture->height, 0, 1).x;
 		break;
 	case texture_r_u8:
-		s00 = sample_bump_r_u8(uv, texture->data, texture->width, texture->height, 0, 0).x;
-		s10 = sample_bump_r_u8(uv, texture->data, texture->width, texture->height, 1, 0).x;
-		s01 = sample_bump_r_u8(uv, texture->data, texture->width, texture->height, 0, 1).x;
+		s00 = sample_r_u8(uv, texture->data, texture->width, texture->height, 0, 0).x;
+		s10 = sample_r_u8(uv, texture->data, texture->width, texture->height, 1, 0).x;
+		s01 = sample_r_u8(uv, texture->data, texture->width, texture->height, 0, 1).x;
 		break;
 	default:
 		cran_assert(false);
@@ -1501,7 +1503,7 @@ static cv3 shader_microfacet(const void* cran_restrict materialData, uint32_t ma
 	float roughness = fmaxf(1.0f - microfacetData.gloss, 0.001f);
 	if (microfacetData.glossSampler.texture.id != 0)
 	{
-		roughness = sampler_sample(microfacetData.glossSampler, inputs.uv).x;
+		roughness = 1.0f - sampler_sample(microfacetData.glossSampler, inputs.uv).x;
 	}
 	float r1 = random01f(&context->randomSeed);
 	float r2 = random01f(&context->randomSeed);
@@ -1684,9 +1686,9 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 10,
-		.renderWidth = 480,
-		.renderHeight = 360,
+		.samplesPerPixel = 50,
+		.renderWidth = 1024,
+		.renderHeight = 748,
 		.useDirectionalMat = false
 	};
 
@@ -1770,7 +1772,7 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 0.0f };
+	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 3.0f };
 	mainRenderData.forward = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
 	mainRenderData.right = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
