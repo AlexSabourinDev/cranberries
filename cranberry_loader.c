@@ -404,7 +404,7 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 
 					materials[materialIndex].refractiveIndex = r;
 				}
-				else if (memcmp(fileIter, "map_Kd ", 7) == 0)
+				else if (memcmp(fileIter, "map_Kd ", strlen("map_Kd ")) == 0)
 				{
 					char* albedoMap = fileIter + strlen("map_Kd") + 1;
 
@@ -416,7 +416,7 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					memcpy(materials[materialIndex].albedoMap, albedoMap, nameLength);
 					materials[materialIndex].albedoMap[nameLength] = '\0';
 				}
-				else if (memcmp(fileIter, "map_bump ", 7) == 0)
+				else if (memcmp(fileIter, "map_bump ", strlen("map_bump ")) == 0)
 				{
 					char* bumpMap = fileIter + strlen("map_bump") + 1;
 
@@ -428,7 +428,7 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					memcpy(materials[materialIndex].bumpMap, bumpMap, nameLength);
 					materials[materialIndex].bumpMap[nameLength] = '\0';
 				}
-				else if (memcmp(fileIter, "map_Ks ", 7) == 0)
+				else if (memcmp(fileIter, "map_Ks ", strlen("map_Ks ")) == 0)
 				{
 					char* map = fileIter + strlen("map_Ks") + 1;
 
@@ -439,6 +439,18 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					materials[materialIndex].glossMap = allocator.alloc(allocator.instance, nameLength + 1);
 					memcpy(materials[materialIndex].glossMap, map, nameLength);
 					materials[materialIndex].glossMap[nameLength] = '\0';
+				}
+				else if (memcmp(fileIter, "map_d ", strlen("map_d ")) == 0)
+				{
+					char* map = fileIter + strlen("map_d") + 1;
+
+					char const* mapEnd = advance_to(map, fileEnd, delim);
+					assert(mapEnd != NULL);
+
+					uint64_t nameLength = (mapEnd - map);
+					materials[materialIndex].maskMap = allocator.alloc(allocator.instance, nameLength + 1);
+					memcpy(materials[materialIndex].maskMap, map, nameLength);
+					materials[materialIndex].maskMap[nameLength] = '\0';
 				}
 			}
 

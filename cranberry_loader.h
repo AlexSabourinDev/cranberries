@@ -56,6 +56,7 @@ typedef struct
 	char* albedoMap; // map_Kd
 	char* bumpMap; // map_bump
 	char* glossMap; // map_ks
+	char* maskMap; // map_d
 	float albedo[3]; // Kd
 	float specular[3]; // Ks
 	float refractiveIndex; // Ni

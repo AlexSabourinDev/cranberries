@@ -357,6 +357,33 @@ static cv4 sample_rgb_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height
 	return color;
 }
 
+static cv4 sample_rg_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
+{
+	// TODO: Bilerp
+	uv.y = cf_frac(uv.y);
+	uv.x = cf_frac(uv.x);
+
+	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
+	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
+
+	float readY = uv.y * (float)height;
+	float readX = uv.x * (float)width;
+
+	uint32_t y = (uint32_t)floorf(readY) + offsetY;
+	y = y >= height ? height - 1 : y;
+	uint32_t x = (uint32_t)floorf(readX) + offsetX;
+	x = x >= width ? width - 1 : x;
+	uint32_t readIndex = (y * width + x) * 2;
+
+	cv4 color;
+	color.x = (float)image[readIndex + 0] / 255.0f;
+	color.y = (float)image[readIndex + 1] / 255.0f;
+	color.z = 0.0f;
+	color.w = 0.0f;
+
+	return color;
+}
+
 static cv4 sample_r_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
 	// TODO: Bilerp
@@ -408,6 +435,7 @@ static cv4 sample_rgba_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t heigh
 typedef enum
 {
 	texture_r_u8,
+	texture_rg_u8,
 	texture_rgb_u8,
 	texture_rgb_f32,
 	texture_rgba_u8
@@ -465,11 +493,10 @@ texture_id_t texture_request(char const* cran_restrict path)
 	int stride;
 	texture->data = stbi_load(path, &texture->width, &texture->height, &stride, 0);
 
-	cran_assert(stride == 3 || stride == 4 || stride == 1);
-
 	texture_format_e formats[] =
 	{
 		[1] = texture_r_u8,
+		[2] = texture_rg_u8,
 		[3] = texture_rgb_u8,
 		[4] = texture_rgba_u8
 	};
@@ -499,6 +526,8 @@ cv4 sampler_sample(sampler_t sampler, cv2 uv)
 	{
 	case texture_r_u8:
 		return sample_r_u8(uv, texture->data, texture->width, texture->height, 0, 0);
+	case texture_rg_u8:
+		return sample_rg_u8(uv, texture->data, texture->width, texture->height, 0, 0);
 	case texture_rgb_u8:
 		return sample_rgb_u8(uv, texture->data, texture->width, texture->height, 0, 0);
 	case texture_rgba_u8:
@@ -664,6 +693,7 @@ typedef struct
 	sampler_t albedoSampler;
 	sampler_t bumpSampler;
 	sampler_t glossSampler;
+	sampler_t maskSampler;
 	float refractiveIndex;
 	float gloss;
 } material_microfacet_t;
@@ -729,7 +759,13 @@ typedef struct
 	uint64_t triangleId;
 } shader_inputs_t;
 
-typedef cv3(material_shader_t)(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs);
+typedef struct
+{
+	cv3 light;
+	cv3 shadedSurface; // Allows the shader to modify the hit surface
+} shader_outputs_t;
+
+typedef shader_outputs_t(material_shader_t)(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs);
 
 static material_shader_t shader_lambert;
 static material_shader_t shader_mirror;
@@ -1131,6 +1167,12 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 				texture_id_t texture = texture_request(matLib.materials[i].glossMap);
 				microfacets[i].glossSampler = sampler_create(texture);
 			}
+
+			if (matLib.materials[i].maskMap != NULL)
+			{
+				texture_id_t texture = texture_request(matLib.materials[i].maskMap);
+				microfacets[i].maskSampler = sampler_create(texture);
+			}
 		}
 
 		material_index_t* materialIndices = crana_stack_alloc(&context->stack, sizeof(material_index_t) * mesh.data.materials.count);
@@ -1398,7 +1440,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		cv3 intersectionPoint = cv3_add(rayO, cv3_mulf(rayD, closestHitInfo.distance));
 
 		uint32_t shaderIndex = renderConfig.useDirectionalMat ? material_directional : materialIndex.typeIndex;
-		cv3 light = shaders[shaderIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
+		shader_outputs_t shaderResults = shaders[shaderIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
 			(shader_inputs_t)
 			{
 				.surface = intersectionPoint,
@@ -1414,14 +1456,14 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		cranpr_end("scene", "cast");
 		return (ray_hit_t)
 		{
-			.light = cv3_mulf(light, light_attenuation(intersectionPoint, rayO)),
-			.surface = intersectionPoint,
+			.light = cv3_mulf(shaderResults.light, light_attenuation(shaderResults.shadedSurface, rayO)),
+			.surface = shaderResults.shadedSurface,
 			.hit = true
 		};
 	}
 
 	uint64_t skyboxStartTime = cranpl_timestamp_micro();
-	cv3 skybox = (cv3) { 500.0f, 500.0f, 500.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 1000.0f, 1000.0f, 1000.0f };// sample_hdr(rayD, backgroundSampler);
 	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
 
 	context->depth--;
@@ -1435,18 +1477,22 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	};
 }
 
-static cv3 shader_directional(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
+static shader_outputs_t shader_directional(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	(void)materialData;
 	(void)materialIndex;
 	(void)context;
 	(void)scene;
 
-	return cv3_mulf((cv3) { 1.0f, 1.0f, 1.0f }, fmaxf(cv3_dot(inputs.normal, (cv3) { 0.0f, 0.707f, 0.707f }), 0.2f));
+	return (shader_outputs_t)
+	{
+		.light = cv3_mulf((cv3) { 1.0f, 1.0f, 1.0f }, fmaxf(cv3_dot(inputs.normal, (cv3) { 0.0f, 0.707f, 0.707f }), 0.2f)),
+		.shadedSurface = inputs.surface,
+	};
 }
 
 // Do we want to handle this some other way?
-static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
+static shader_outputs_t shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	cranpr_begin("shader", "lambert");
 	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
@@ -1485,14 +1531,32 @@ static cv3 shader_lambert(const void* cran_restrict materialData, uint32_t mater
 	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
 
 	cranpr_end("shader", "lambert");
-	return cv3_mul(light, cv3_mulf(albedo, cran_rpi));
+	return (shader_outputs_t)
+	{
+		.light = cv3_mul(light, cv3_mulf(albedo, cran_rpi)),
+		.shadedSurface = inputs.surface,
+	};
 }
 
-static cv3 shader_microfacet(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
+static shader_outputs_t shader_microfacet(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	cranpr_begin("shader", "microfacet");
 	material_microfacet_t microfacetData = ((const material_microfacet_t* cran_restrict)materialData)[materialIndex];
 	// TODO: Consider iteration instead of recursion
+
+	if (microfacetData.maskSampler.texture.id != 0)
+	{
+		float mask = sampler_sample(microfacetData.maskSampler, inputs.uv).x;
+		if (mask == 0.0f)
+		{
+			ray_hit_t result = cast_scene(context, scene, inputs.surface, inputs.viewDir, inputs.triangleId);
+			return (shader_outputs_t)
+			{
+				.light = result.light,
+				.shadedSurface = result.surface,
+			};
+		}
+	}
 
 	cv3 viewDir = cv3_inverse(cv3_normalize(inputs.viewDir));
 
@@ -1505,7 +1569,7 @@ static cv3 shader_microfacet(const void* cran_restrict materialData, uint32_t ma
 	float gloss = microfacetData.gloss;
 	if (microfacetData.glossSampler.texture.id != 0)
 	{
-		gloss = sampler_sample(microfacetData.glossSampler, cv2_mulf(inputs.uv, 2.0f)).x;
+		gloss = sampler_sample(microfacetData.glossSampler, inputs.uv).x;
 	}
 	float roughness = fmaxf(1.0f - gloss, 0.01f);
 
@@ -1563,17 +1627,21 @@ static cv3 shader_microfacet(const void* cran_restrict materialData, uint32_t ma
 		
 		ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 		light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
-		light = cv3_mul(light, microfacetData.specularTint);
+		light = cv3_mul(light, microfacetData.specularTint); // TODO: absolutely no physics here but makes the render look nicer.
 
 		pdf = D*chn*cf_rcp(4.0f*cv3_dot(castDir,h))*F;
 	}
 	light = cv3_mulf(light, cf_rcp(pdf));
 
 	cranpr_end("shader", "microfacet");
-	return light;
+	return (shader_outputs_t)
+	{
+		.light = light,
+		.shadedSurface = inputs.surface,
+	};
 }
 
-static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
+static shader_outputs_t shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	cranpr_begin("shader", "mirror");
 	material_mirror_t mirrorData = ((const material_mirror_t* cran_restrict)materialData)[materialIndex];
@@ -1590,7 +1658,11 @@ static cv3 shader_mirror(const void* cran_restrict materialData, uint32_t materi
 	cv3 sceneCast = cv3_mulf(result.light, lambertCosine * normalization);
 
 	cranpr_end("shader", "mirror");
-	return cv3_mul(sceneCast, mirrorData.color);
+	return (shader_outputs_t)
+	{
+		.light = cv3_mul(sceneCast, mirrorData.color),
+		.shadedSurface = inputs.surface,
+	};
 }
 
 typedef struct
@@ -1779,9 +1851,9 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ -8.0f, 0.0f, 2.0f };
-	mainRenderData.forward = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f };
-	mainRenderData.right = (cv3){ .x = 0.0f,.y = -1.0f,.z = 0.0f };
+	mainRenderData.origin = (cv3){ 4.0f, 0.0f, 1.0f };
+	mainRenderData.forward = (cv3){ .x = -1.0f,.y = 0.0f,.z = 0.0f };
+	mainRenderData.right = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
 
 	float* cran_restrict hdrImage = crana_stack_alloc(&mainRenderContext.stack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride * sizeof(float));
