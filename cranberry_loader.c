@@ -53,6 +53,7 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 	uint32_t faceCount = 0;
 	uint32_t materialCount = 0;
 	uint32_t materialLibCount = 0;
+	uint32_t groupCount = 1;
 
 	char const* delim = " \n\t\r";
 	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
@@ -68,6 +69,10 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 		else if (memcmp(fileIter, "v ", 2) == 0)
 		{
 			vertexCount++;
+		}
+		else if (memcmp(fileIter, "g ", 2) == 0)
+		{
+			groupCount++;
 		}
 		else if (memcmp(fileIter, "f ", 2) == 0)
 		{
@@ -113,6 +118,8 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 	uint32_t* cran_restrict materialBoundaries = (uint32_t* cran_restrict)allocator.alloc(allocator.instance, sizeof(uint32_t) * materialCount);
 	char** cran_restrict materialNames = (char** cran_restrict)allocator.alloc(allocator.instance, sizeof(char*) * materialCount);
 	char** cran_restrict materialLibNames = (char** cran_restrict)allocator.alloc(allocator.instance, sizeof(char*) * materialLibCount);
+	uint32_t* cran_restrict groupOffsets = (uint32_t* cran_restrict)allocator.alloc(allocator.instance, sizeof(uint32_t) * groupCount);
+	groupOffsets[0] = 0; // Initial group is default
 
 	uint32_t vertexIndex = 0;
 	uint32_t normalIndex = 0;
@@ -120,6 +127,7 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 	uint32_t faceIndex = 0;
 	uint32_t materialIndex = 0;
 	uint32_t materialLibIndex = 0;
+	uint32_t groupIndex = 1;
 
 	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
 	{
@@ -167,6 +175,11 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 				vertices[startingIndex + 1] = vertices[startingIndex + 2];
 				vertices[startingIndex + 2] = temp;
 			}
+		}
+		else if (memcmp(fileIter, "g ", 2) == 0)
+		{
+			fileIter = advance_to(fileIter, fileEnd, "\n");
+			groupOffsets[groupIndex++] = faceIndex / 3;
 		}
 		else if (memcmp(fileIter, "f ", 2) == 0)
 		{
@@ -272,6 +285,7 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 	assert(faceCount == faceIndex / 3);
 	assert(materialIndex == materialCount);
 	assert(materialLibIndex == materialLibCount);
+	assert(groupIndex == groupCount);
 	return (cranl_mesh_t)
 	{
 		.vertices = 
@@ -295,6 +309,11 @@ cranl_mesh_t cranl_obj_load(char const* cran_restrict filepath, uint32_t flags, 
 			.normalIndices = normalIndices,
 			.uvIndices = uvIndices,
 			.count = faceCount
+		},
+		.groups =
+		{
+			.groupOffsets = groupOffsets,
+			.count = groupCount
 		},
 		.materials =
 		{

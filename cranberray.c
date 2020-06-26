@@ -470,25 +470,22 @@ typedef struct
 	uint32_t nextTexture;
 } texture_store_t;
 
-// TODO: Do we want this to be global?
-texture_store_t textureStore;
-
-texture_id_t texture_request(char const* cran_restrict path)
+texture_id_t texture_request(texture_store_t* store, char const* cran_restrict path)
 {
-	cran_assert(textureStore.nextTexture != max_texture_count);
+	cran_assert(store->nextTexture != max_texture_count);
 
 	uint32_t textureHash = hash(path);
 
-	for (uint32_t i = 0; i < textureStore.nextTexture; i++)
+	for (uint32_t i = 0; i < store->nextTexture; i++)
 	{
-		if (textureStore.hashes[i] == textureHash)
+		if (store->hashes[i] == textureHash)
 		{
 			return (texture_id_t) { i + 1 };
 		}
 	}
 
-	textureStore.hashes[textureStore.nextTexture] = textureHash;
-	texture_t* texture = &textureStore.textures[textureStore.nextTexture];
+	store->hashes[store->nextTexture] = textureHash;
+	texture_t* texture = &store->textures[store->nextTexture];
 
 	int stride;
 	texture->data = stbi_load(path, &texture->width, &texture->height, &stride, 0);
@@ -502,7 +499,7 @@ texture_id_t texture_request(char const* cran_restrict path)
 	};
 	texture->format = formats[stride];
 
-	return (texture_id_t) { ++textureStore.nextTexture };
+	return (texture_id_t) { ++store->nextTexture };
 }
 
 sampler_t sampler_create(texture_id_t texture)
@@ -510,7 +507,7 @@ sampler_t sampler_create(texture_id_t texture)
 	return (sampler_t) { texture };
 }
 
-cv4 sampler_sample(sampler_t sampler, cv2 uv)
+cv4 sampler_sample(texture_store_t const* store, sampler_t sampler, cv2 uv)
 {
 	if (sampler.texture.id == 0)
 	{
@@ -518,10 +515,10 @@ cv4 sampler_sample(sampler_t sampler, cv2 uv)
 		return (cv4) { 1.0f, 1.0f, 1.0f, 1.0f };
 	}
 
-	cran_assert(sampler.texture.id <= textureStore.nextTexture);
+	cran_assert(sampler.texture.id <= store->nextTexture);
 
 	// TODO: Support different texture formats
-	texture_t* texture = &textureStore.textures[sampler.texture.id - 1];
+	texture_t const* texture = &store->textures[sampler.texture.id - 1];
 	switch (texture->format)
 	{
 	case texture_r_u8:
@@ -538,7 +535,7 @@ cv4 sampler_sample(sampler_t sampler, cv2 uv)
 	}
 }
 
-cv2 sampler_bump(sampler_t sampler, cv2 uv)
+cv2 sampler_bump(texture_store_t const* store, sampler_t sampler, cv2 uv)
 {
 	if (sampler.texture.id == 0)
 	{
@@ -546,7 +543,7 @@ cv2 sampler_bump(sampler_t sampler, cv2 uv)
 		return (cv2) { 0.0f,0.0f };
 	}
 
-	texture_t* texture = &textureStore.textures[sampler.texture.id - 1];
+	texture_t const* texture = &store->textures[sampler.texture.id - 1];
 
 	float s00;
 	float s01;
@@ -717,16 +714,26 @@ typedef struct
 
 typedef struct
 {
-	cranl_mesh_t data;
-	bvh_t bvh;
-	material_index_t* materialIndices;
-} mesh_t;
-
-typedef struct
-{
 	cv3 pos;
 	uint32_t renderableIndex;
 } instance_t;
+
+typedef struct
+{
+	cranl_mesh_t data;
+	material_index_t* materialIndices;
+} mesh_source_t;
+
+typedef struct
+{
+	mesh_source_t* sources;
+} mesh_store_t;
+
+typedef struct
+{
+	uint32_t meshSourceIndex;
+	bvh_t bvh;
+} mesh_t;
 
 typedef struct
 {
@@ -739,7 +746,10 @@ typedef struct
 		uint32_t count;
 	} instances;
 
-	bvh_t bvh; // TODO: BVH!
+	bvh_t bvh;
+
+	mesh_store_t meshStore;
+	texture_store_t textureStore;
 } ray_scene_t;
 
 typedef struct
@@ -990,6 +1000,12 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 {
 	cranpr_begin("bvh", "traverse");
 
+	if (bvh->count == 0)
+	{
+		*candidates = crana_stack_alloc(&context->stack, 1);
+		return 0;
+	}
+
 	*candidates = crana_stack_lock(&context->stack); // Allocate nothing, but we're going to be growing it
 	uint32_t* candidateIter = *candidates;
 
@@ -1070,14 +1086,13 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	cranpr_begin("scene", "generate");
 	uint64_t startTime = cranpl_timestamp_micro();
 
-	static instance_t instances[1];
-	static mesh_t mesh;
-
+	static mesh_source_t meshSource;
 	// Mesh
+	mesh_t* meshes;
 	{
 		// TODO: We likely don't want a stack allocator here
 		// clean up would be too tedious, think of a way to encapsulate meshes
-		mesh.data = cranl_obj_load("sponza.obj", cranl_flip_yz | cranl_cm_to_m,
+		meshSource.data = cranl_obj_load("sponza.obj", cranl_flip_yz | cranl_cm_to_m,
 			(cranl_allocator_t)
 			{
 				.instance = &context->stack,
@@ -1085,57 +1100,70 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 				.free = &crana_stack_free
 			});
 
-		uint32_t meshLeafCount = mesh.data.faces.count;
-		index_aabb_pair_t* leafs = crana_stack_alloc(&context->scratchStack, sizeof(index_aabb_pair_t) * meshLeafCount);
-
-		for (uint32_t i = 0; i < meshLeafCount; i++)
+		meshes = crana_stack_alloc(&context->stack, sizeof(mesh_t) * meshSource.data.groups.count);
+		for (uint32_t groupIndex = 0; groupIndex < meshSource.data.groups.count; groupIndex++)
 		{
-			leafs[i].index = i;
+			meshes[groupIndex].meshSourceIndex = 0;
 
-			uint32_t vertIndexA = mesh.data.faces.vertexIndices[i * 3 + 0];
-			uint32_t vertIndexB = mesh.data.faces.vertexIndices[i * 3 + 1];
-			uint32_t vertIndexC = mesh.data.faces.vertexIndices[i * 3 + 2];
-
-			cv3 vertA, vertB, vertC;
-			memcpy(&vertA, mesh.data.vertices.data + vertIndexA * 3, sizeof(cv3));
-			memcpy(&vertB, mesh.data.vertices.data + vertIndexB * 3, sizeof(cv3));
-			memcpy(&vertC, mesh.data.vertices.data + vertIndexC * 3, sizeof(cv3));
-
-			leafs[i].bound.min = cv3_min(cv3_min(vertA, vertB), vertC);
-			leafs[i].bound.max = cv3_max(cv3_max(vertA, vertB), vertC);
-
-			// If our bounds have no volume, add a surrounding shell
-			if (fabsf(leafs[i].bound.max.x - leafs[i].bound.min.x) < FLT_EPSILON)
+			uint32_t faceStart = meshSource.data.groups.groupOffsets[groupIndex];
+			uint32_t faceEnd = (groupIndex + 1) < meshSource.data.groups.count ? meshSource.data.groups.groupOffsets[groupIndex + 1] : meshSource.data.faces.count;
+			if (faceEnd - faceStart == 0)
 			{
-				leafs[i].bound.max.x += 0.001f;
-				leafs[i].bound.min.x -= 0.001f;
+				meshes[groupIndex] = (mesh_t) { 0 };
+				continue;
 			}
 
-			if (fabsf(leafs[i].bound.max.y - leafs[i].bound.min.y) < FLT_EPSILON)
+			index_aabb_pair_t* leafs = crana_stack_alloc(&context->scratchStack, sizeof(index_aabb_pair_t) * (faceEnd - faceStart));
+			for (uint32_t i = faceStart, leafIndex = 0; i < faceEnd; i++, leafIndex++)
 			{
-				leafs[i].bound.max.y += 0.001f;
-				leafs[i].bound.min.y -= 0.001f;
+				leafs[leafIndex].index = i;
+
+				uint32_t vertIndexA = meshSource.data.faces.vertexIndices[i * 3 + 0];
+				uint32_t vertIndexB = meshSource.data.faces.vertexIndices[i * 3 + 1];
+				uint32_t vertIndexC = meshSource.data.faces.vertexIndices[i * 3 + 2];
+
+				cv3 vertA, vertB, vertC;
+				memcpy(&vertA, meshSource.data.vertices.data + vertIndexA * 3, sizeof(cv3));
+				memcpy(&vertB, meshSource.data.vertices.data + vertIndexB * 3, sizeof(cv3));
+				memcpy(&vertC, meshSource.data.vertices.data + vertIndexC * 3, sizeof(cv3));
+
+				leafs[leafIndex].bound.min = cv3_min(cv3_min(vertA, vertB), vertC);
+				leafs[leafIndex].bound.max = cv3_max(cv3_max(vertA, vertB), vertC);
+
+				// If our bounds have no volume, add a surrounding shell
+				if (fabsf(leafs[leafIndex].bound.max.x - leafs[leafIndex].bound.min.x) < FLT_EPSILON)
+				{
+					leafs[leafIndex].bound.max.x += 0.001f;
+					leafs[leafIndex].bound.min.x -= 0.001f;
+				}
+
+				if (fabsf(leafs[leafIndex].bound.max.y - leafs[leafIndex].bound.min.y) < FLT_EPSILON)
+				{
+					leafs[leafIndex].bound.max.y += 0.001f;
+					leafs[leafIndex].bound.min.y -= 0.001f;
+				}
+
+				if (fabsf(leafs[leafIndex].bound.max.z - leafs[leafIndex].bound.min.z) < FLT_EPSILON)
+				{
+					leafs[leafIndex].bound.max.z += 0.001f;
+					leafs[leafIndex].bound.min.z -= 0.001f;
+				}
 			}
 
-			if (fabsf(leafs[i].bound.max.z - leafs[i].bound.min.z) < FLT_EPSILON)
-			{
-				leafs[i].bound.max.z += 0.001f;
-				leafs[i].bound.min.z -= 0.001f;
-			}
+			meshes[groupIndex].bvh = build_bvh(context, leafs, faceEnd-faceStart);
+			crana_stack_free(&context->scratchStack, leafs);
 		}
-
-		mesh.bvh = build_bvh(context, leafs, meshLeafCount);
-		crana_stack_free(&context->scratchStack, leafs);
 	}
 
+	texture_store_t textureStore = { 0 };
 	// materials
 	material_microfacet_t* microfacets;
 	static material_mirror_t mirror;
 	{
 		mirror = (material_mirror_t){ .color = (cv3) {1.0f, 1.0f, 1.0f} };
 
-		cran_assert(mesh.data.materialLibraries.count == 1); // Assume only one material library for now
-		cranl_material_lib_t matLib = cranl_obj_mat_load(mesh.data.materialLibraries.names[0], (cranl_allocator_t)
+		cran_assert(meshSource.data.materialLibraries.count == 1); // Assume only one material library for now
+		cranl_material_lib_t matLib = cranl_obj_mat_load(meshSource.data.materialLibraries.names[0], (cranl_allocator_t)
 			{
 				.instance = &context->stack,
 				.alloc = &crana_stack_alloc,
@@ -1152,36 +1180,36 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			microfacets[i].gloss = 0.0f;
 			if (matLib.materials[i].albedoMap != NULL)
 			{
-				texture_id_t texture = texture_request(matLib.materials[i].albedoMap);
+				texture_id_t texture = texture_request(&textureStore, matLib.materials[i].albedoMap);
 				microfacets[i].albedoSampler = sampler_create(texture);
 			}
 
 			if (matLib.materials[i].bumpMap != NULL)
 			{
-				texture_id_t texture = texture_request(matLib.materials[i].bumpMap);
+				texture_id_t texture = texture_request(&textureStore, matLib.materials[i].bumpMap);
 				microfacets[i].bumpSampler = sampler_create(texture);
 			}
 
 			if (matLib.materials[i].glossMap != NULL)
 			{
-				texture_id_t texture = texture_request(matLib.materials[i].glossMap);
+				texture_id_t texture = texture_request(&textureStore, matLib.materials[i].glossMap);
 				microfacets[i].glossSampler = sampler_create(texture);
 			}
 
 			if (matLib.materials[i].maskMap != NULL)
 			{
-				texture_id_t texture = texture_request(matLib.materials[i].maskMap);
+				texture_id_t texture = texture_request(&textureStore, matLib.materials[i].maskMap);
 				microfacets[i].maskSampler = sampler_create(texture);
 			}
 		}
 
-		material_index_t* materialIndices = crana_stack_alloc(&context->stack, sizeof(material_index_t) * mesh.data.materials.count);
-		for (uint32_t i = 0; i < mesh.data.materials.count; i++)
+		material_index_t* materialIndices = crana_stack_alloc(&context->stack, sizeof(material_index_t) * meshSource.data.materials.count);
+		for (uint32_t i = 0; i < meshSource.data.materials.count; i++)
 		{
 			uint16_t dataIndex = 0;
 			for (; dataIndex < matLib.count; dataIndex++)
 			{
-				if (strcmp(matLib.materials[dataIndex].name, mesh.data.materials.materialNames[i]) == 0)
+				if (strcmp(matLib.materials[dataIndex].name, meshSource.data.materials.materialNames[i]) == 0)
 				{
 					break;
 				}
@@ -1190,15 +1218,16 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			materialIndices[i] = (material_index_t) { .dataIndex = dataIndex, .typeIndex = material_microfacet };
 		}
 
-		mesh.materialIndices = materialIndices;
+		meshSource.materialIndices = materialIndices;
 	}
 
-	for (uint32_t i = 0; i < 1; i++)
+	instance_t* instances = crana_stack_alloc(&context->stack, sizeof(instance_t)*meshSource.data.groups.count);
+	for (uint32_t i = 0; i < meshSource.data.groups.count; i++)
 	{
 		instances[i] = (instance_t)
 		{
 			.pos = { 0.0f, 0.0f, 0.0f },
-			.renderableIndex = 0
+			.renderableIndex = i
 		};
 	}
 
@@ -1208,14 +1237,19 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		.instances =
 		{
 			.data = instances,
-			.count = 1
+			.count = meshSource.data.groups.count
 		},
-		.renderables = &mesh,
+		.renderables = meshes,
 		.materials =
 		{
 			[material_microfacet] = microfacets,
 			[material_mirror] = &mirror
-		}
+		},
+		.meshStore =
+		{
+			.sources = &meshSource,
+		},
+		.textureStore = textureStore
 	};
 
 	// BVH
@@ -1229,15 +1263,11 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 			leafs[i].index = i;
 
-			mesh_t* meshData = &scene->renderables[renderableIndex];
-			for (uint32_t vert = 0; vert < meshData->data.vertices.count; vert++)
+			mesh_t* mesh = &scene->renderables[renderableIndex];
+			for (uint32_t boundIndex = 0; boundIndex < mesh->bvh.count; boundIndex++)
 			{
-				// TODO: type pun here
-				cv3 vertex;
-				memcpy(&vertex, meshData->data.vertices.data + vert * 3, sizeof(cv3));
-
-				leafs[i].bound.min = cv3_min(leafs[i].bound.min, cv3_add(vertex, pos));
-				leafs[i].bound.max = cv3_max(leafs[i].bound.max, cv3_add(vertex, pos));
+				leafs[i].bound.min = cv3_min(leafs[i].bound.min, cv3_add(pos, mesh->bvh.bounds[boundIndex].min));
+				leafs[i].bound.max = cv3_max(leafs[i].bound.max, cv3_add(pos, mesh->bvh.bounds[boundIndex].max));
 			}
 		}
 
@@ -1305,6 +1335,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			float intersectionDistance = 0.0f;
 
 			mesh_t* mesh = &scene->renderables[renderableIndex];
+			mesh_source_t* sourceMesh = &scene->meshStore.sources[mesh->meshSourceIndex];
 			{
 				uint32_t* meshCandidates;
 				uint32_t meshCandidateCount = traverse_bvh(context, &mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, &meshCandidates);
@@ -1321,14 +1352,14 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 						continue;
 					}
 
-					uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
-					uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
-					uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
+					uint32_t vertIndexA = sourceMesh->data.faces.vertexIndices[faceIndex * 3 + 0];
+					uint32_t vertIndexB = sourceMesh->data.faces.vertexIndices[faceIndex * 3 + 1];
+					uint32_t vertIndexC = sourceMesh->data.faces.vertexIndices[faceIndex * 3 + 2];
 
 					cv3 vertA, vertB, vertC;
-					memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(cv3));
-					memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(cv3));
-					memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(cv3));
+					memcpy(&vertA, sourceMesh->data.vertices.data + vertIndexA * 3, sizeof(cv3));
+					memcpy(&vertB, sourceMesh->data.vertices.data + vertIndexB * 3, sizeof(cv3));
+					memcpy(&vertC, sourceMesh->data.vertices.data + vertIndexC * 3, sizeof(cv3));
 
 					float u, v, w;
 					intersectionDistance = triangle_ray_intersection(rayInstanceO, rayD, 0.0f, NoRayIntersection, vertA, vertB, vertC, &u, &v, &w);
@@ -1352,11 +1383,13 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			uint32_t renderableIndex = scene->instances.data[candidateIndex].renderableIndex;
 			mesh_t* mesh = &scene->renderables[renderableIndex];
 
+			mesh_source_t* sourceMesh = &scene->meshStore.sources[mesh->meshSourceIndex];
+
 			uint32_t materialIndex = 0;
-			material_index_t* materialIndices = mesh->materialIndices;
-			for (; materialIndex < mesh->data.materials.count; materialIndex++)
+			material_index_t* materialIndices = sourceMesh->materialIndices;
+			for (; materialIndex < sourceMesh->data.materials.count; materialIndex++)
 			{
-				if (faceIndex < mesh->data.materials.materialBoundaries[materialIndex])
+				if (faceIndex < sourceMesh->data.materials.materialBoundaries[materialIndex])
 				{
 					break;
 				}
@@ -1367,34 +1400,34 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			float v = closestHitInfo.barycentric.y;
 			float w = closestHitInfo.barycentric.z;
 
-			uint32_t normalIndexA = mesh->data.faces.normalIndices[faceIndex * 3 + 0];
-			uint32_t normalIndexB = mesh->data.faces.normalIndices[faceIndex * 3 + 1];
-			uint32_t normalIndexC = mesh->data.faces.normalIndices[faceIndex * 3 + 2];
+			uint32_t normalIndexA = sourceMesh->data.faces.normalIndices[faceIndex * 3 + 0];
+			uint32_t normalIndexB = sourceMesh->data.faces.normalIndices[faceIndex * 3 + 1];
+			uint32_t normalIndexC = sourceMesh->data.faces.normalIndices[faceIndex * 3 + 2];
 			cv3 normalA, normalB, normalC;
-			memcpy(&normalA, mesh->data.normals.data + normalIndexA * 3, sizeof(cv3));
-			memcpy(&normalB, mesh->data.normals.data + normalIndexB * 3, sizeof(cv3));
-			memcpy(&normalC, mesh->data.normals.data + normalIndexC * 3, sizeof(cv3));
+			memcpy(&normalA, sourceMesh->data.normals.data + normalIndexA * 3, sizeof(cv3));
+			memcpy(&normalB, sourceMesh->data.normals.data + normalIndexB * 3, sizeof(cv3));
+			memcpy(&normalC, sourceMesh->data.normals.data + normalIndexC * 3, sizeof(cv3));
 
 			closestHitInfo.normal = cv3_add(cv3_add(cv3_mulf(normalA, u), cv3_mulf(normalB, v)), cv3_mulf(normalC, w));
 
-			uint32_t uvIndexA = mesh->data.faces.uvIndices[faceIndex * 3 + 0];
-			uint32_t uvIndexB = mesh->data.faces.uvIndices[faceIndex * 3 + 1];
-			uint32_t uvIndexC = mesh->data.faces.uvIndices[faceIndex * 3 + 2];
+			uint32_t uvIndexA = sourceMesh->data.faces.uvIndices[faceIndex * 3 + 0];
+			uint32_t uvIndexB = sourceMesh->data.faces.uvIndices[faceIndex * 3 + 1];
+			uint32_t uvIndexC = sourceMesh->data.faces.uvIndices[faceIndex * 3 + 2];
 			cv2 uvA, uvB, uvC;
-			memcpy(&uvA, mesh->data.uvs.data + uvIndexA * 2, sizeof(cv2));
-			memcpy(&uvB, mesh->data.uvs.data + uvIndexB * 2, sizeof(cv2));
-			memcpy(&uvC, mesh->data.uvs.data + uvIndexC * 2, sizeof(cv2));
+			memcpy(&uvA, sourceMesh->data.uvs.data + uvIndexA * 2, sizeof(cv2));
+			memcpy(&uvB, sourceMesh->data.uvs.data + uvIndexB * 2, sizeof(cv2));
+			memcpy(&uvC, sourceMesh->data.uvs.data + uvIndexC * 2, sizeof(cv2));
 
 			closestHitInfo.uv = cv2_add(cv2_add(cv2_mulf(uvA, u), cv2_mulf(uvB, v)), cv2_mulf(uvC, w));
 
-			uint32_t vertIndexA = mesh->data.faces.vertexIndices[faceIndex * 3 + 0];
-			uint32_t vertIndexB = mesh->data.faces.vertexIndices[faceIndex * 3 + 1];
-			uint32_t vertIndexC = mesh->data.faces.vertexIndices[faceIndex * 3 + 2];
+			uint32_t vertIndexA = sourceMesh->data.faces.vertexIndices[faceIndex * 3 + 0];
+			uint32_t vertIndexB = sourceMesh->data.faces.vertexIndices[faceIndex * 3 + 1];
+			uint32_t vertIndexC = sourceMesh->data.faces.vertexIndices[faceIndex * 3 + 2];
 
 			cv3 vertA, vertB, vertC;
-			memcpy(&vertA, mesh->data.vertices.data + vertIndexA * 3, sizeof(cv3));
-			memcpy(&vertB, mesh->data.vertices.data + vertIndexB * 3, sizeof(cv3));
-			memcpy(&vertC, mesh->data.vertices.data + vertIndexC * 3, sizeof(cv3));
+			memcpy(&vertA, sourceMesh->data.vertices.data + vertIndexA * 3, sizeof(cv3));
+			memcpy(&vertB, sourceMesh->data.vertices.data + vertIndexB * 3, sizeof(cv3));
+			memcpy(&vertC, sourceMesh->data.vertices.data + vertIndexC * 3, sizeof(cv3));
 
 			float du0 = uvB.x - uvA.x;
 			float dv0 = uvB.y - uvA.y;
@@ -1499,7 +1532,7 @@ static shader_outputs_t shader_lambert(const void* cran_restrict materialData, u
 	// TODO: Consider iteration instead of recursion
 
 	cv3 normal = cv3_normalize(inputs.normal);
-	cv2 partialDerivative = sampler_bump(lambertData.bumpSampler, inputs.uv);
+	cv2 partialDerivative = sampler_bump(&scene->textureStore, lambertData.bumpSampler, inputs.uv);
 	normal = cv3_cross(cv3_add(inputs.tangent, cv3_mulf(normal, partialDerivative.x)), cv3_add(inputs.bitangent, cv3_mulf(normal, partialDerivative.y)));
 	normal = cv3_normalize(normal);
 	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
@@ -1525,7 +1558,7 @@ static shader_outputs_t shader_lambert(const void* cran_restrict materialData, u
 	}
 
 	cv3 albedoTint = lambertData.albedoTint;
-	cv4 samplerAlbedo = sampler_sample(lambertData.albedoSampler, inputs.uv);
+	cv4 samplerAlbedo = sampler_sample(&scene->textureStore, lambertData.albedoSampler, inputs.uv);
 
 	cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
 	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
@@ -1546,7 +1579,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 
 	if (microfacetData.maskSampler.texture.id != 0)
 	{
-		float mask = sampler_sample(microfacetData.maskSampler, inputs.uv).x;
+		float mask = sampler_sample(&scene->textureStore, microfacetData.maskSampler, inputs.uv).x;
 		if (mask == 0.0f)
 		{
 			ray_hit_t result = cast_scene(context, scene, inputs.surface, inputs.viewDir, inputs.triangleId);
@@ -1561,7 +1594,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	cv3 viewDir = cv3_inverse(cv3_normalize(inputs.viewDir));
 
 	cv3 normal = cv3_normalize(inputs.normal);
-	cv2 partialDerivative = sampler_bump(microfacetData.bumpSampler, inputs.uv);
+	cv2 partialDerivative = sampler_bump(&scene->textureStore, microfacetData.bumpSampler, inputs.uv);
 	normal = cv3_cross(cv3_add(inputs.tangent, cv3_mulf(normal, partialDerivative.x)), cv3_add(inputs.bitangent, cv3_mulf(normal, partialDerivative.y)));
 	normal = cv3_normalize(normal);
 	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
@@ -1569,7 +1602,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	float gloss = microfacetData.gloss;
 	if (microfacetData.glossSampler.texture.id != 0)
 	{
-		gloss = sampler_sample(microfacetData.glossSampler, inputs.uv).x;
+		gloss = sampler_sample(&scene->textureStore, microfacetData.glossSampler, inputs.uv).x;
 	}
 	float roughness = fmaxf(1.0f - gloss, 0.01f);
 
@@ -1596,7 +1629,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
 
 		cv3 albedoTint = microfacetData.albedoTint;
-		cv4 samplerAlbedo = sampler_sample(microfacetData.albedoSampler, inputs.uv);
+		cv4 samplerAlbedo = sampler_sample(&scene->textureStore, microfacetData.albedoSampler, inputs.uv);
 
 		cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
 		light = cv3_mul(light, cv3_mulf(albedo, cran_rpi));
@@ -1765,7 +1798,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 512,
+		.samplesPerPixel = 10,
 		.renderWidth = 448,
 		.renderHeight = 360,
 		.useDirectionalMat = false
@@ -2004,9 +2037,9 @@ int main()
 	free(mainRenderContext.stack.mem);
 	free(mainRenderContext.scratchStack.mem);
 
-	for (uint32_t i = 0; i < textureStore.nextTexture; i++)
+	for (uint32_t i = 0; i < mainRenderData.scene.textureStore.nextTexture; i++)
 	{
-		stbi_image_free(textureStore.textures[i].data);
+		stbi_image_free(mainRenderData.scene.textureStore.textures[i].data);
 	}
 	stbi_image_free(backgroundSampler.image);
 

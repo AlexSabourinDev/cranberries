@@ -38,6 +38,12 @@ typedef struct
 
 	struct
 	{
+		uint32_t* cran_restrict groupOffsets;
+		uint32_t count;
+	} groups;
+
+	struct
+	{
 		uint32_t* cran_restrict materialBoundaries;
 		char** cran_restrict materialNames;
 		uint32_t count;
