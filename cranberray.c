@@ -330,9 +330,8 @@ static cv3 box_random(random_seed_t* seed)
 	return cv3_mulf((cv3) { random01f(seed)-0.5f, random01f(seed)-0.5f, random01f(seed)-0.5f }, 2.0f);
 }
 
-static cv4 sample_rgb_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
+static cv4 sample_rgb_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	// TODO: Bilerp
 	uv.y = cf_frac(uv.y);
 	uv.x = cf_frac(uv.x);
 
@@ -357,9 +356,8 @@ static cv4 sample_rgb_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height
 	return color;
 }
 
-static cv4 sample_rg_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
+static cv4 sample_rg_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	// TODO: Bilerp
 	uv.y = cf_frac(uv.y);
 	uv.x = cf_frac(uv.x);
 
@@ -384,9 +382,8 @@ static cv4 sample_rg_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height,
 	return color;
 }
 
-static cv4 sample_r_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
+static cv4 sample_r_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	// TODO: Bilerp
 	uv.y = cf_frac(uv.y);
 	uv.x = cf_frac(uv.x);
 
@@ -405,9 +402,8 @@ static cv4 sample_r_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, 
 	return (cv4) { (float)image[readIndex] / 255.0f, 0.0f, 0.0f, 0.0f };
 }
 
-static cv4 sample_rgba_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
+static cv4 sample_rgba_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	// TODO: Bilerp
 	uv.y = cf_frac(uv.y);
 	uv.x = cf_frac(uv.x);
 
@@ -432,12 +428,65 @@ static cv4 sample_rgba_u8(cv2 uv, uint8_t* image, uint32_t width, uint32_t heigh
 	return color;
 }
 
+static cv4 sample_rgba_f32(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
+{
+	uv.y = cf_frac(uv.y);
+	uv.x = cf_frac(uv.x);
+
+	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
+	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
+
+	float readY = uv.y * (float)height;
+	float readX = uv.x * (float)width;
+
+	uint32_t y = (uint32_t)floorf(readY) + offsetY;
+	y = y >= height ? height - 1 : y;
+	uint32_t x = (uint32_t)floorf(readX) + offsetX;
+	x = x >= width ? width - 1 : x;
+	uint32_t readIndex = (y * width + x) * 4;
+
+	cv4 color;
+	color.x = ((float*)image)[readIndex + 0];
+	color.y = ((float*)image)[readIndex + 1];
+	color.z = ((float*)image)[readIndex + 2];
+	color.w = ((float*)image)[readIndex + 3];
+
+	return color;
+}
+
+static cv4 sample_rgb_f32(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
+{
+	uv.y = cf_frac(uv.y);
+	uv.x = cf_frac(uv.x);
+
+	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
+	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
+
+	float readY = uv.y * (float)height;
+	float readX = uv.x * (float)width;
+
+	uint32_t y = (uint32_t)floorf(readY) + offsetY;
+	y = y >= height ? height - 1 : y;
+	uint32_t x = (uint32_t)floorf(readX) + offsetX;
+	x = x >= width ? width - 1 : x;
+	uint32_t readIndex = (y * width + x) * 3;
+
+	cv4 color;
+	color.x = ((float*)image)[readIndex + 0];
+	color.y = ((float*)image)[readIndex + 1];
+	color.z = ((float*)image)[readIndex + 2];
+	color.w = 0.0f;
+
+	return color;
+}
+
 typedef enum
 {
 	texture_r_u8,
 	texture_rg_u8,
 	texture_rgb_u8,
 	texture_rgb_f32,
+	texture_rgba_f32,
 	texture_rgba_u8
 } texture_format_e;
 
@@ -447,9 +496,16 @@ typedef struct
 	uint32_t id;
 } texture_id_t;
 
+typedef enum
+{
+	sample_nearest,
+	sample_bilinear,
+	sample_bump,
+} sampling_type_e;
+
 typedef struct
 {
-	texture_id_t texture;
+	sampling_type_e type;
 } sampler_t;
 
 typedef struct
@@ -457,6 +513,7 @@ typedef struct
 	uint8_t* cran_restrict data;
 	int32_t width;
 	int32_t height;
+	int32_t stride;
 	texture_format_e format;
 } texture_t;
 
@@ -487,8 +544,7 @@ texture_id_t texture_request(texture_store_t* store, char const* cran_restrict p
 	store->hashes[store->nextTexture] = textureHash;
 	texture_t* texture = &store->textures[store->nextTexture];
 
-	int stride;
-	texture->data = stbi_load(path, &texture->width, &texture->height, &stride, 0);
+	texture->data = stbi_load(path, &texture->width, &texture->height, &texture->stride, 0);
 
 	texture_format_e formats[] =
 	{
@@ -497,86 +553,114 @@ texture_id_t texture_request(texture_store_t* store, char const* cran_restrict p
 		[3] = texture_rgb_u8,
 		[4] = texture_rgba_u8
 	};
-	texture->format = formats[stride];
+	texture->format = formats[texture->stride];
 
 	return (texture_id_t) { ++store->nextTexture };
 }
 
-sampler_t sampler_create(texture_id_t texture)
+texture_id_t texture_request_f32(texture_store_t* store, char const* cran_restrict path)
 {
-	return (sampler_t) { texture };
+	cran_assert(store->nextTexture != max_texture_count);
+
+	uint32_t textureHash = hash(path);
+
+	for (uint32_t i = 0; i < store->nextTexture; i++)
+	{
+		if (store->hashes[i] == textureHash)
+		{
+			return (texture_id_t) { i + 1 };
+		}
+	}
+
+	store->hashes[store->nextTexture] = textureHash;
+	texture_t* texture = &store->textures[store->nextTexture];
+
+	texture->data = (uint8_t* cran_restrict)stbi_loadf(path, &texture->width, &texture->height, &texture->stride, 0);
+
+	assert(texture->stride == 3);
+	texture_format_e formats[] =
+	{
+		[3] = texture_rgb_f32,
+		[4] = texture_rgba_f32
+	};
+	texture->format = formats[texture->stride];
+
+	return (texture_id_t) { ++store->nextTexture };
 }
 
-cv4 sampler_sample(texture_store_t const* store, sampler_t sampler, cv2 uv)
+typedef cv4(sampler_func_t)(cv2, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY);
+cv4 sampler_sample(texture_store_t const* store, sampler_t sampler, texture_id_t textureid, cv2 uv)
 {
-	if (sampler.texture.id == 0)
+	if (textureid.id == 0)
 	{
-		// No texture is fully white because it makes shaders easier to write.
-		return (cv4) { 1.0f, 1.0f, 1.0f, 1.0f };
+		if (sampler.type == sample_bump)
+		{
+			return (cv4) { 0 };
+		}
+		else
+		{
+			// No texture is fully white because it makes shaders easier to write.
+			return (cv4) { 1.0f, 1.0f, 1.0f, 1.0f };
+		}
 	}
 
-	cran_assert(sampler.texture.id <= store->nextTexture);
-
-	// TODO: Support different texture formats
-	texture_t const* texture = &store->textures[sampler.texture.id - 1];
-	switch (texture->format)
+	cran_assert(textureid.id <= store->nextTexture);
+	sampler_func_t* samplers[] =
 	{
-	case texture_r_u8:
-		return sample_r_u8(uv, texture->data, texture->width, texture->height, 0, 0);
-	case texture_rg_u8:
-		return sample_rg_u8(uv, texture->data, texture->width, texture->height, 0, 0);
-	case texture_rgb_u8:
-		return sample_rgb_u8(uv, texture->data, texture->width, texture->height, 0, 0);
-	case texture_rgba_u8:
-		return sample_rgba_u8(uv, texture->data, texture->width, texture->height, 0, 0);
-	default:
-		cran_assert(false);
-		return (cv4) { 0.0f };
+		[texture_r_u8] = &sample_r_u8,
+		[texture_rg_u8] = &sample_rg_u8,
+		[texture_rgb_u8] = &sample_rgb_u8,
+		[texture_rgba_u8] = &sample_rgba_u8,
+		[texture_rgb_f32] = &sample_rgb_f32,
+		[texture_rgba_f32] = &sample_rgba_f32
+	};
+
+	texture_t const* texture = &store->textures[textureid.id - 1];
+	if (sampler.type == sample_nearest)
+	{
+		return samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 0);
 	}
+	else if (sampler.type == sample_bilinear)
+	{
+		cv4 s00 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 0);
+		cv4 s01 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 1);
+		cv4 s10 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 1, 0);
+		cv4 s11 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 1, 1);
+
+		float wf = cf_frac((float)texture->width * uv.x);
+		float hf = cf_frac((float)texture->height * uv.y);
+
+		wf = wf < 0.0f ? 1.0f + wf : wf;
+		hf = hf < 0.0f ? 1.0f + hf : hf;
+		return (cv4)
+		{
+			cf_bilinear(s00.x, s01.x, s10.x, s11.x, wf, hf),
+			cf_bilinear(s00.y, s01.y, s10.y, s11.y, wf, hf),
+			cf_bilinear(s00.z, s01.z, s10.z, s11.z, wf, hf),
+			cf_bilinear(s00.w, s01.w, s10.w, s11.w, wf, hf)
+		};
+	}
+	else if (sampler.type == sample_bump)
+	{
+		float s00 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 0).x;
+		float s10 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 1, 0).x;
+		float s01 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 1).x;
+
+		return (cv4) { s10 - s00, s01 - s00, 0.0f, 0.0f };
+	}
+
+	return (cv4) { 0 };
 }
 
-cv2 sampler_bump(texture_store_t const* store, sampler_t sampler, cv2 uv)
+cv4 sampler_sample_3D(texture_store_t const* store, sampler_t sampler, texture_id_t texture, cv3 direction)
 {
-	if (sampler.texture.id == 0)
-	{
-		// No texture is no derivative
-		return (cv2) { 0.0f,0.0f };
-	}
-
-	texture_t const* texture = &store->textures[sampler.texture.id - 1];
-
-	float s00;
-	float s01;
-	float s10;
-	switch (texture->format)
-	{
-	case texture_rgb_u8:
-		s00 = sample_rgb_u8(uv, texture->data, texture->width, texture->height, 0, 0).x;
-		s10 = sample_rgb_u8(uv, texture->data, texture->width, texture->height, 1, 0).x;
-		s01 = sample_rgb_u8(uv, texture->data, texture->width, texture->height, 0, 1).x;
-		break;
-	case texture_rgba_u8:
-		s00 = sample_rgba_u8(uv, texture->data, texture->width, texture->height, 0, 0).x;
-		s10 = sample_rgba_u8(uv, texture->data, texture->width, texture->height, 1, 0).x;
-		s01 = sample_rgba_u8(uv, texture->data, texture->width, texture->height, 0, 1).x;
-		break;
-	case texture_r_u8:
-		s00 = sample_r_u8(uv, texture->data, texture->width, texture->height, 0, 0).x;
-		s10 = sample_r_u8(uv, texture->data, texture->width, texture->height, 1, 0).x;
-		s01 = sample_r_u8(uv, texture->data, texture->width, texture->height, 0, 1).x;
-		break;
-	default:
-		cran_assert(false);
-		return (cv2) { 0.0f };
-	}
-
-	return (cv2) { s10 - s00, s01 - s00 };
+	float azimuth, theta;
+	cv3_to_spherical(direction, &azimuth, &theta);
+	return sampler_sample(store, sampler, texture, (cv2) { azimuth * cran_rtao, theta * cran_rpi });
 }
 
 typedef struct
 {
-	float* cran_restrict image;
-
 	float* cran_restrict cdf2d;
 	float* cran_restrict luminance2d;
 
@@ -586,34 +670,15 @@ typedef struct
 
 	int32_t width;
 	int32_t height;
-	int32_t stride;
-} sampler_hdr_t;
+} sphere_importance_t;
 
-static cv3 sample_hdr(cv3 v, sampler_hdr_t sampler)
-{
-	float azimuth, theta;
-	cv3_to_spherical(v, &azimuth, &theta);
-
-	// TODO: lerp
-	int32_t readY = (int32_t)(fminf(theta * cran_rpi, 0.999f) * (float)sampler.height);
-	int32_t readX = (int32_t)(fminf(azimuth * cran_rtao, 0.999f) * (float)sampler.width);
-	int32_t readIndex = (readY * sampler.width + readX) * sampler.stride;
-
-	cv3 color;
-	color.x = sampler.image[readIndex + 0];
-	color.y = sampler.image[readIndex + 1];
-	color.z = sampler.image[readIndex + 2];
-
-	return color;
-}
-
-static cv3 importance_sample_hdr(sampler_hdr_t imageset, float* cran_restrict outBias, random_seed_t* seed)
+static cv3 importance_sample_hdr(sphere_importance_t importanceData, float* cran_restrict outBias, random_seed_t* seed)
 {
 	float ycdf = random01f(seed);
 	int y = 0;
-	for (; y < imageset.height; y++)
+	for (; y < importanceData.height; y++)
 	{
-		if (imageset.cdf1d[y] >= ycdf)
+		if (importanceData.cdf1d[y] >= ycdf)
 		{
 			break;
 		}
@@ -621,19 +686,19 @@ static cv3 importance_sample_hdr(sampler_hdr_t imageset, float* cran_restrict ou
 
 	float xcdf = random01f(seed);
 	int x = 0;
-	for (; x < imageset.width; x++)
+	for (; x < importanceData.width; x++)
 	{
-		if (imageset.cdf2d[y*imageset.width + x] >= xcdf)
+		if (importanceData.cdf2d[y*importanceData.width + x] >= xcdf)
 		{
 			break;
 		}
 	}
 
-	float biasy = imageset.sum1d[y] * cf_rcp(imageset.sumTotal);
-	float biasx = imageset.luminance2d[y * imageset.width + x] * cf_rcp(imageset.sum1d[y]);
+	float biasy = importanceData.sum1d[y] * cf_rcp(importanceData.sumTotal);
+	float biasx = importanceData.luminance2d[y * importanceData.width + x] * cf_rcp(importanceData.sum1d[y]);
 	float bias = biasy * biasx;
 
-	cv3 direction = cv3_from_spherical(((float)y / (float)imageset.height)*cran_pi, ((float)x / (float)imageset.width)*cran_tao, 1.0f);
+	cv3 direction = cv3_from_spherical(((float)y / (float)importanceData.height)*cran_pi, ((float)x / (float)importanceData.width)*cran_tao, 1.0f);
 
 	*outBias = bias;
 	return direction;
@@ -681,6 +746,8 @@ typedef struct
 	cv3 albedoTint;
 	sampler_t albedoSampler;
 	sampler_t bumpSampler;
+	texture_id_t albedoTexture;
+	texture_id_t bumpTexture;
 } material_lambert_t;
 
 typedef struct
@@ -691,6 +758,10 @@ typedef struct
 	sampler_t bumpSampler;
 	sampler_t glossSampler;
 	sampler_t maskSampler;
+	texture_id_t albedoTexture;
+	texture_id_t bumpTexture;
+	texture_id_t glossTexture;
+	texture_id_t maskTexture;
 	float refractiveIndex;
 	float gloss;
 } material_microfacet_t;
@@ -745,6 +816,13 @@ typedef struct
 		instance_t* data;
 		uint32_t count;
 	} instances;
+
+	struct
+	{
+		sampler_t sampler;
+		sphere_importance_t importance;
+		texture_id_t texture;
+	} environment;
 
 	bvh_t bvh;
 
@@ -1156,6 +1234,56 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	}
 
 	texture_store_t textureStore = { 0 };
+
+	// Environment map
+	sampler_t backgroundSampler = (sampler_t) {.type = sample_nearest};
+	texture_id_t backgroundTextureId;
+	sphere_importance_t backgroundImportance;
+	{
+		backgroundTextureId = texture_request_f32(&textureStore, "background_4k.hdr");
+		texture_t const* texture = &textureStore.textures[backgroundTextureId.id - 1];
+
+		backgroundImportance.cdf2d = (float*)crana_stack_alloc(&context->stack, sizeof(float) * texture->width * texture->height);
+		backgroundImportance.luminance2d = (float*)crana_stack_alloc(&context->stack, sizeof(float) * texture->width * texture->height);
+
+		backgroundImportance.cdf1d = (float*)crana_stack_alloc(&context->stack, sizeof(float) * texture->height);
+		backgroundImportance.sum1d = (float*)crana_stack_alloc(&context->stack, sizeof(float) * texture->height);
+
+		float ysum = 0.0f;
+		for (int y = 0; y < texture->height; y++)
+		{
+			float xsum = 0.0f;
+			for (int x = 0; x < texture->width; x++)
+			{
+				int index = (y * texture->width) + x;
+
+				float* cran_restrict pixel = &((float*)texture->data)[index * texture->stride];
+				float luminance = rgb_to_luminance(pixel[0], pixel[1], pixel[2]);
+
+				xsum += luminance;
+				backgroundImportance.luminance2d[index] = luminance;
+				backgroundImportance.cdf2d[index] = xsum;
+			}
+
+			for (int x = 0; x < texture->width; x++)
+			{
+				int index = (y * texture->width) + x;
+				backgroundImportance.cdf2d[index] = backgroundImportance.cdf2d[index] * cf_rcp(xsum);
+			}
+
+			ysum += xsum;
+			backgroundImportance.cdf1d[y] = ysum;
+			backgroundImportance.sum1d[y] = xsum;
+		}
+
+		for (int y = 0; y < texture->height; y++)
+		{
+			backgroundImportance.cdf1d[y] = backgroundImportance.cdf1d[y]  * cf_rcp(ysum);
+		}
+
+		backgroundImportance.sumTotal = ysum;
+	}
+
 	// materials
 	material_microfacet_t* microfacets;
 	static material_mirror_t mirror;
@@ -1178,28 +1306,30 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			microfacets[i].refractiveIndex = matLib.materials[i].refractiveIndex;
 			microfacets[i].specularTint = (cv3) { matLib.materials[i].specular[0], matLib.materials[i].specular[1], matLib.materials[i].specular[2] };
 			microfacets[i].gloss = 0.0f;
+
+			microfacets[i].albedoSampler = (sampler_t) {.type = sample_bilinear };
 			if (matLib.materials[i].albedoMap != NULL)
 			{
-				texture_id_t texture = texture_request(&textureStore, matLib.materials[i].albedoMap);
-				microfacets[i].albedoSampler = sampler_create(texture);
+				microfacets[i].albedoTexture = texture_request(&textureStore, matLib.materials[i].albedoMap);
 			}
 
+			microfacets[i].bumpSampler = (sampler_t) {.type = sample_bump };
 			if (matLib.materials[i].bumpMap != NULL)
 			{
-				texture_id_t texture = texture_request(&textureStore, matLib.materials[i].bumpMap);
-				microfacets[i].bumpSampler = sampler_create(texture);
+				microfacets[i].bumpTexture = texture_request(&textureStore, matLib.materials[i].bumpMap);
 			}
 
+			microfacets[i].glossSampler = (sampler_t) {.type = sample_bilinear };
 			if (matLib.materials[i].glossMap != NULL)
 			{
-				texture_id_t texture = texture_request(&textureStore, matLib.materials[i].glossMap);
-				microfacets[i].glossSampler = sampler_create(texture);
+				microfacets[i].glossTexture = texture_request(&textureStore, matLib.materials[i].glossMap);
+
 			}
 
+			microfacets[i].maskSampler = (sampler_t) {.type = sample_nearest };
 			if (matLib.materials[i].maskMap != NULL)
 			{
-				texture_id_t texture = texture_request(&textureStore, matLib.materials[i].maskMap);
-				microfacets[i].maskSampler = sampler_create(texture);
+				microfacets[i].maskTexture = texture_request(&textureStore, matLib.materials[i].maskMap);
 			}
 		}
 
@@ -1249,7 +1379,13 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		{
 			.sources = &meshSource,
 		},
-		.textureStore = textureStore
+		.textureStore = textureStore,
+		.environment =
+		{
+			.importance = backgroundImportance,
+			.texture = backgroundTextureId,
+			.sampler = backgroundSampler,
+		}
 	};
 
 	// BVH
@@ -1285,8 +1421,6 @@ typedef struct
 	cv3 surface;
 	bool hit;
 } ray_hit_t;
-
-sampler_hdr_t backgroundSampler;
 
 static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD, uint64_t sourceTriangleId)
 {
@@ -1532,7 +1666,7 @@ static shader_outputs_t shader_lambert(const void* cran_restrict materialData, u
 	// TODO: Consider iteration instead of recursion
 
 	cv3 normal = cv3_normalize(inputs.normal);
-	cv2 partialDerivative = sampler_bump(&scene->textureStore, lambertData.bumpSampler, inputs.uv);
+	cv4 partialDerivative = sampler_sample(&scene->textureStore, lambertData.bumpSampler, lambertData.bumpTexture, inputs.uv);
 	normal = cv3_cross(cv3_add(inputs.tangent, cv3_mulf(normal, partialDerivative.x)), cv3_add(inputs.bitangent, cv3_mulf(normal, partialDerivative.y)));
 	normal = cv3_normalize(normal);
 	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
@@ -1548,7 +1682,7 @@ static shader_outputs_t shader_lambert(const void* cran_restrict materialData, u
 	if (!result.hit && ImportanceSampling)
 	{
 		float bias;
-		castDir = importance_sample_hdr(backgroundSampler, &bias, &context->randomSeed);
+		castDir = importance_sample_hdr(scene->environment.importance, &bias, &context->randomSeed);
 		result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 		result.light = cv3_mulf(result.light, cf_rcp(bias));
 	}
@@ -1558,7 +1692,7 @@ static shader_outputs_t shader_lambert(const void* cran_restrict materialData, u
 	}
 
 	cv3 albedoTint = lambertData.albedoTint;
-	cv4 samplerAlbedo = sampler_sample(&scene->textureStore, lambertData.albedoSampler, inputs.uv);
+	cv4 samplerAlbedo = sampler_sample(&scene->textureStore, lambertData.albedoSampler, lambertData.albedoTexture, inputs.uv);
 
 	cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
 	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
@@ -1577,9 +1711,9 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	material_microfacet_t microfacetData = ((const material_microfacet_t* cran_restrict)materialData)[materialIndex];
 	// TODO: Consider iteration instead of recursion
 
-	if (microfacetData.maskSampler.texture.id != 0)
+	if (microfacetData.maskTexture.id != 0)
 	{
-		float mask = sampler_sample(&scene->textureStore, microfacetData.maskSampler, inputs.uv).x;
+		float mask = sampler_sample(&scene->textureStore, microfacetData.maskSampler, microfacetData.maskTexture, inputs.uv).x;
 		if (mask == 0.0f)
 		{
 			ray_hit_t result = cast_scene(context, scene, inputs.surface, inputs.viewDir, inputs.triangleId);
@@ -1594,15 +1728,15 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	cv3 viewDir = cv3_inverse(cv3_normalize(inputs.viewDir));
 
 	cv3 normal = cv3_normalize(inputs.normal);
-	cv2 partialDerivative = sampler_bump(&scene->textureStore, microfacetData.bumpSampler, inputs.uv);
+	cv4 partialDerivative = sampler_sample(&scene->textureStore, microfacetData.bumpSampler, microfacetData.bumpTexture, inputs.uv);
 	normal = cv3_cross(cv3_add(inputs.tangent, cv3_mulf(normal, partialDerivative.x)), cv3_add(inputs.bitangent, cv3_mulf(normal, partialDerivative.y)));
 	normal = cv3_normalize(normal);
 	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
 
 	float gloss = microfacetData.gloss;
-	if (microfacetData.glossSampler.texture.id != 0)
+	if (microfacetData.glossTexture.id != 0)
 	{
-		gloss = sampler_sample(&scene->textureStore, microfacetData.glossSampler, inputs.uv).x;
+		gloss = sampler_sample(&scene->textureStore, microfacetData.glossSampler, microfacetData.glossTexture, inputs.uv).x;
 	}
 	float roughness = fmaxf(1.0f - gloss, 0.01f);
 
@@ -1629,7 +1763,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
 
 		cv3 albedoTint = microfacetData.albedoTint;
-		cv4 samplerAlbedo = sampler_sample(&scene->textureStore, microfacetData.albedoSampler, inputs.uv);
+		cv4 samplerAlbedo = sampler_sample(&scene->textureStore, microfacetData.albedoSampler, microfacetData.albedoTexture, inputs.uv);
 
 		cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
 		light = cv3_mul(light, cv3_mulf(albedo, cran_rpi));
@@ -1798,8 +1932,8 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 10,
-		.renderWidth = 448,
+		.samplesPerPixel = 1024,
+		.renderWidth = 420,
 		.renderHeight = 360,
 		.useDirectionalMat = false
 	};
@@ -1823,50 +1957,6 @@ int main()
 
 	static render_data_t mainRenderData;
 	uint64_t startTime = cranpl_timestamp_micro();
-
-	// Environment map
-	{
-		backgroundSampler.image = stbi_loadf("background_4k.hdr", &backgroundSampler.width, &backgroundSampler.height, &backgroundSampler.stride, 0);
-		backgroundSampler.cdf2d = (float*)crana_stack_alloc(&mainRenderContext.stack, sizeof(float) * backgroundSampler.width * backgroundSampler.height);
-		backgroundSampler.luminance2d = (float*)crana_stack_alloc(&mainRenderContext.stack, sizeof(float) * backgroundSampler.width * backgroundSampler.height);
-
-		backgroundSampler.cdf1d = (float*)crana_stack_alloc(&mainRenderContext.stack, sizeof(float) * backgroundSampler.height);
-		backgroundSampler.sum1d = (float*)crana_stack_alloc(&mainRenderContext.stack, sizeof(float) * backgroundSampler.height);
-
-		float ysum = 0.0f;
-		for (int y = 0; y < backgroundSampler.height; y++)
-		{
-			float xsum = 0.0f;
-			for (int x = 0; x < backgroundSampler.width; x++)
-			{
-				int index = (y * backgroundSampler.width) + x;
-
-				float* cran_restrict pixel = &backgroundSampler.image[index * backgroundSampler.stride];
-				float luminance = rgb_to_luminance(pixel[0], pixel[1], pixel[2]);
-
-				xsum += luminance;
-				backgroundSampler.luminance2d[index] = luminance;
-				backgroundSampler.cdf2d[index] = xsum;
-			}
-
-			for (int x = 0; x < backgroundSampler.width; x++)
-			{
-				int index = (y * backgroundSampler.width) + x;
-				backgroundSampler.cdf2d[index] = backgroundSampler.cdf2d[index] * cf_rcp(xsum);
-			}
-
-			ysum += xsum;
-			backgroundSampler.cdf1d[y] = ysum;
-			backgroundSampler.sum1d[y] = xsum;
-		}
-
-		for (int y = 0; y < backgroundSampler.height; y++)
-		{
-			backgroundSampler.cdf1d[y] = backgroundSampler.cdf1d[y]  * cf_rcp(ysum);
-		}
-
-		backgroundSampler.sumTotal = ysum;
-	}
 
 	generate_scene(&mainRenderContext, &mainRenderData.scene);
 
@@ -2041,7 +2131,6 @@ int main()
 	{
 		stbi_image_free(mainRenderData.scene.textureStore.textures[i].data);
 	}
-	stbi_image_free(backgroundSampler.image);
 
 	cranpr_end("cranberray","main");
 	cranpr_flush_thread_buffer();
