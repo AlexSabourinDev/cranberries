@@ -44,7 +44,7 @@ int main(void)
 		);
 	ShowWindow(hwnd, SW_SHOWNORMAL);
 
-	FILE* file = fopen("test_cranberry_gfx_data/Shaders/SPIR-V/default.vspv", "rb");
+	FILE* file = fopen("../SPIR-V/default.vspv", "rb");
 	fseek(file, 0, SEEK_END);
 	long fileSize = ftell(file);
 	fseek(file, 0, SEEK_SET);
@@ -54,7 +54,7 @@ int main(void)
 	fread(vertSource, fileSize, 1, file);
 	fclose(file);
 
-	file = fopen("test_cranberry_gfx_data/Shaders/SPIR-V/default.fspv", "rb");
+	file = fopen("../SPIR-V/default.fspv", "rb");
 	fseek(file, 0, SEEK_END);
 	fileSize = ftell(file);
 	fseek(file, 0, SEEK_SET);
