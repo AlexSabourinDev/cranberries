@@ -83,10 +83,28 @@ int main(void)
 		}
 	});
 
+	crang_image_id_t albedoImage = crang_create_image(ctx,
+		&(crang_image_desc_t)
+		{
+			.format = crang_image_format_rgba8,
+			.data = (uint8_t[])
+			{
+				0, 0, 255, 255,
+				255, 0, 0, 255,
+				0, 255, 0, 255,
+				0, 255, 255, 255,
+			},
+			.width = 2,
+			.height = 2,
+		});
+	crang_sampler_id_t albedoSampler = crang_create_sampler(ctx, &(crang_sampler_desc_t){0});
+
 	crang_material_id_t someMaterial = crang_create_mat_deferred(ctx,
 		&(crang_deferred_desc_t)
 		{
-			.albedoTint = { 0.0f, 0.0f, 1.0f, 1.0f }
+			.albedoTint = { 0.0f, 1.0f, 1.0f, 1.0f },
+			.albedoSampler = albedoSampler,
+			.albedoImage = albedoImage,
 		});
 
 	crang_mesh_id_t someMesh = crang_create_mesh(ctx,

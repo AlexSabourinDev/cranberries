@@ -9,7 +9,9 @@ layout(set = 0, binding = 1) uniform material_data_t
 	vec4 albedoTint;
 } material;
 
+layout(set = 0, binding = 2) uniform sampler2D albedo;
+
 void main()
 {
-	out_Color = material.albedoTint;
+	out_Color = texture(albedo, gl_FragCoord.xy / vec2(100.0, 100.0)) * material.albedoTint;
 }

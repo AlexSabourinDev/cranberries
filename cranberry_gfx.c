@@ -10,6 +10,8 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
+#define crang_array_size(a) (sizeof(a)/sizeof(a[0]))
+
 #define crang_no_allocator NULL
 
 #define crang_debug_enabled
@@ -369,6 +371,8 @@ typedef enum
 } queue_e;
 
 #define crang_max_mesh_count 1000
+#define crang_max_image_count 100
+#define crang_max_sampler_count 1000
 #define crang_double_buffer_count 2
 #define crang_max_material_instance_count 100
 typedef struct
@@ -427,6 +431,23 @@ typedef struct
 		uint32_t allocationSize;
 		cranvk_allocation_t allocation;
 	} geometry;
+
+	struct
+	{
+		struct
+		{
+			VkImage vkImage;
+			VkImageView vkImageView;
+			cranvk_allocation_t allocation;
+		} images[crang_max_image_count];
+		uint32_t imageCount;
+
+		struct
+		{
+			VkSampler vkSampler;
+		} samplers[crang_max_sampler_count];
+		uint32_t samplerCount;
+	} textures;
 
 	struct
 	{
@@ -993,12 +1014,18 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 				.descriptorCount = 1
 			},
+			{
+				.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+				.binding = 2,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.descriptorCount = 1
+			},
 		};
 
 		VkDescriptorSetLayoutCreateInfo createLayout =
 		{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-			.bindingCount = 2,
+			.bindingCount = crang_array_size(layoutBindings),
 			.pBindings = layoutBindings
 		};
 		crang_check(vkCreateDescriptorSetLayout(ctx->present.vkDevice, &createLayout, crang_no_allocator, &ctx->materials.deferred.vkGbufferShaderLayout));
@@ -1279,7 +1306,247 @@ crang_mesh_id_t crang_create_mesh(crang_context_t* context, crang_mesh_desc_t co
 	return (crang_mesh_id_t) { meshIndex + 1 };
 }
 
-crang_material_id_t crang_create_mat_deferred(crang_context_t* context, crang_deferred_desc_t* desc)
+crang_image_id_t crang_create_image(crang_context_t* context, crang_image_desc_t const* desc)
+{
+	context_t* ctx = (context_t*)context;
+
+	VkFormat formats[crang_image_format_count] =
+	{
+		[crang_image_format_rgba8] = VK_FORMAT_R8G8B8A8_UNORM
+	};
+
+	uint32_t formatSize[crang_image_format_count] =
+	{
+		[crang_image_format_rgba8] = 4
+	};
+
+	// Image
+	uint32_t imageIndex = ctx->textures.imageCount++;
+	{
+		VkImageCreateInfo imageCreate =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.imageType = VK_IMAGE_TYPE_2D,
+			.format = formats[desc->format],
+			.extent = {.width = desc->width, .height = desc->height,.depth = 1 },
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.tiling = VK_IMAGE_TILING_OPTIMAL,
+			.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT ,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.sharingMode = VK_SHARING_MODE_EXCLUSIVE
+		};
+
+		crang_check(vkCreateImage(ctx->present.vkDevice, &imageCreate, crang_no_allocator, &ctx->textures.images[imageIndex].vkImage));
+	}
+
+	// Allocation
+	{
+		VkMemoryRequirements memoryRequirements;
+		vkGetImageMemoryRequirements(ctx->present.vkDevice, ctx->textures.images[imageIndex].vkImage, &memoryRequirements);
+
+		unsigned int preferredBits = 0;
+		uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
+
+		cranvk_allocation_t* allocation = &ctx->textures.images[imageIndex].allocation;
+		*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex,
+			desc->width * desc->height * formatSize[desc->format], memoryRequirements.alignment);
+
+		crang_check(vkBindImageMemory(ctx->present.vkDevice, ctx->textures.images[imageIndex].vkImage, allocation->memory, allocation->offset));
+	}
+
+	// Image view
+	{
+		VkImageViewCreateInfo  imageCreateViewInfo =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = ctx->textures.images[imageIndex].vkImage,
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = formats[desc->format],
+
+			.components = {.r = VK_COMPONENT_SWIZZLE_R,.g = VK_COMPONENT_SWIZZLE_G,.b = VK_COMPONENT_SWIZZLE_B,.a = VK_COMPONENT_SWIZZLE_A },
+			.subresourceRange =
+			{
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.levelCount = 1,
+				.layerCount = 1,
+				.baseMipLevel = 0
+			}
+		};
+
+		crang_check(vkCreateImageView(ctx->present.vkDevice, &imageCreateViewInfo, crang_no_allocator, &ctx->textures.images[imageIndex].vkImageView));
+	}
+
+	VkBuffer srcBuffer;
+	cranvk_allocation_t allocation;
+	{
+		uint32_t bufferSize = desc->width * desc->height * formatSize[desc->format];
+		VkBufferCreateInfo bufferCreate =
+		{
+			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+			.size = bufferSize,
+			.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+		};
+		crang_check(vkCreateBuffer(ctx->present.vkDevice, &bufferCreate, crang_no_allocator, &srcBuffer));
+
+		VkMemoryRequirements memoryRequirements;
+		vkGetBufferMemoryRequirements(ctx->present.vkDevice, srcBuffer, &memoryRequirements);
+
+		uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+		allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex, bufferSize, memoryRequirements.alignment);
+		crang_check(vkBindBufferMemory(ctx->present.vkDevice, srcBuffer, allocation.memory, allocation.offset));
+
+		{
+			void* memory;
+			unsigned int flags = 0;
+			crang_check(vkMapMemory(ctx->present.vkDevice, allocation.memory, allocation.offset, bufferSize, flags, &memory));
+			memcpy(memory, (uint8_t*)desc->data, bufferSize);
+
+			VkMappedMemoryRange mappedMemory = 
+			{
+				.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+				.memory = allocation.memory,
+				.offset = allocation.offset,
+				.size = bufferSize
+			};
+			vkFlushMappedMemoryRanges(ctx->present.vkDevice, 1, &mappedMemory);
+			vkUnmapMemory(ctx->present.vkDevice, allocation.memory);
+		}
+	}
+
+	VkCommandBufferAllocateInfo commandBufferAllocateInfo =
+	{
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		.commandBufferCount = 1,
+		.commandPool = ctx->present.queues[queue_graphics].vkCommandPool
+	};
+	VkCommandBuffer commandBuffer;
+	crang_check(vkAllocateCommandBuffers(ctx->present.vkDevice, &commandBufferAllocateInfo, &commandBuffer));
+
+	VkCommandBufferBeginInfo beginBufferInfo =
+	{
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+	};
+	crang_check(vkBeginCommandBuffer(commandBuffer, &beginBufferInfo));
+
+	// Image barrier UNDEFINED -> OPTIMAL
+	{
+		VkAccessFlagBits sourceAccessMask = 0;
+		VkAccessFlagBits dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+		VkPipelineStageFlags sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+		VkPipelineStageFlags destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+		VkImageMemoryBarrier imageBarrier =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.image = ctx->textures.images[imageIndex].vkImage,
+			.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,.levelCount = 1, .baseMipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+			.srcAccessMask = sourceAccessMask,
+			.dstAccessMask = dstAccessMask
+		};
+
+		vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, NULL, 0, NULL, 1, &imageBarrier);
+	}
+
+	// Image copy
+	{
+		VkBufferImageCopy copyRegion = 
+		{
+			.bufferOffset = 0,
+			.bufferRowLength = 0,
+			.bufferImageHeight = 0,
+			.imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+			.imageOffset = {.x = 0, .y = 0, .z = 0},
+			.imageExtent = {.width = desc->width, .height = desc->height, .depth = 1}
+		};
+
+		vkCmdCopyBufferToImage(commandBuffer, srcBuffer, ctx->textures.images[imageIndex].vkImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+	}
+
+	// Image barrier OPTIMAL -> FRAGMEN_SHADER
+	{
+		VkAccessFlagBits sourceAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		VkAccessFlagBits dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+		VkPipelineStageFlags sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		VkPipelineStageFlags destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+		VkImageMemoryBarrier imageBarrier =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+			.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+			.image = ctx->textures.images[imageIndex].vkImage,
+			.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,.levelCount = 1, .baseMipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+			.srcAccessMask = sourceAccessMask,
+			.dstAccessMask = dstAccessMask
+		};
+
+		vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, NULL, 0, NULL, 1, &imageBarrier);
+	}
+
+	crang_check(vkEndCommandBuffer(commandBuffer));
+	VkSubmitInfo submitInfo =
+	{
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		.commandBufferCount = 1,
+		.pCommandBuffers = &commandBuffer
+	};
+	crang_check(vkQueueSubmit(ctx->present.queues[queue_graphics].vkQueue, 1, &submitInfo, ctx->present.vkImmediateFence));
+	crang_check(vkWaitForFences(ctx->present.vkDevice, 1, &ctx->present.vkImmediateFence, VK_TRUE, UINT64_MAX));
+	crang_check(vkResetFences(ctx->present.vkDevice, 1, &ctx->present.vkImmediateFence));
+
+	vkFreeCommandBuffers(ctx->present.vkDevice,  ctx->present.queues[queue_graphics].vkCommandPool, 1, &commandBuffer);
+	vkDestroyBuffer(ctx->present.vkDevice, srcBuffer, crang_no_allocator);
+	cranvk_allocator_free(&ctx->vkAllocator, allocation);
+
+	return (crang_image_id_t) { imageIndex + 1 };
+}
+
+crang_sampler_id_t crang_create_sampler(crang_context_t* context, crang_sampler_desc_t const* desc)
+{
+	(void)desc;
+	context_t* ctx = (context_t*)context;
+
+	// Sampler
+	uint32_t samplerIndex = ctx->textures.samplerCount++;
+	{
+		VkSamplerCreateInfo samplerCreate = 
+		{
+			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+			.magFilter = VK_FILTER_NEAREST,
+			.minFilter = VK_FILTER_NEAREST,
+			.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.anisotropyEnable = VK_FALSE,
+			.maxAnisotropy = 0,
+			.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+			.compareEnable = VK_FALSE,
+			.compareOp = VK_COMPARE_OP_ALWAYS,
+			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+			.mipLodBias = 0.0f,
+			.minLod = 0.0f,
+			.maxLod = 0.0f
+		};
+
+		crang_check(vkCreateSampler(ctx->present.vkDevice, &samplerCreate, crang_no_allocator, &ctx->textures.samplers[samplerIndex].vkSampler));
+	}
+
+	return (crang_sampler_id_t) { samplerIndex + 1 };
+}
+
+crang_material_id_t crang_create_mat_deferred(crang_context_t* context, crang_deferred_desc_t const* desc)
 {
 	context_t* ctx = (context_t*)context;
 
@@ -1441,8 +1708,25 @@ crang_material_id_t crang_create_mat_deferred(crang_context_t* context, crang_de
 			.pBufferInfo = &meshBufferInfo
 		};
 
-		VkWriteDescriptorSet writeDescriptorSets[] = { writeGeometry, writeMaterial };
-		vkUpdateDescriptorSets(ctx->present.vkDevice, 2, writeDescriptorSets, 0, NULL);
+		VkDescriptorImageInfo imageInfo =
+		{
+			.imageView = ctx->textures.images[desc->albedoImage.id - 1].vkImageView,
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			.sampler = ctx->textures.samplers[desc->albedoSampler.id - 1].vkSampler
+		};
+
+		VkWriteDescriptorSet writeImageSet =
+		{
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = ctx->materials.deferred.instances[instanceIndex].doubleBuffer[i].vkGbufferShaderDescriptor,
+			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.dstBinding = 2,
+			.descriptorCount = 1,
+			.pImageInfo = &imageInfo
+		};
+
+		VkWriteDescriptorSet writeDescriptorSets[] = { writeGeometry, writeMaterial, writeImageSet };
+		vkUpdateDescriptorSets(ctx->present.vkDevice, 3, writeDescriptorSets, 0, NULL);
 	}
 
 	return (crang_material_id_t) { instanceIndex + 1 };

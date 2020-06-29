@@ -7,6 +7,7 @@ typedef struct _crang_context_t crang_context_t;
 typedef struct { uint32_t id; } crang_mesh_id_t;
 typedef struct { uint32_t id; } crang_material_id_t;
 typedef struct { uint32_t id; } crang_image_id_t;
+typedef struct { uint32_t id; } crang_sampler_id_t;
 static const crang_mesh_id_t crang_invalid_mesh = { 0 };
 static const crang_material_id_t crang_invalid_material = { 0 };
 
@@ -15,6 +16,27 @@ typedef enum
 	crang_material_deferred,
 	crang_material_count,
 } crang_material_e;
+
+typedef struct
+{
+	struct
+	{
+		void* hinstance;
+		void* hwindow;
+	} win32;
+
+	struct
+	{
+		struct
+		{
+			uint8_t* gbufferVShader;
+			uint32_t gbufferVShaderSize;
+
+			uint8_t* gbufferFShader;
+			uint32_t gbufferFShaderSize;
+		} deferred;
+	} materials;
+} crang_init_desc_t;
 
 typedef struct
 {
@@ -62,33 +84,36 @@ typedef struct
 typedef struct
 {
 	float albedoTint[4];
+	crang_image_id_t albedoImage;
+	crang_sampler_id_t albedoSampler;
 } crang_deferred_desc_t;
+
+typedef enum
+{
+	crang_image_format_rgba8,
+	crang_image_format_count
+} crang_image_format_e;
 
 typedef struct
 {
-	struct
-	{
-		void* hinstance;
-		void* hwindow;
-	} win32;
+	crang_image_format_e format;
+	uint32_t width;
+	uint32_t height;
+	uint8_t* data;
+} crang_image_desc_t;
 
-	struct
-	{
-		struct
-		{
-			uint8_t* gbufferVShader;
-			uint32_t gbufferVShaderSize;
-
-			uint8_t* gbufferFShader;
-			uint32_t gbufferFShaderSize;
-		} deferred;
-	} materials;
-} crang_init_desc_t;
+typedef struct
+{
+	uint32_t temp;
+} crang_sampler_desc_t;
 
 crang_context_t* crang_init(crang_init_desc_t* desc);
 
 crang_mesh_id_t crang_create_mesh(crang_context_t* ctx, crang_mesh_desc_t const* desc);
-crang_material_id_t crang_create_mat_deferred(crang_context_t* ctx, crang_deferred_desc_t* desc);
+crang_image_id_t crang_create_image(crang_context_t* ctx, crang_image_desc_t const* desc);
+crang_sampler_id_t crang_create_sampler(crang_context_t* ctx, crang_sampler_desc_t const* desc);
+
+crang_material_id_t crang_create_mat_deferred(crang_context_t* ctx, crang_deferred_desc_t const* desc);
 
 void crang_draw_view(crang_context_t* ctx, crang_view_t* view);
 
