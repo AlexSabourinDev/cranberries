@@ -15,13 +15,13 @@ layout(set=0, binding=0) buffer mesh_data_t
 
 layout(push_constant) uniform transforms_t
 {
-	mat4x4 NDCFromWorld;
-	mat4x4 worldFromObj;
+	mat4x4 MVP;
+	uint vertexOffset;
 } transformations;
 
 void main()
 {
-	uint index = gl_VertexIndex * 3;
+	uint index = (transformations.vertexOffset + gl_VertexIndex) * 3;
 	vec4 pos = vec4(mesh.data[index], mesh.data[index + 1], mesh.data[index + 2], 1.0);
 	gl_Position = pos;
 }

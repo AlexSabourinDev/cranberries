@@ -52,7 +52,7 @@ void crang_check_impl(VkResult result)
 
 #define cranvk_max_allocator_pools 10
 #define cranvk_max_memory_blocks 1000
-#define cranvk_allocator_pool_size (1024 * 1024)
+#define cranvk_allocator_pool_size (1024 * 1024 * 16)
 
 typedef struct
 {
@@ -413,13 +413,20 @@ typedef struct
 
 	struct
 	{
+		struct
+		{
+			uint32_t vertexOffset;
+			uint32_t vertexSize;
+			uint32_t indexOffset;
+			uint32_t indexCount;
+		} meshes[crang_max_mesh_count];
+		uint32_t meshCount;
+		uint32_t nextOffset;
+
 		VkBuffer vkMeshDataBuffers;
-		VkBuffer vkMeshIndexBuffer;
-		cranvk_allocation_t allocations;
-		uint32_t vertexSize;
-		uint32_t indexCount;
-	} meshes[crang_max_mesh_count];
-	uint32_t meshCount;
+		uint32_t allocationSize;
+		cranvk_allocation_t allocation;
+	} geometry;
 
 	struct
 	{
@@ -1044,7 +1051,7 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 
 			VkPipelineColorBlendAttachmentState colorBlendAttachment =
 			{
-				.blendEnable = VK_TRUE,
+			.blendEnable = VK_TRUE,
 				.colorBlendOp = VK_BLEND_OP_ADD,
 				.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
 				.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
@@ -1143,6 +1150,31 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 		}
 	}
 
+#define crang_mesh_buffer_size 1024*1024
+	{
+		VkBufferCreateInfo bufferCreate =
+		{
+			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+			.size = crang_mesh_buffer_size,
+			.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT // buffers created through create buffer can always be transfered to
+		};
+
+		VkBuffer* buffer = &ctx->geometry.vkMeshDataBuffers;
+		ctx->geometry.allocationSize = crang_mesh_buffer_size;
+		crang_check(vkCreateBuffer(ctx->present.vkDevice, &bufferCreate, crang_no_allocator, buffer));
+
+		VkMemoryRequirements memoryRequirements;
+		vkGetBufferMemoryRequirements(ctx->present.vkDevice, *buffer, &memoryRequirements);
+
+		unsigned int preferredBits = 0;
+		uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
+
+		cranvk_allocation_t* allocation = &ctx->geometry.allocation;
+		*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex, crang_mesh_buffer_size, memoryRequirements.alignment);
+
+		crang_check(vkBindBufferMemory(ctx->present.vkDevice, *buffer, allocation->memory, allocation->offset));
+	}
+
 	return (crang_context_t*)ctx;
 }
 
@@ -1150,61 +1182,17 @@ crang_mesh_id_t crang_create_mesh(crang_context_t* context, crang_mesh_desc_t co
 {
 	context_t* ctx = (context_t*)context;
 
-	uint32_t meshIndex;
-	VkBuffer meshBuffer;
+	uint32_t meshIndex = ctx->geometry.meshCount++;
 
 	uint32_t vertexSize = desc->vertices.count * sizeof(float) * 3;
-	{
-		VkBufferCreateInfo bufferCreate =
-		{
-			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = vertexSize,
-			.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT // buffers created through create buffer can always be transfered to
-		};
-
-		meshIndex = ctx->meshCount++;
-		ctx->meshes[meshIndex].vertexSize = vertexSize;
-		VkBuffer* buffer = &ctx->meshes[meshIndex].vkMeshDataBuffers;
-		crang_check(vkCreateBuffer(ctx->present.vkDevice, &bufferCreate, crang_no_allocator, buffer));
-
-		VkMemoryRequirements memoryRequirements;
-		vkGetBufferMemoryRequirements(ctx->present.vkDevice, *buffer, &memoryRequirements);
-
-		unsigned int preferredBits = 0;
-		uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
-
-		cranvk_allocation_t* allocation = &ctx->meshes[meshIndex].allocations;
-		*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex, vertexSize, memoryRequirements.alignment);
-
-		crang_check(vkBindBufferMemory(ctx->present.vkDevice, *buffer, allocation->memory, allocation->offset));
-		meshBuffer = *buffer;
-	}
-
-	VkBuffer indexBuffer;
 	uint32_t indexSize = desc->indices.count * sizeof(uint32_t);
 	{
-		VkBufferCreateInfo bufferCreate =
-		{
-			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = indexSize,
-			.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT // buffers created through create buffer can always be transfered to
-		};
+		ctx->geometry.meshes[meshIndex].vertexSize = vertexSize;
+		ctx->geometry.meshes[meshIndex].vertexOffset = ctx->geometry.nextOffset;
+		ctx->geometry.meshes[meshIndex].indexOffset = vertexSize + ctx->geometry.nextOffset;
+		ctx->geometry.meshes[meshIndex].indexCount = desc->indices.count;
 
-		ctx->meshes[meshIndex].indexCount = desc->indices.count;
-		VkBuffer* buffer = &ctx->meshes[meshIndex].vkMeshIndexBuffer;
-		crang_check(vkCreateBuffer(ctx->present.vkDevice, &bufferCreate, crang_no_allocator, buffer));
-
-		VkMemoryRequirements memoryRequirements;
-		vkGetBufferMemoryRequirements(ctx->present.vkDevice, *buffer, &memoryRequirements);
-
-		unsigned int preferredBits = 0;
-		uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
-
-		cranvk_allocation_t* allocation = &ctx->meshes[meshIndex].allocations;
-		*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex, indexSize, memoryRequirements.alignment);
-
-		crang_check(vkBindBufferMemory(ctx->present.vkDevice, *buffer, allocation->memory, allocation->offset));
-		indexBuffer = *buffer;
+		ctx->geometry.nextOffset += vertexSize + indexSize;
 	}
 
 	VkBuffer srcBuffer;
@@ -1267,18 +1255,10 @@ crang_mesh_id_t crang_create_mesh(crang_context_t* context, crang_mesh_desc_t co
 		VkBufferCopy meshCopy =
 		{
 			.srcOffset = 0,
-			.dstOffset = 0,
-			.size = vertexSize
+			.dstOffset = ctx->geometry.meshes[meshIndex].vertexOffset,
+			.size = vertexSize + indexSize
 		};
-		vkCmdCopyBuffer(commandBuffer, srcBuffer, meshBuffer, 1, &meshCopy);
-
-		VkBufferCopy indexCopy =
-		{
-			.srcOffset = vertexSize,
-			.dstOffset = 0,
-			.size = indexSize
-		};
-		vkCmdCopyBuffer(commandBuffer, srcBuffer, indexBuffer, 1, &indexCopy);
+		vkCmdCopyBuffer(commandBuffer, srcBuffer, ctx->geometry.vkMeshDataBuffers, 1, &meshCopy);
 
 		crang_check(vkEndCommandBuffer(commandBuffer));
 		VkSubmitInfo submitInfo =
@@ -1435,7 +1415,7 @@ crang_material_id_t crang_create_mat_deferred(crang_context_t* context, crang_de
 			.range = sizeof(matData)
 		};
 
-		VkWriteDescriptorSet writeDescriptorSet =
+		VkWriteDescriptorSet writeMaterial =
 		{
 			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 			.dstSet = ctx->materials.deferred.instances[instanceIndex].doubleBuffer[i].vkGbufferShaderDescriptor,
@@ -1445,7 +1425,24 @@ crang_material_id_t crang_create_mat_deferred(crang_context_t* context, crang_de
 			.pBufferInfo = &bufferInfo
 		};
 
-		vkUpdateDescriptorSets(ctx->present.vkDevice, 1, &writeDescriptorSet, 0, NULL);
+		VkDescriptorBufferInfo meshBufferInfo =
+		{
+			.buffer = ctx->geometry.vkMeshDataBuffers,
+			.offset = 0,
+			.range = ctx->geometry.allocationSize
+		};
+		VkWriteDescriptorSet writeGeometry =
+		{
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = ctx->materials.deferred.instances[instanceIndex].doubleBuffer[i].vkGbufferShaderDescriptor,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			.dstBinding = 0,
+			.descriptorCount = 1,
+			.pBufferInfo = &meshBufferInfo
+		};
+
+		VkWriteDescriptorSet writeDescriptorSets[] = { writeGeometry, writeMaterial };
+		vkUpdateDescriptorSets(ctx->present.vkDevice, 2, writeDescriptorSets, 0, NULL);
 	}
 
 	return (crang_material_id_t) { instanceIndex + 1 };
@@ -1475,27 +1472,6 @@ void crang_draw_view(crang_context_t* context, crang_view_t* view)
 
 	VkCommandBuffer currentCommands = ctx->present.doubleBuffer[buffer].vkPrimaryCommandBuffer;
 	{
-		VkDescriptorBufferInfo bufferInfo =
-		{
-			.buffer = ctx->meshes[0].vkMeshDataBuffers,
-			.offset = 0,
-			.range = ctx->meshes[0].vertexSize
-		};
-
-		VkWriteDescriptorSet writeDescriptorSet =
-		{
-			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-			.dstSet = ctx->materials.deferred.instances[0].doubleBuffer[buffer].vkGbufferShaderDescriptor,
-			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-			.dstBinding = 0,
-			.descriptorCount = 1,
-			.pBufferInfo = &bufferInfo
-		};
-		//vkCmdPushDescriptorSetKHR(currentCommands, VK_PIPELINE_BIND_POINT_GRAPHICS,
-		//	ctx->materials.deferred.vkPipelineLayout, 0, 1, &writeDescriptorSet);
-		// TODO: Support something to update our storage buffer on a per-instance basis
-		vkUpdateDescriptorSets(ctx->present.vkDevice, 1, &writeDescriptorSet, 0, NULL);
-
 		crang_check(vkResetCommandBuffer(currentCommands, 0));
 
 		VkCommandBufferBeginInfo beginBufferInfo =
@@ -1534,22 +1510,23 @@ void crang_draw_view(crang_context_t* context, crang_view_t* view)
 			for (uint32_t inst = 0; inst < crang_max_instances && view->batches[crang_material_deferred][i].instances[inst].mesh.id > 0; inst++)
 			{
 				uint32_t meshIndex = view->batches[crang_material_deferred][i].instances[inst].mesh.id - 1;
-				VkBuffer meshBuffer = ctx->meshes[meshIndex].vkMeshDataBuffers;
-				VkBuffer indexBuffer = ctx->meshes[meshIndex].vkMeshIndexBuffer;
 
-				vkCmdBindIndexBuffer(currentCommands, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+				vkCmdBindIndexBuffer(currentCommands, ctx->geometry.vkMeshDataBuffers, ctx->geometry.meshes[meshIndex].indexOffset, VK_INDEX_TYPE_UINT32);
 				for (uint32_t mat = 0; mat < view->batches[crang_material_deferred][i].instances[inst].count; mat++)
 				{
-					crang_mat4_t pushConstant[2] =
+					struct
 					{
-						view->viewProj,
-						view->batches[crang_material_deferred][i].instances[inst].transforms[mat]
-					};
+						crang_mat4_t mvp;
+						uint32_t vertexOffset;
+					} pushConstant;
+
+					pushConstant.mvp = view->viewProj;
+					pushConstant.vertexOffset = ctx->geometry.meshes[meshIndex].vertexOffset / sizeof(float);
 
 					vkCmdPushConstants(currentCommands, ctx->materials.deferred.vkPipelineLayout,
-						VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pushConstant), pushConstant);
+						VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pushConstant), &pushConstant);
 
-					vkCmdDrawIndexed(currentCommands, ctx->meshes[meshIndex].indexCount, 1, 0, 0, 0);
+					vkCmdDrawIndexed(currentCommands, ctx->geometry.meshes[meshIndex].indexCount, 1, 0, 0, 0);
 				}
 			}
 		}
