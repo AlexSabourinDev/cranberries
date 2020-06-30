@@ -716,8 +716,8 @@ typedef struct
 	{
 		struct
 		{
-			uint32_t left;
-			uint32_t right;
+			uint16_t left;
+			uint16_t right;
 		} jumps;
 
 		uint32_t index;
@@ -798,6 +798,7 @@ typedef struct
 typedef struct
 {
 	mesh_source_t* sources;
+	uint32_t count;
 } mesh_store_t;
 
 typedef struct
@@ -910,7 +911,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	{
 		index_aabb_pair_t* start;
 		uint32_t count;
-		uint32_t* parentIndex;
+		uint16_t* parentIndex;
 	} bvh_workgroup_t;
 
 	// Simple ring buffer
@@ -953,7 +954,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 		if (bvhWorkgroup[workgroupIter].parentIndex != NULL)
 		{
-			*(bvhWorkgroup[workgroupIter].parentIndex) = (uint32_t)(buildingBVHIter - buildingBVHStart);
+			*(bvhWorkgroup[workgroupIter].parentIndex) = (uint16_t)(buildingBVHIter - buildingBVHStart);
+			assert((buildingBVHIter - buildingBVHStart) < UINT16_MAX);
 		}
 
 		caabb bounds = start[0].bound;
@@ -1033,7 +1035,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 		if (leafWorkgroup[i].parentIndex != NULL)
 		{
-			*(leafWorkgroup[i].parentIndex) = (uint32_t)(buildingBVHIter - buildingBVHStart);
+			*(leafWorkgroup[i].parentIndex) = (uint16_t)(buildingBVHIter - buildingBVHStart);
+			assert((buildingBVHIter - buildingBVHStart) < UINT16_MAX);
 		}
 
 		caabb bounds = start[0].bound;
@@ -1108,38 +1111,67 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 		}
 
 		uint32_t intersections = caabb_does_ray_intersect_lanes(rayO, rayD, rayMin, rayMax, boundMins, boundMaxs);
+		uint32_t activeLaneCountMask = ((1 << activeLaneCount) - 1);
+
 		if (intersections > 0)
 		{
-			for (uint32_t i = 0; i < activeLaneCount; i++)
+			intersections = intersections & activeLaneCountMask;
+
+#define _MM_SHUFFLE_EPI8(i3,i2,i1,i0) _mm_set_epi8(i3*4+3,i3*4+2,i3*4+1,i3*4,i2*4+3,i2*4+2,i2*4+1,i2*4,i1*4+3,i1*4+2,i1*4+1,i1*4,i0*4+3,i0*4+2,i0*4+1,i0*4)
+			__m128i shuffles[16] = 
 			{
-				if (intersections & (1 << i))
-				{
-					uint32_t nodeIndex = testQueueIter[i];
+				_MM_SHUFFLE_EPI8(0,0,0,0), _MM_SHUFFLE_EPI8(0,0,0,0), _MM_SHUFFLE_EPI8(0,0,0,1), _MM_SHUFFLE_EPI8(0,0,1,0), // 0000, 0001, 0010, 0011
+				_MM_SHUFFLE_EPI8(0,0,0,2), _MM_SHUFFLE_EPI8(0,0,2,0), _MM_SHUFFLE_EPI8(0,0,2,1), _MM_SHUFFLE_EPI8(0,2,1,0), // 0100, 0101, 0110, 0111
+				_MM_SHUFFLE_EPI8(0,0,0,3), _MM_SHUFFLE_EPI8(0,0,3,0), _MM_SHUFFLE_EPI8(0,0,3,1), _MM_SHUFFLE_EPI8(0,3,1,0), // 1000, 1001, 1010, 1011
+				_MM_SHUFFLE_EPI8(0,0,3,2), _MM_SHUFFLE_EPI8(0,3,2,0), _MM_SHUFFLE_EPI8(0,3,2,1), _MM_SHUFFLE_EPI8(3,2,1,0)  // 1100, 1101, 1110, 1111
+			};
 
-					context->renderStats.bvhHitCount++; 
+			__m128i queueIndices = _mm_load_si128((__m128i*)testQueueIter);
 
-					bool isLeaf = nodeIndex >= bvh->count - bvh->leafCount;
-					if (isLeaf)
-					{
-						context->renderStats.bvhLeafHitCount++;
+			uint32_t leafLine = bvh->count - bvh->leafCount;
+			uint32_t childIndexMask;
+			uint32_t parentIndexMask;
+			{
+				__m128i isParent = _mm_cmplt_epi32(queueIndices, _mm_set_epi32(leafLine, leafLine, leafLine, leafLine));
+				parentIndexMask = _mm_movemask_ps(_mm_castsi128_ps(isParent));
+				childIndexMask = ~parentIndexMask & 0x0F;
 
-						// Grows our candidate pointer
-						*candidateIter = bvh->jumps[nodeIndex].indices.index;
-						candidateIter++;
-					}
-					else
-					{
-						*testQueueEnd = bvh->jumps[nodeIndex].indices.jumps.left;
-						testQueueEnd++;
-						*testQueueEnd = bvh->jumps[nodeIndex].indices.jumps.right;
-						testQueueEnd++;
-					}
-				}
-				else
-				{
-					context->renderStats.bvhMissCount++;
-				}
+				parentIndexMask = parentIndexMask & intersections;
+				childIndexMask = childIndexMask & intersections;
 			}
+
+			uint32_t leafCount = __popcnt(childIndexMask);
+			uint32_t parentCount = __popcnt(parentIndexMask);
+			__m128i childIndices = _mm_shuffle_epi8(queueIndices, shuffles[childIndexMask]);
+			__m128i parentIndices = _mm_shuffle_epi8(queueIndices, shuffles[parentIndexMask]);
+
+			context->renderStats.bvhHitCount += leafCount+parentCount; 
+			context->renderStats.bvhLeafHitCount += leafCount;
+			context->renderStats.bvhMissCount += activeLaneCount-(leafCount+parentCount);
+
+			union
+			{
+				uint32_t i[4];
+				__m128i v;
+			} indexUnion;
+
+			indexUnion.v = childIndices;
+			for (uint32_t i = 0; i < leafCount; i++)
+			{
+				uint32_t nodeIndex = indexUnion.i[i];
+				candidateIter[i] = bvh->jumps[nodeIndex].indices.index;
+			}
+			candidateIter+=leafCount;
+
+			indexUnion.v = parentIndices;
+			for (uint32_t i = 0; i < parentCount; i++)
+			{
+				uint32_t nodeIndex = indexUnion.i[i];
+				assert(nodeIndex < bvh->count);
+				testQueueEnd[i*2] = bvh->jumps[nodeIndex].indices.jumps.left;
+				testQueueEnd[i*2 + 1] = bvh->jumps[nodeIndex].indices.jumps.right;
+			}
+			testQueueEnd += parentCount * 2;
 		}
 		else
 		{
@@ -1378,6 +1410,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		.meshStore =
 		{
 			.sources = &meshSource,
+			.count = 1,
 		},
 		.textureStore = textureStore,
 		.environment =
@@ -1932,7 +1965,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 1024,
+		.samplesPerPixel = 10,
 		.renderWidth = 420,
 		.renderHeight = 360,
 		.useDirectionalMat = false
