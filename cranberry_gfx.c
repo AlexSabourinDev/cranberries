@@ -2054,7 +2054,7 @@ void crang_draw_view(crang_context_t* context, crang_view_t* view)
 		vkCmdBindPipeline(currentCommands, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->materials.deferred.vkGbufferComputePipeline);
 		vkCmdBindDescriptorSets(currentCommands, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->materials.deferred.vkGbufferComputePipelineLayout, 0, 1,
 								&ctx->materials.deferred.doubleBuffer[buffer].vkGbufferComputeDescriptor, 0, VK_NULL_HANDLE);
-		vkCmdDispatch(currentCommands, ctx->present.vkSurfaceExtents.width, ctx->present.vkSurfaceExtents.height, 1);
+		vkCmdDispatch(currentCommands, ctx->present.vkSurfaceExtents.width / 8, ctx->present.vkSurfaceExtents.height / 8, 1);
 
 		VkImageMemoryBarrier swapchainPresentBarrier =
 		{

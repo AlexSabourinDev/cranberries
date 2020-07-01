@@ -1,6 +1,8 @@
 #version 450
 #pragma shader_stage(compute)
 
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_ARB_shader_image_load_store : enable
 
