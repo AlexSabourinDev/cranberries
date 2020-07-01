@@ -142,6 +142,17 @@ cran_forceinline cv3 cm3_rotate_cv3(cm3 m, cv3 v);
 cran_forceinline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin, float rayMax, caabb aabb);
 cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax);
 
+enum
+{
+	caabb_x = 0,
+	caabb_y,
+	caabb_z
+};
+cran_forceinline float caabb_centroid(caabb l, uint32_t axis);
+cran_forceinline float caabb_side(caabb l, uint32_t axis);
+cran_forceinline caabb caabb_merge(caabb l, caabb r);
+cran_forceinline float caabb_surface_area(caabb l);
+
 // Miscellaneous API
 cran_forceinline cv3 cmi_fresnel_schlick_r0(cv3 r0, cv3 n, cv3 i);
 // r1 = exiting refractive index (usually air)
@@ -583,6 +594,26 @@ cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, flo
 	cfl tmax = cfl_min(rayMaxLane, cfl_min(tbigger.x, cfl_min(tbigger.y, tbigger.z)));
 	cfl result = cfl_less(tmin, tmax);
 	return cfl_mask(result);
+}
+
+cran_forceinline float caabb_centroid(caabb l, uint32_t axis)
+{
+	return ((&l.max.x)[axis] + (&l.min.x)[axis]) * 0.5f;
+}
+
+cran_forceinline float caabb_side(caabb l, uint32_t axis)
+{
+	return ((&l.max.x)[axis] - (&l.min.x)[axis]);
+}
+
+cran_forceinline caabb caabb_merge(caabb l, caabb r)
+{
+	return (caabb) { .max = cv3_max(l.max, r.max), .min = cv3_min(l.min, r.min) };
+}
+
+cran_forceinline float caabb_surface_area(caabb l)
+{
+	return ((caabb_side(l,caabb_x)*caabb_side(l,caabb_y))+(caabb_side(l,caabb_y)*caabb_side(l,caabb_z))+(caabb_side(l,caabb_x)*caabb_side(l,caabb_z)))*2.0f;
 }
 
 // Miscellaneous Implementation

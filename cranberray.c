@@ -13,11 +13,19 @@
 #include <string.h>
 #include <time.h>
 
-#if 1
+#define cran_debug
+#ifdef cran_debug
 #include <assert.h>
 #define cran_assert(a) assert(a)
 #else
 # define cran_assert(a) (void)(a)
+#endif
+
+#define cran_stats
+#ifdef cran_stats
+#define cran_stat(a) a
+#else
+#define cran_stat(a)
 #endif
 
 #include "stb_image.h"
@@ -577,7 +585,7 @@ texture_id_t texture_request_f32(texture_store_t* store, char const* cran_restri
 
 	texture->data = (uint8_t* cran_restrict)stbi_loadf(path, &texture->width, &texture->height, &texture->stride, 0);
 
-	assert(texture->stride == 3);
+	cran_assert(texture->stride == 3);
 	texture_format_e formats[] =
 	{
 		[3] = texture_rgb_f32,
@@ -876,7 +884,7 @@ static int index_aabb_sort_min_x(const void* cran_restrict l, const void* cran_r
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
 	// If equal, well they're equivalent
-	return (int)(left->bound.min.x - right->bound.min.x);
+	return (int)copysignf(1.0f, caabb_centroid(left->bound, caabb_x) - caabb_centroid(right->bound, caabb_x));
 }
 
 static int index_aabb_sort_min_y(const void* cran_restrict l, const void* cran_restrict r)
@@ -887,7 +895,7 @@ static int index_aabb_sort_min_y(const void* cran_restrict l, const void* cran_r
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
 	// If equal, well they're equivalent
-	return (int)(left->bound.min.y - right->bound.min.y);
+	return (int)copysignf(1.0f, caabb_centroid(left->bound, caabb_y) - caabb_centroid(right->bound, caabb_y));
 }
 
 static int index_aabb_sort_min_z(const void* cran_restrict l, const void* cran_restrict r)
@@ -898,7 +906,7 @@ static int index_aabb_sort_min_z(const void* cran_restrict l, const void* cran_r
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
 	// If equal, well they're equivalent
-	return (int)(left->bound.min.z - right->bound.min.z);
+	return (int)copysignf(1.0f, caabb_centroid(left->bound, caabb_z) - caabb_centroid(right->bound, caabb_z));
 }
 
 static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint32_t leafCount)
@@ -973,19 +981,114 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		};
 
 		// TODO: Since we're doing all the iteration work in the sort, maybe we could also do the partitioning in the sort?
-		uint32_t axis = randomRange(&context->randomSeed, 0, 3);
+		cv2 axisSpan[3];
+		for (uint32_t axis = 0; axis < 3; axis++)
+		{
+			for (uint32_t i = 0; i < count; i++)
+			{
+				axisSpan[axis].x = fminf(axisSpan[axis].x, (&start[i].bound.max.x)[axis] - (&start[i].bound.min.x)[axis] * 0.5f);
+				axisSpan[axis].y = fmaxf(axisSpan[axis].y, (&start[i].bound.max.x)[axis] - (&start[i].bound.min.x)[axis] * 0.5f);
+			}
+		}
+
+		uint32_t axis;
+		if (axisSpan[0].y - axisSpan[0].x > axisSpan[1].y - axisSpan[1].x)
+		{
+			axis = 0;
+		}
+		else if (axisSpan[1].y - axisSpan[1].x > axisSpan[2].y - axisSpan[2].x)
+		{
+			axis = 1;
+		}
+		else
+		{
+			axis = 2;
+		}
+
 		qsort(start, count, sizeof(index_aabb_pair_t), sortFuncs[axis]);
 
-		float boundsCenter = ((&bounds.max.x)[axis] - (&bounds.min.x)[axis]) * 0.5f;
-		uint32_t centerIndex = count / 2;
+#define cran_bucket_count 12
+		caabb bucketBounds[cran_bucket_count] = { 0 };
+		uint32_t bucketCount[cran_bucket_count] = { 0 };
+
 		for (uint32_t i = 0; i < count; i++)
 		{
-			float centroid = ((&start[i].bound.max.x)[axis] - (&start[i].bound.min.x)[axis]) * 0.5f;
-			if (centroid > boundsCenter)
+			float p = (caabb_centroid(start[i].bound, axis) - (&bounds.min.x)[axis])/caabb_side(bounds,axis);
+			uint32_t bucketIndex = (uint32_t)(p*cran_bucket_count);
+			bucketIndex = bucketIndex == cran_bucket_count ? bucketIndex - 1 : bucketIndex;
+			if (bucketCount[bucketIndex] == 0)
+			{
+				bucketBounds[bucketIndex] = start[i].bound;
+			}
+			else
+			{
+				bucketBounds[bucketIndex] = caabb_merge(bucketBounds[bucketIndex], start[i].bound);
+			}
+			
+			bucketCount[bucketIndex]++;
+		}
+
+		float sah[cran_bucket_count-1] = { 0 };
+		for (uint32_t i = 0; i < cran_bucket_count-1; i++)
+		{
+			caabb left = bucketBounds[0];
+			uint32_t leftCount = 0;
+			caabb right = bucketBounds[cran_bucket_count - 1];
+			uint32_t rightCount = 0;
+
+			for (uint32_t b = 0; b <= i; b++)
+			{
+				// Don't merge empty buckets
+				if (bucketCount[b] > 0)
+				{
+					left = caabb_merge(left, bucketBounds[b]);
+					leftCount += bucketCount[b];
+				}
+			}
+
+			for (uint32_t b = i+1; b < cran_bucket_count; b++)
+			{
+				if (bucketCount[b] > 0)
+				{
+					right = caabb_merge(right, bucketBounds[b]);
+					rightCount += bucketCount[b];
+				}
+			}
+
+			// SAH
+			const float traversalRelativeCost = 0.25f;
+			sah[i] = traversalRelativeCost+((float)leftCount * caabb_surface_area(left) + (float)rightCount * caabb_surface_area(right)) / caabb_surface_area(bounds);
+		}
+
+		// Find our lowest cost bucket
+		float min = sah[0];
+		uint32_t minIndex = 0;
+		for (uint32_t i = 1; i < cran_bucket_count-1; i++)
+		{
+			if (sah[i] < min)
+			{
+				minIndex = i;
+				min = sah[i];
+			}
+		}
+
+		float bucketSize = caabb_side(bounds, axis) / (float)cran_bucket_count;
+		float split = (float)minIndex * bucketSize + bucketSize + (&bounds.min.x)[axis];
+
+		uint32_t centerIndex = count/2;
+		for (uint32_t i = 0; i < count; i++)
+		{
+			if (caabb_centroid(start[i].bound, axis) > split)
 			{
 				centerIndex = i;
 				break;
 			}
+		}
+
+		// If we're trying to split it into nothing, just split it in half
+		if (centerIndex == 0)
+		{
+			centerIndex = count / 2;
 		}
 
 		bool isLeaf = centerIndex == 1;
@@ -993,6 +1096,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		{
 			bvhWorkgroup[workgroupQueueEnd].start = start;
 			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
+			cran_assert(bvhWorkgroup[workgroupQueueEnd].count > 0);
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.left;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			cran_assert(workgroupQueueEnd != workgroupIter);
@@ -1001,6 +1105,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		{
 			leafWorkgroup[leafWorkgroupEnd].start = start;
 			leafWorkgroup[leafWorkgroupEnd].count = centerIndex;
+			cran_assert(leafWorkgroup[leafWorkgroupEnd].count > 0);
 			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.left;
 			leafWorkgroupEnd++;
 			cran_assert(leafWorkgroupEnd <= leafCount);
@@ -1011,6 +1116,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		{
 			bvhWorkgroup[workgroupQueueEnd].start = start + centerIndex;
 			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
+			cran_assert(bvhWorkgroup[workgroupQueueEnd].count > 0);
+
 			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.right;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			cran_assert(workgroupQueueEnd != workgroupIter);
@@ -1019,6 +1126,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		{
 			leafWorkgroup[leafWorkgroupEnd].start = start + centerIndex;
 			leafWorkgroup[leafWorkgroupEnd].count = count - centerIndex;
+			cran_assert(leafWorkgroup[leafWorkgroupEnd].count > 0);
 			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.right;
 			leafWorkgroupEnd++;
 			cran_assert(leafWorkgroupEnd <= leafCount);
@@ -1070,7 +1178,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	crana_stack_free(&context->scratchStack, bvhWorkgroup);
 	crana_stack_free(&context->scratchStack, leafWorkgroup);
 
-	context->renderStats.bvhNodeCount = bvhSize;
+	cran_stat(context->renderStats.bvhNodeCount = bvhSize);
 	return builtBVH;
 }
 
@@ -1090,9 +1198,8 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 	*candidates = crana_stack_lock(&context->stack); // Allocate nothing, but we're going to be growing it
 	uint32_t* candidateIter = *candidates;
 
-	uint64_t traversalStartTime = cranpl_timestamp_micro();
+	cran_stat(uint64_t traversalStartTime = cranpl_timestamp_micro());
 
-	// TODO: Could be a ring buffer
 	uint32_t* testQueueIter = crana_stack_lock(&context->scratchStack);
 	uint32_t* testQueueEnd = testQueueIter+1;
 
@@ -1111,7 +1218,7 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 		}
 
 		uint32_t intersections = caabb_does_ray_intersect_lanes(rayO, rayD, rayMin, rayMax, boundMins, boundMaxs);
-		uint32_t activeLaneCountMask = ((1 << activeLaneCount) - 1);
+		uint32_t activeLaneCountMask = (1 << activeLaneCount) - 1;
 
 		if (intersections > 0)
 		{
@@ -1145,9 +1252,9 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 			__m128i childIndices = _mm_shuffle_epi8(queueIndices, shuffles[childIndexMask]);
 			__m128i parentIndices = _mm_shuffle_epi8(queueIndices, shuffles[parentIndexMask]);
 
-			context->renderStats.bvhHitCount += leafCount+parentCount; 
-			context->renderStats.bvhLeafHitCount += leafCount;
-			context->renderStats.bvhMissCount += activeLaneCount-(leafCount+parentCount);
+			cran_stat(context->renderStats.bvhHitCount += leafCount+parentCount); 
+			cran_stat(context->renderStats.bvhLeafHitCount += leafCount);
+			cran_stat(context->renderStats.bvhMissCount += activeLaneCount-(leafCount+parentCount));
 
 			union
 			{
@@ -1167,7 +1274,7 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 			for (uint32_t i = 0; i < parentCount; i++)
 			{
 				uint32_t nodeIndex = indexUnion.i[i];
-				assert(nodeIndex < bvh->count);
+				cran_assert(nodeIndex < bvh->count);
 				testQueueEnd[i*2] = bvh->jumps[nodeIndex].indices.jumps.left;
 				testQueueEnd[i*2 + 1] = bvh->jumps[nodeIndex].indices.jumps.right;
 			}
@@ -1175,7 +1282,7 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 		}
 		else
 		{
-			context->renderStats.bvhMissCount += activeLaneCount;
+			cran_stat(context->renderStats.bvhMissCount += activeLaneCount);
 		}
 
 
@@ -1185,7 +1292,7 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 	crana_stack_revert(&context->scratchStack);
 	crana_stack_commit(&context->stack, candidateIter);
 
-	context->renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime;
+	cran_stat(context->renderStats.bvhTraversalTime += cranpl_timestamp_micro() - traversalStartTime);
 
 	cranpr_end("bvh", "traverse");
 	return (uint32_t)(candidateIter - *candidates);
@@ -1194,7 +1301,7 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 static void generate_scene(render_context_t* context, ray_scene_t* scene)
 {
 	cranpr_begin("scene", "generate");
-	uint64_t startTime = cranpl_timestamp_micro();
+	cran_stat(uint64_t startTime = cranpl_timestamp_micro());
 
 	static mesh_source_t meshSource;
 	// Mesh
@@ -1444,7 +1551,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		crana_stack_free(&context->scratchStack, leafs);
 	}
 
-	context->renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime;
+	cran_stat(context->renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime);
 	cranpr_end("scene", "generate");
 }
 
@@ -1467,7 +1574,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		return (ray_hit_t) { 0 };
 	}
 
-	context->renderStats.rayCount++;
+	cran_stat(context->renderStats.rayCount++);
 
 	const float NoRayIntersection = FLT_MAX;
 
@@ -1484,7 +1591,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	} closestHitInfo = { 0 };
 	closestHitInfo.distance = NoRayIntersection;
 
-	uint64_t intersectionStartTime = cranpl_timestamp_micro();
+	cran_stat(uint64_t intersectionStartTime = cranpl_timestamp_micro());
 
 	// Candidates
 	{
@@ -1632,7 +1739,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 
 		crana_stack_free(&context->stack, candidates);
 	}
-	context->renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime;
+	cran_stat(context->renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime);
 
 	if (closestHitInfo.triangleId != 0)
 	{
@@ -1656,15 +1763,15 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		cranpr_end("scene", "cast");
 		return (ray_hit_t)
 		{
-			.light = cv3_mulf(shaderResults.light, light_attenuation(shaderResults.shadedSurface, rayO)),
+			.light = shaderResults.light,
 			.surface = shaderResults.shadedSurface,
 			.hit = true
 		};
 	}
 
-	uint64_t skyboxStartTime = cranpl_timestamp_micro();
+	cran_stat(uint64_t skyboxStartTime = cranpl_timestamp_micro());
 	cv3 skybox = (cv3) { 1000.0f, 1000.0f, 1000.0f };// sample_hdr(rayD, backgroundSampler);
-	context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime;
+	cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
 
 	context->depth--;
 
@@ -1793,6 +1900,11 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
 
 		ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
+		if (result.hit)
+		{
+			result.light = cv3_mulf(result.light, light_attenuation(result.surface, inputs.surface));
+		}
+
 		light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
 
 		cv3 albedoTint = microfacetData.albedoTint;
@@ -1826,6 +1938,11 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		float brdf = F*G*D*cf_rcp(4.0f*cv3_dot(castDir, normal)*cv3_dot(viewDir, normal));
 		
 		ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
+		if (result.hit)
+		{
+			result.light = cv3_mulf(result.light, light_attenuation(result.surface, inputs.surface));
+		}
+
 		light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
 		light = cv3_mul(light, microfacetData.specularTint); // TODO: absolutely no physics here but makes the render look nicer.
 
@@ -1932,7 +2049,7 @@ static void render_scene_async(void* cran_restrict data)
 				cv3 sceneColor = { 0 };
 				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
 				{
-					renderContext->renderStats.primaryRayCount++;
+					cran_stat(renderContext->renderStats.primaryRayCount++);
 
 					float randX = xOff + renderData->xStep * (random01f(&renderContext->randomSeed) - 0.5f);
 					float randY = yOff + renderData->yStep * (random01f(&renderContext->randomSeed) - 0.5f);
@@ -1965,7 +2082,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 4,
 		.renderWidth = 420,
 		.renderHeight = 360,
 		.useDirectionalMat = false
@@ -2007,14 +2124,14 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ 4.0f, 0.0f, 1.0f };
+	mainRenderData.origin = (cv3){ 1.0f, 0.0f, 0.5f };
 	mainRenderData.forward = (cv3){ .x = -1.0f,.y = 0.0f,.z = 0.0f };
 	mainRenderData.right = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
 
 	float* cran_restrict hdrImage = crana_stack_alloc(&mainRenderContext.stack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride * sizeof(float));
 
-	uint64_t renderStartTime = cranpl_timestamp_micro();
+	cran_stat(uint64_t renderStartTime = cranpl_timestamp_micro());
 
 	static render_queue_t mainRenderQueue = { 0 };
 	{
@@ -2072,13 +2189,13 @@ int main()
 		cranpl_wait_on_thread(threadHandles[i]);
 	}
 
-	mainRenderContext.renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime);
+	cran_stat(mainRenderContext.renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime));
 
 	// Image Space Effects
 	bool enableImageSpace = true;
 	if(enableImageSpace)
 	{
-		uint64_t imageSpaceStartTime = cranpl_timestamp_micro();
+		cran_stat(uint64_t imageSpaceStartTime = cranpl_timestamp_micro());
 		// reinhard tonemapping
 		for (int32_t y = 0; y < mainRenderData.imgHeight; y++)
 		{
@@ -2091,7 +2208,7 @@ int main()
 				hdrImage[readIndex + 2] = hdrImage[readIndex + 2] / (hdrImage[readIndex + 2] + 1.0f);
 			}
 		}
-		mainRenderContext.renderStats.imageSpaceTime = cranpl_timestamp_micro() - imageSpaceStartTime;
+		cran_stat(mainRenderContext.renderStats.imageSpaceTime = cranpl_timestamp_micro() - imageSpaceStartTime);
 	}
 
 	mainRenderContext.renderStats.totalTime = cranpl_timestamp_micro() - startTime;
@@ -2124,6 +2241,7 @@ int main()
 		if (error == 0)
 		{
 			fprintf(fileHandle, "Total Time: %f\n", micro_to_seconds(mainRenderContext.renderStats.totalTime));
+#ifdef cran_stats
 			fprintf(fileHandle, "\tScene Generation Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.sceneGenerationTime), (float)mainRenderContext.renderStats.sceneGenerationTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
 			fprintf(fileHandle, "\tRender Time: %f [%.2f%%]\n", micro_to_seconds(mainRenderContext.renderStats.renderTime), (float)mainRenderContext.renderStats.renderTime / (float)mainRenderContext.renderStats.totalTime * 100.0f);
 			fprintf(fileHandle, "----------\n");
@@ -2152,6 +2270,7 @@ int main()
 			fprintf(fileHandle, "\tScratch Stack\n");
 			fprintf(fileHandle, "\t\tStack Size: %" PRIu64 "\n", mainRenderContext.scratchStack.size);
 			fprintf(fileHandle, "\t\tStack Top: %" PRIu64 " [%.2f%%]\n", mainRenderContext.scratchStack.top, (float)mainRenderContext.scratchStack.top / (float)mainRenderContext.scratchStack.size*100.0f);
+#endif // cran_stats
 			fclose(fileHandle);
 		}
 	}
