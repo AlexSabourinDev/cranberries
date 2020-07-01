@@ -31,18 +31,25 @@ typedef struct
 		{
 			uint8_t* gbufferVShader;
 			uint32_t gbufferVShaderSize;
-
 			uint8_t* gbufferFShader;
 			uint32_t gbufferFShaderSize;
+			uint8_t* gbufferComputeShader;
+			uint32_t gbufferComputeShaderSize;
 		} deferred;
 	} materials;
 } crang_init_desc_t;
 
 typedef struct
 {
+	float pos[4];
+	float normal[4];
+} crang_vertex_t;
+
+typedef struct
+{
 	struct
 	{
-		float* data;
+		crang_vertex_t* data;
 		uint32_t count; // number of vertices (sets of 3 floats)
 	} vertices;
 
@@ -53,7 +60,9 @@ typedef struct
 	} indices;
 } crang_mesh_desc_t;
 
+// [Colums][Rows]
 typedef struct { float f[4][4]; } crang_mat4_t;
+typedef struct { float f[3][4]; } crang_mat4x3_t;
 static const crang_mat4_t crang_mat4_identity =
 {
 	{
@@ -75,7 +84,7 @@ typedef struct
 		struct
 		{
 			crang_mesh_id_t mesh;
-			crang_mat4_t const* transforms;
+			crang_mat4x3_t const* transforms;
 			uint32_t count;
 		} instances[crang_max_instances];
 	} batches[crang_material_count][crang_max_batches];
