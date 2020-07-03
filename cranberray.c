@@ -145,6 +145,8 @@ typedef struct
 	uint32_t samplesPerPixel;
 	uint32_t renderWidth;
 	uint32_t renderHeight;
+	uint32_t renderBlockWidth;
+	uint32_t renderBlockHeight;
 	bool useDirectionalMat; // Force Shader To Directional
 } render_config_t;
 render_config_t renderConfig;
@@ -1057,7 +1059,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 			// SAH
 			const float traversalRelativeCost = 0.25f;
-			sah[i] = traversalRelativeCost+((float)leftCount * caabb_surface_area(left) + (float)rightCount * caabb_surface_area(right)) / caabb_surface_area(bounds);
+			sah[i] = traversalRelativeCost+((float)leftCount * caabb_surface_area(left) + (float)rightCount * caabb_surface_area(right)) * cf_rcp(caabb_surface_area(bounds));
 		}
 
 		// Find our lowest cost bucket
@@ -1210,16 +1212,36 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 		cv3l boundMaxs = { 0 };
 
 		uint32_t activeLaneCount = min((uint32_t)(testQueueEnd - testQueueIter), cran_lane_count);
+
+		__m128 minLanes[cran_lane_count];
+		__m128 maxLanes[cran_lane_count];
 		for (uint32_t i = 0; i < activeLaneCount; i++)
 		{
 			uint32_t nodeIndex = testQueueIter[i];
-			cv3l_set(&boundMins, bvh->bounds[nodeIndex].min, i);
-			cv3l_set(&boundMaxs, bvh->bounds[nodeIndex].max, i);
+			minLanes[i] = _mm_load_ps(&bvh->bounds[nodeIndex].min.x);
+			maxLanes[i] = _mm_load_ps(&bvh->bounds[nodeIndex].max.x);
 		}
+
+		__m128 minLanesXY0 = _mm_shuffle_ps(minLanes[0], minLanes[1], _MM_SHUFFLE(1, 0, 1, 0));
+		__m128 minLanesXY1 = _mm_shuffle_ps(minLanes[2], minLanes[3], _MM_SHUFFLE(1, 0, 1, 0));
+		__m128 minLanesZ0 = _mm_shuffle_ps(minLanes[0], minLanes[1], _MM_SHUFFLE(3, 2, 3, 2));
+		__m128 minLanesZ1 = _mm_shuffle_ps(minLanes[2], minLanes[3], _MM_SHUFFLE(3, 2, 3, 2));
+
+		boundMins.x.sse = _mm_shuffle_ps(minLanesXY0, minLanesXY1, _MM_SHUFFLE(2, 0, 2, 0));
+		boundMins.y.sse = _mm_shuffle_ps(minLanesXY0, minLanesXY1, _MM_SHUFFLE(3, 1, 3, 1));
+		boundMins.z.sse = _mm_shuffle_ps(minLanesZ0, minLanesZ1, _MM_SHUFFLE(2, 0, 2, 0));
+
+		__m128 maxLanesXY0 = _mm_shuffle_ps(maxLanes[0], maxLanes[1], _MM_SHUFFLE(1, 0, 1, 0));
+		__m128 maxLanesXY1 = _mm_shuffle_ps(maxLanes[2], maxLanes[3], _MM_SHUFFLE(1, 0, 1, 0));
+		__m128 maxLanesZ0 = _mm_shuffle_ps(maxLanes[0], maxLanes[1], _MM_SHUFFLE(3, 2, 3, 2));
+		__m128 maxLanesZ1 = _mm_shuffle_ps(maxLanes[2], maxLanes[3], _MM_SHUFFLE(3, 2, 3, 2));
+
+		boundMaxs.x.sse = _mm_shuffle_ps(maxLanesXY0, maxLanesXY1, _MM_SHUFFLE(2, 0, 2, 0));
+		boundMaxs.y.sse = _mm_shuffle_ps(maxLanesXY0, maxLanesXY1, _MM_SHUFFLE(3, 1, 3, 1));
+		boundMaxs.z.sse = _mm_shuffle_ps(maxLanesZ0, maxLanesZ1, _MM_SHUFFLE(2, 0, 2, 0));
 
 		uint32_t intersections = caabb_does_ray_intersect_lanes(rayO, rayD, rayMin, rayMax, boundMins, boundMaxs);
 		uint32_t activeLaneCountMask = (1 << activeLaneCount) - 1;
-
 		if (intersections > 0)
 		{
 			intersections = intersections & activeLaneCountMask;
@@ -2082,9 +2104,11 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 4,
-		.renderWidth = 420,
-		.renderHeight = 360,
+		.samplesPerPixel = 10,
+		.renderWidth = 512,
+		.renderHeight = 384,
+		.renderBlockWidth = 16,
+		.renderBlockHeight = 12,
 		.useDirectionalMat = false
 	};
 
@@ -2135,24 +2159,39 @@ int main()
 
 	static render_queue_t mainRenderQueue = { 0 };
 	{
-		mainRenderQueue.chunks = crana_stack_alloc(&mainRenderContext.stack, sizeof(render_chunk_t) * mainRenderData.imgHeight);
-		for (int32_t i = 0; i < mainRenderData.imgHeight; i++)
+		const uint32_t blockWidth = renderConfig.renderBlockWidth;
+		const uint32_t blockHeight = renderConfig.renderBlockHeight;
+		const uint64_t imageSize = (uint64_t)mainRenderData.imgHeight * (uint64_t)mainRenderData.imgWidth;
+		const uint32_t blockCount = (uint32_t)(imageSize / (uint64_t)(blockWidth*blockHeight));
+		cran_assert(imageSize % (blockWidth*blockHeight) == 0); // No leftovers
+
+		mainRenderQueue.chunks = crana_stack_alloc(&mainRenderContext.stack, sizeof(render_chunk_t) * blockCount);
+		for (uint32_t i = 0; i < blockCount; i++)
 		{
+			uint32_t blockXIndex = i % (mainRenderData.imgWidth / blockWidth);
+			uint32_t blockYIndex = i / (mainRenderData.imgWidth / blockWidth);
+
+			int32_t xStart = -mainRenderData.halfImgWidth + blockWidth * blockXIndex;
+			int32_t yStart = -mainRenderData.halfImgHeight + blockHeight * blockYIndex;
+ 
 			mainRenderQueue.chunks[i] = (render_chunk_t)
 			{
-				.xStart = -mainRenderData.halfImgWidth,
-				.xEnd = mainRenderData.halfImgWidth,
-				.yStart = -mainRenderData.halfImgHeight + i,
-				.yEnd = -mainRenderData.halfImgHeight + i + 1
+				.xStart = xStart,
+				.xEnd = xStart + blockWidth,
+				.yStart = yStart,
+				.yEnd = yStart + blockHeight
 			};
+
+			assert(mainRenderQueue.chunks[i].yEnd <= mainRenderData.halfImgHeight);
+			assert(mainRenderQueue.chunks[i].xEnd <= mainRenderData.halfImgWidth);
 		}
-		mainRenderQueue.count = mainRenderData.imgHeight;
+		mainRenderQueue.count = blockCount;
 	}
 
 	uint64_t threadStackSize = 1024 * 1024 * 1024 / cranpl_get_core_count() / 2;
 
 	thread_context_t* threadContexts = crana_stack_alloc(&mainRenderContext.stack, sizeof(thread_context_t) * cranpl_get_core_count());
-	void** threadHandles = crana_stack_alloc(&mainRenderContext.stack, sizeof(void*) * cranpl_get_core_count() - 1);
+	void** threadHandles = crana_stack_alloc(&mainRenderContext.stack, sizeof(void*) * cranpl_get_core_count());
 	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
 	{
 		threadContexts[i] = (thread_context_t)
@@ -2177,17 +2216,12 @@ int main()
 		};
 	}
 
-	for (uint32_t i = 0; i < cranpl_get_core_count() - 1; i++)
+	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
 	{
 		threadHandles[i] = cranpl_create_thread(&render_scene_async, &threadContexts[i]);
 	}
 
-	render_scene_async(&threadContexts[cranpl_get_core_count() - 1]);
-
-	for (uint32_t i = 0; i < cranpl_get_core_count() - 1; i++)
-	{
-		cranpl_wait_on_thread(threadHandles[i]);
-	}
+	cranpl_wait_on_threads(threadHandles, cranpl_get_core_count());
 
 	cran_stat(mainRenderContext.renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime));
 

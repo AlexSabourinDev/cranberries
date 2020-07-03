@@ -195,6 +195,11 @@ void cranpl_wait_on_thread(void* threadHandle)
 	WaitForSingleObjectEx(threadHandle, INFINITE, FALSE);
 }
 
+void cranpl_wait_on_threads(void** threadHandles, uint32_t count)
+{
+	WaitForMultipleObjectsEx(count, threadHandles, TRUE, INFINITE, FALSE);
+}
+
 long cranpl_atomic_increment(cranpl_atomic_int_t* atomic)
 {
 	return InterlockedIncrement(&atomic->value);
