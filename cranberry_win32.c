@@ -202,6 +202,7 @@ void cranpl_wait_on_threads(void** threadHandles, uint32_t count)
 
 long cranpl_atomic_increment(cranpl_atomic_int_t* atomic)
 {
+	assert((uintptr_t)&atomic->value % 4 == 0);
 	return InterlockedIncrement(&atomic->value);
 }
 

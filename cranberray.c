@@ -1208,43 +1208,14 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 	*testQueueIter = 0;
 	while (testQueueEnd > testQueueIter)
 	{
-		cv3l boundMins = { 0 };
-		cv3l boundMaxs = { 0 };
-
 		uint32_t activeLaneCount = min((uint32_t)(testQueueEnd - testQueueIter), cran_lane_count);
-
-		__m128 minLanes[cran_lane_count];
-		__m128 maxLanes[cran_lane_count];
-		for (uint32_t i = 0; i < activeLaneCount; i++)
-		{
-			uint32_t nodeIndex = testQueueIter[i];
-			minLanes[i] = _mm_load_ps(&bvh->bounds[nodeIndex].min.x);
-			maxLanes[i] = _mm_load_ps(&bvh->bounds[nodeIndex].max.x);
-		}
-
-		__m128 minLanesXY0 = _mm_shuffle_ps(minLanes[0], minLanes[1], _MM_SHUFFLE(1, 0, 1, 0));
-		__m128 minLanesXY1 = _mm_shuffle_ps(minLanes[2], minLanes[3], _MM_SHUFFLE(1, 0, 1, 0));
-		__m128 minLanesZ0 = _mm_shuffle_ps(minLanes[0], minLanes[1], _MM_SHUFFLE(3, 2, 3, 2));
-		__m128 minLanesZ1 = _mm_shuffle_ps(minLanes[2], minLanes[3], _MM_SHUFFLE(3, 2, 3, 2));
-
-		boundMins.x.sse = _mm_shuffle_ps(minLanesXY0, minLanesXY1, _MM_SHUFFLE(2, 0, 2, 0));
-		boundMins.y.sse = _mm_shuffle_ps(minLanesXY0, minLanesXY1, _MM_SHUFFLE(3, 1, 3, 1));
-		boundMins.z.sse = _mm_shuffle_ps(minLanesZ0, minLanesZ1, _MM_SHUFFLE(2, 0, 2, 0));
-
-		__m128 maxLanesXY0 = _mm_shuffle_ps(maxLanes[0], maxLanes[1], _MM_SHUFFLE(1, 0, 1, 0));
-		__m128 maxLanesXY1 = _mm_shuffle_ps(maxLanes[2], maxLanes[3], _MM_SHUFFLE(1, 0, 1, 0));
-		__m128 maxLanesZ0 = _mm_shuffle_ps(maxLanes[0], maxLanes[1], _MM_SHUFFLE(3, 2, 3, 2));
-		__m128 maxLanesZ1 = _mm_shuffle_ps(maxLanes[2], maxLanes[3], _MM_SHUFFLE(3, 2, 3, 2));
-
-		boundMaxs.x.sse = _mm_shuffle_ps(maxLanesXY0, maxLanesXY1, _MM_SHUFFLE(2, 0, 2, 0));
-		boundMaxs.y.sse = _mm_shuffle_ps(maxLanesXY0, maxLanesXY1, _MM_SHUFFLE(3, 1, 3, 1));
-		boundMaxs.z.sse = _mm_shuffle_ps(maxLanesZ0, maxLanesZ1, _MM_SHUFFLE(2, 0, 2, 0));
+		cv3l boundMins = cv3l_indexed_load(bvh->bounds, sizeof(caabb), offsetof(caabb, min), testQueueIter, activeLaneCount);
+		cv3l boundMaxs = cv3l_indexed_load(bvh->bounds, sizeof(caabb), offsetof(caabb, max), testQueueIter, activeLaneCount);
 
 		uint32_t intersections = caabb_does_ray_intersect_lanes(rayO, rayD, rayMin, rayMax, boundMins, boundMaxs);
-		uint32_t activeLaneCountMask = (1 << activeLaneCount) - 1;
 		if (intersections > 0)
 		{
-			intersections = intersections & activeLaneCountMask;
+			intersections = intersections & ((1 << activeLaneCount) - 1);
 
 #define _MM_SHUFFLE_EPI8(i3,i2,i1,i0) _mm_set_epi8(i3*4+3,i3*4+2,i3*4+1,i3*4,i2*4+3,i2*4+2,i2*4+1,i2*4,i1*4+3,i1*4+2,i1*4+1,i1*4,i0*4+3,i0*4+2,i0*4+1,i0*4)
 			__m128i shuffles[16] = 
@@ -1792,7 +1763,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	cran_stat(uint64_t skyboxStartTime = cranpl_timestamp_micro());
-	cv3 skybox = (cv3) { 1000.0f, 1000.0f, 1000.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 100.0f, 100.0f, 100.0f };// sample_hdr(rayD, backgroundSampler);
 	cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
 
 	context->depth--;
@@ -2034,9 +2005,9 @@ typedef struct
 
 typedef struct
 {
+	cranpl_atomic_int_t next;
 	render_chunk_t* chunks;
 	int32_t count;
-	cranpl_atomic_int_t next;
 } render_queue_t;
 
 typedef struct
@@ -2104,7 +2075,7 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 128,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,

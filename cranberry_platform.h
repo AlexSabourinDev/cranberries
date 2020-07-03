@@ -5,6 +5,7 @@
 
 #ifdef _MSC_BUILD
 #define cran_restrict __restrict
+#define cran_alignas(a) __declspec(align(a))
 #else
 #define cran_restrict restrict
 #endif
@@ -31,7 +32,7 @@ void* cranpl_create_thread(void(*function)(void*), void* data);
 void cranpl_wait_on_thread(void* threadHandle);
 void cranpl_wait_on_threads(void** threadHandle, uint32_t count);
 
-typedef struct
+cran_alignas(4) typedef struct
 {
 	volatile long value;
 } cranpl_atomic_int_t;

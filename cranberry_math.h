@@ -126,6 +126,9 @@ cran_forceinline cv3 cv3_from_spherical(float theta, float phi, float radius);
 // V3 Lane API
 cran_forceinline cv3l cv3l_replicate(cv3 v);
 cran_forceinline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i);
+// Stride (in bytes) is stride to next vector
+// Offset (in bytes) is offset from strided element to vector
+cran_forceinline cv3l cv3l_indexed_load(void const* vectors, uint32_t stride, uint32_t offset, uint32_t* indices, uint32_t indexCount);
 cran_forceinline cv3l cv3l_add(cv3l l, cv3l r);
 cran_forceinline cv3l cv3l_sub(cv3l l, cv3l r);
 cran_forceinline cv3l cv3l_mul(cv3l l, cv3l r);
@@ -443,6 +446,28 @@ cran_forceinline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i)
 	lanes->x.f[i] = v.x;
 	lanes->y.f[i] = v.y;
 	lanes->z.f[i] = v.z;
+}
+
+cran_forceinline cv3l cv3l_indexed_load(void const* vectors, uint32_t stride, uint32_t offset, uint32_t* indices, uint32_t indexCount)
+{
+	__m128 loadedVectors[cran_lane_count];
+	for (uint32_t i = 0; i < indexCount; i++)
+	{
+		uint8_t const* vectorData = (uint8_t*)vectors;
+		loadedVectors[i] = _mm_load_ps((float const*)(vectorData + indices[i] * stride + offset));
+	}
+
+	__m128 XY0 = _mm_shuffle_ps(loadedVectors[0], loadedVectors[1], _MM_SHUFFLE(1, 0, 1, 0));
+	__m128 XY1 = _mm_shuffle_ps(loadedVectors[2], loadedVectors[3], _MM_SHUFFLE(1, 0, 1, 0));
+	__m128 Z0 = _mm_shuffle_ps(loadedVectors[0], loadedVectors[1], _MM_SHUFFLE(3, 2, 3, 2));
+	__m128 Z1 = _mm_shuffle_ps(loadedVectors[2], loadedVectors[3], _MM_SHUFFLE(3, 2, 3, 2));
+
+	return (cv3l)
+	{
+		.x = {.sse = _mm_shuffle_ps(XY0, XY1, _MM_SHUFFLE(2, 0, 2, 0))},
+		.y = {.sse = _mm_shuffle_ps(XY0, XY1, _MM_SHUFFLE(3, 1, 3, 1))},
+		.z = {.sse = _mm_shuffle_ps(Z0, Z1, _MM_SHUFFLE(2, 0, 2, 0))}
+	};
 }
 
 cran_forceinline cv3l cv3l_add(cv3l l, cv3l r)
