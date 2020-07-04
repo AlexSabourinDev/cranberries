@@ -423,6 +423,12 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 
 					materials[materialIndex].refractiveIndex = r;
 				}
+				else if (memcmp(fileIter, "Ns ", 3) == 0)
+				{
+					float s=strtof(fileIter + 2, &fileIter);
+
+					materials[materialIndex].specularAmount = s;
+				}
 				else if (memcmp(fileIter, "map_Kd ", strlen("map_Kd ")) == 0)
 				{
 					char* albedoMap = fileIter + strlen("map_Kd") + 1;
@@ -455,9 +461,9 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					assert(mapEnd != NULL);
 
 					uint64_t nameLength = (mapEnd - map);
-					materials[materialIndex].glossMap = allocator.alloc(allocator.instance, nameLength + 1);
-					memcpy(materials[materialIndex].glossMap, map, nameLength);
-					materials[materialIndex].glossMap[nameLength] = '\0';
+					materials[materialIndex].specMap = allocator.alloc(allocator.instance, nameLength + 1);
+					memcpy(materials[materialIndex].specMap, map, nameLength);
+					materials[materialIndex].specMap[nameLength] = '\0';
 				}
 				else if (memcmp(fileIter, "map_d ", strlen("map_d ")) == 0)
 				{

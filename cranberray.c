@@ -771,11 +771,11 @@ typedef struct
 	cv3 specularTint;
 	sampler_t albedoSampler;
 	sampler_t bumpSampler;
-	sampler_t glossSampler;
+	sampler_t specSampler;
 	sampler_t maskSampler;
 	texture_id_t albedoTexture;
 	texture_id_t bumpTexture;
-	texture_id_t glossTexture;
+	texture_id_t specTexture;
 	texture_id_t maskTexture;
 	float refractiveIndex;
 	float gloss;
@@ -1442,7 +1442,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			microfacets[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
 			microfacets[i].refractiveIndex = matLib.materials[i].refractiveIndex;
 			microfacets[i].specularTint = (cv3) { matLib.materials[i].specular[0], matLib.materials[i].specular[1], matLib.materials[i].specular[2] };
-			microfacets[i].gloss = 0.0f;
+			microfacets[i].gloss = matLib.materials[i].specularAmount / 100.0f; // Arbitrary conversion from specularity to gloss
 
 			microfacets[i].albedoSampler = (sampler_t) {.type = sample_bilinear };
 			if (matLib.materials[i].albedoMap != NULL)
@@ -1456,10 +1456,10 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 				microfacets[i].bumpTexture = texture_request(&textureStore, matLib.materials[i].bumpMap);
 			}
 
-			microfacets[i].glossSampler = (sampler_t) {.type = sample_bilinear };
-			if (matLib.materials[i].glossMap != NULL)
+			microfacets[i].specSampler = (sampler_t) {.type = sample_bilinear };
+			if (matLib.materials[i].specMap != NULL)
 			{
-				microfacets[i].glossTexture = texture_request(&textureStore, matLib.materials[i].glossMap);
+				microfacets[i].specTexture = texture_request(&textureStore, matLib.materials[i].specMap);
 
 			}
 
@@ -1768,7 +1768,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	cran_stat(uint64_t skyboxStartTime = cranpl_timestamp_micro());
-	cv3 skybox = (cv3) { 100.0f, 100.0f, 100.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 1000.0f, 1000.0f, 1000.0f };// sample_hdr(rayD, backgroundSampler);
 	cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
 
 	context->depth--;
@@ -1871,13 +1871,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	normal = cv3_normalize(normal);
 	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
 
-	float gloss = microfacetData.gloss;
-	if (microfacetData.glossTexture.id != 0)
-	{
-		gloss = sampler_sample(&scene->textureStore, microfacetData.glossSampler, microfacetData.glossTexture, inputs.uv).x;
-	}
-	float roughness = fmaxf(1.0f - gloss, 0.01f);
-
+	float roughness = fmaxf(1.0f - microfacetData.gloss, 0.01f);
 	float r1 = random01f(&context->randomSeed);
 	float r2 = random01f(&context->randomSeed);
 	cv3 h = hemisphere_surface_random_ggx_h(r1, r2, roughness);
@@ -1943,7 +1937,11 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		}
 
 		light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
-		light = cv3_mul(light, microfacetData.specularTint); // TODO: absolutely no physics here but makes the render look nicer.
+
+		cv4 specColor = sampler_sample(&scene->textureStore, microfacetData.specSampler, microfacetData.specTexture, inputs.uv);
+		specColor = gamma_to_linear(specColor);
+		cv3 specularAlbedo = cv3_mul(microfacetData.specularTint, (cv3) { specColor.x, specColor.y, specColor.z });
+		light = cv3_mul(light, specularAlbedo); // TODO: Is there any physics behind this specular albedo concept?
 
 		pdf = D*chn*cf_rcp(4.0f*cv3_dot(castDir,h))*F;
 	}
@@ -2106,12 +2104,12 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 1,
+		.samplesPerPixel = 256,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,
 		.renderBlockHeight = 12,
-		.useDirectionalMat = true
+		.useDirectionalMat = false
 	};
 
 	// 3GB for persistent memory
@@ -2150,7 +2148,7 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ 1.0f, 0.0f, 0.5f };
+	mainRenderData.origin = (cv3){ 1.0f, 0.0f, 1.0f };
 	mainRenderData.forward = (cv3){ .x = -1.0f,.y = 0.0f,.z = 0.0f };
 	mainRenderData.right = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
 	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
