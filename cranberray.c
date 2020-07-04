@@ -207,6 +207,11 @@ static float rgb_to_luminance(float r, float g, float b)
 	return (0.2126f*r + 0.7152f*g + 0.0722f*b);
 }
 
+static cv4 gamma_to_linear(cv4 color)
+{
+	return (cv4) { color.x*color.x, color.y*color.y, color.z*color.z, color.w };
+}
+
 static bool sphere_does_ray_intersect(cv3 rayO, cv3 rayD, float sphereR)
 {
 	float projectedDistance = -cv3_dot(rayO, rayD);
@@ -1902,6 +1907,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 
 		cv3 albedoTint = microfacetData.albedoTint;
 		cv4 samplerAlbedo = sampler_sample(&scene->textureStore, microfacetData.albedoSampler, microfacetData.albedoTexture, inputs.uv);
+		samplerAlbedo = gamma_to_linear(samplerAlbedo);
 
 		cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
 		light = cv3_mul(light, cv3_mulf(albedo, cran_rpi));
@@ -2026,8 +2032,9 @@ static void render_scene_async(void* cran_restrict data)
 	render_data_t const* renderData = threadContext->renderData;
 	render_queue_t* renderQueue = threadContext->renderQueue;
 
-	int32_t chunkIdx = cranpl_atomic_increment(&renderQueue->next);
-	for (; chunkIdx < renderQueue->count; chunkIdx = cranpl_atomic_increment(&renderQueue->next))
+	// Read chunk index as index-1, since our value starts at 0 we would need to read the pre-increment value.
+	int32_t chunkIdx = cranpl_atomic_increment(&renderQueue->next) - 1;
+	for (; chunkIdx < renderQueue->count; chunkIdx = cranpl_atomic_increment(&renderQueue->next) - 1)
 	{
 		render_chunk_t chunk = renderQueue->chunks[chunkIdx];
 
@@ -2039,21 +2046,45 @@ static void render_scene_async(void* cran_restrict data)
 			{
 				float xOff = renderData->xStep * (float)x;
 
+				// N-Rooks sampling
+				// http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.15.1601&rep=rep1&type=pdf
+				cv2* samplingPoints = crana_stack_alloc(&renderContext->stack, sizeof(cv2) * renderConfig.samplesPerPixel);
+				
+				float rsamplesPerPixel = cf_rcp((float)renderConfig.samplesPerPixel);
+				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
+				{
+					samplingPoints[i] = (cv2)
+					{
+						.x = random01f(&renderContext->randomSeed) * rsamplesPerPixel + rsamplesPerPixel * (float)i,
+						.y = random01f(&renderContext->randomSeed) * rsamplesPerPixel + rsamplesPerPixel * (float)i
+					};
+				}
+
+				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
+				{
+					float t = samplingPoints[i].x;
+					uint32_t source = randomRange(&renderContext->randomSeed, i, renderConfig.samplesPerPixel);
+					samplingPoints[i].x = samplingPoints[source].x;
+					samplingPoints[source].x = t;
+				}
+
 				cv3 sceneColor = { 0 };
 				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
 				{
 					cran_stat(renderContext->renderStats.primaryRayCount++);
 
-					float randX = xOff + renderData->xStep * (random01f(&renderContext->randomSeed) - 0.5f);
-					float randY = yOff + renderData->yStep * (random01f(&renderContext->randomSeed) - 0.5f);
+					float randX = xOff + renderData->xStep * (samplingPoints[i].x - 0.5f);
+					float randY = yOff + renderData->yStep * (samplingPoints[i].y - 0.5f);
 
 					// Construct our ray as a vector going from our origin to our near plane
 					// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
 					cv3 rayDir = cv3_add(cv3_mulf(renderData->forward, renderData->near), cv3_add(cv3_mulf(renderData->right, randX), cv3_mulf(renderData->up, randY)));
 
 					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir, ~0ull);
-					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, cf_rcp((float)renderConfig.samplesPerPixel)));
+					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, rsamplesPerPixel));
 				}
+
+				crana_stack_free(&renderContext->stack, samplingPoints);
 
 				int32_t imgIdx = ((y + renderData->halfImgHeight) * renderData->imgWidth + (x + renderData->halfImgWidth)) * renderData->imgStride;
 				threadContext->hdrOutput[imgIdx + 0] = sceneColor.x;
@@ -2075,12 +2106,12 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 128,
+		.samplesPerPixel = 1,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,
 		.renderBlockHeight = 12,
-		.useDirectionalMat = false
+		.useDirectionalMat = true
 	};
 
 	// 3GB for persistent memory
@@ -2130,9 +2161,9 @@ int main()
 
 	static render_queue_t mainRenderQueue = { 0 };
 	{
-		const uint32_t blockWidth = renderConfig.renderBlockWidth;
-		const uint32_t blockHeight = renderConfig.renderBlockHeight;
-		const uint64_t imageSize = (uint64_t)mainRenderData.imgHeight * (uint64_t)mainRenderData.imgWidth;
+		const int32_t blockWidth = renderConfig.renderBlockWidth;
+		const int32_t blockHeight = renderConfig.renderBlockHeight;
+		const int64_t imageSize = (int64_t)mainRenderData.imgHeight * (int64_t)mainRenderData.imgWidth;
 		const uint32_t blockCount = (uint32_t)(imageSize / (uint64_t)(blockWidth*blockHeight));
 		cran_assert(imageSize % (blockWidth*blockHeight) == 0); // No leftovers
 
@@ -2223,6 +2254,7 @@ int main()
 		uint8_t* cran_restrict bitmap = crana_stack_alloc(&mainRenderContext.scratchStack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride);
 		for (int32_t i = 0; i < mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride; i+=mainRenderData.imgStride)
 		{
+			// Gamma correction pow(x,1/2)
 			bitmap[i + 0] = (uint8_t)(255.99f * sqrtf(fminf(hdrImage[i + 2], 1.0f)));
 			bitmap[i + 1] = (uint8_t)(255.99f * sqrtf(fminf(hdrImage[i + 1], 1.0f)));
 			bitmap[i + 2] = (uint8_t)(255.99f * sqrtf(fminf(hdrImage[i + 0], 1.0f)));
