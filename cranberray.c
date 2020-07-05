@@ -148,6 +148,8 @@ typedef struct
 	uint32_t renderBlockWidth;
 	uint32_t renderBlockHeight;
 	bool useDirectionalMat; // Force Shader To Directional
+	bool renderToWindow;
+	uint32_t renderRefreshRate;
 } render_config_t;
 render_config_t renderConfig;
 
@@ -392,7 +394,7 @@ static cv4 sample_rg_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, ui
 	color.x = (float)image[readIndex + 0] / 255.0f;
 	color.y = (float)image[readIndex + 1] / 255.0f;
 	color.z = 0.0f;
-	color.w = 0.0f;
+	color.w = 1.0f;
 
 	return color;
 }
@@ -414,7 +416,8 @@ static cv4 sample_r_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uin
 	x = x >= width ? width - 1 : x;
 	uint32_t readIndex = y * width + x;
 
-	return (cv4) { (float)image[readIndex] / 255.0f, 0.0f, 0.0f, 0.0f };
+	float f = (float)image[readIndex] / 255.0f;
+	return (cv4) { f, f, f, f };
 }
 
 static cv4 sample_rgba_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
@@ -490,7 +493,7 @@ static cv4 sample_rgb_f32(cv2 uv, uint8_t* cran_restrict image, uint32_t width, 
 	color.x = ((float*)image)[readIndex + 0];
 	color.y = ((float*)image)[readIndex + 1];
 	color.z = ((float*)image)[readIndex + 2];
-	color.w = 0.0f;
+	color.w = 1.0f;
 
 	return color;
 }
@@ -1768,7 +1771,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	cran_stat(uint64_t skyboxStartTime = cranpl_timestamp_micro());
-	cv3 skybox = (cv3) { 1000.0f, 1000.0f, 1000.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 200.0f, 200.0f, 200.0f };// sample_hdr(rayD, backgroundSampler);
 	cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
 
 	context->depth--;
@@ -2067,6 +2070,7 @@ static void render_scene_async(void* cran_restrict data)
 				}
 
 				cv3 sceneColor = { 0 };
+				cv3 runningTotal = { 0 };
 				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
 				{
 					cran_stat(renderContext->renderStats.primaryRayCount++);
@@ -2079,6 +2083,19 @@ static void render_scene_async(void* cran_restrict data)
 					cv3 rayDir = cv3_add(cv3_mulf(renderData->forward, renderData->near), cv3_add(cv3_mulf(renderData->right, randX), cv3_mulf(renderData->up, randY)));
 
 					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir, ~0ull);
+
+					if (renderConfig.renderToWindow)
+					{
+						runningTotal = cv3_add(runningTotal, hit.light);
+						cv3 displayColor = cv3_mulf(runningTotal, cf_rcp((float)(i + 1)));
+
+						int32_t imgIdx = ((y + renderData->halfImgHeight) * renderData->imgWidth + (x + renderData->halfImgWidth)) * renderData->imgStride;
+						threadContext->hdrOutput[imgIdx + 0] = displayColor.x;
+						threadContext->hdrOutput[imgIdx + 1] = displayColor.y;
+						threadContext->hdrOutput[imgIdx + 2] = displayColor.z;
+						threadContext->hdrOutput[imgIdx + 3] = 1.0f;
+					}
+
 					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, rsamplesPerPixel));
 				}
 
@@ -2096,6 +2113,40 @@ static void render_scene_async(void* cran_restrict data)
 	cranpr_flush_thread_buffer();
 }
 
+typedef struct
+{
+	uint32_t width;
+	uint32_t height;
+	uint32_t stride;
+	void* cran_restrict window;
+	float* source;
+	uint8_t* cran_restrict output;
+} draw_data_t;
+
+static void on_draw(draw_data_t* drawData)
+{
+	for (uint32_t y = 0; y < drawData->height; y++)
+	{
+		for (uint32_t x = 0; x < drawData->width; x++)
+		{
+			uint32_t si = (y * drawData->width + x) * drawData->stride;
+			uint32_t di = ((drawData->height - y - 1) * drawData->width + x) * drawData->stride;
+
+			// Gamma correction pow(x,1/2)
+			float r = drawData->source[si + 0] / (drawData->source[si + 0] + 1.0f);
+			float g = drawData->source[si + 1] / (drawData->source[si + 1] + 1.0f);
+			float b = drawData->source[si + 2] / (drawData->source[si + 2] + 1.0f);
+			float a = drawData->source[si + 3];
+
+			drawData->output[di + 0] = (uint8_t)(255.99f * sqrtf(fminf(b, 1.0f)));
+			drawData->output[di + 1] = (uint8_t)(255.99f * sqrtf(fminf(g, 1.0f)));
+			drawData->output[di + 2] = (uint8_t)(255.99f * sqrtf(fminf(r, 1.0f)));
+			drawData->output[di + 3] = (uint8_t)(255.99f * a);
+		}
+	}
+	cranpl_blit_bmp(drawData->window, drawData->output, drawData->width, drawData->height);
+}
+
 int main()
 {
 	cranpr_init();
@@ -2104,12 +2155,14 @@ int main()
 	renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 256,
+		.samplesPerPixel = 10,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,
 		.renderBlockHeight = 12,
-		.useDirectionalMat = false
+		.useDirectionalMat = false,
+		.renderToWindow = true,
+		.renderRefreshRate = 1000
 	};
 
 	// 3GB for persistent memory
@@ -2216,12 +2269,44 @@ int main()
 		};
 	}
 
+	void* cran_restrict window = NULL;
+	uint8_t* cran_restrict windowBitmap = NULL;
+	if (renderConfig.renderToWindow)
+	{
+		window = cranpl_create_window("Cranberray", renderConfig.renderWidth, renderConfig.renderHeight);
+		windowBitmap = crana_stack_alloc(&mainRenderContext.stack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride);
+		memset(windowBitmap, 0, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride);
+	}
+
 	for (uint32_t i = 0; i < cranpl_get_core_count(); i++)
 	{
 		threadHandles[i] = cranpl_create_thread(&render_scene_async, &threadContexts[i]);
 	}
 
-	cranpl_wait_on_threads(threadHandles, cranpl_get_core_count());
+
+	static draw_data_t drawData;
+	drawData = (draw_data_t)
+	{
+		.width = renderConfig.renderWidth,
+		.height = renderConfig.renderHeight,
+		.stride = 4,
+		.window = window,
+		.source = hdrImage,
+		.output = windowBitmap
+	};
+
+	if (renderConfig.renderToWindow)
+	{
+		while (!cranpl_wait_on_threads(threadHandles, cranpl_get_core_count(), renderConfig.renderRefreshRate))
+		{
+			on_draw(&drawData);
+			cranpl_tick_window(window);
+		}
+	}
+	else
+	{
+		cranpl_wait_on_threads(threadHandles, cranpl_get_core_count(), cranpl_infinite_wait);
+	}
 
 	cran_stat(mainRenderContext.renderStats.renderTime = (cranpl_timestamp_micro() - renderStartTime));
 
@@ -2260,7 +2345,10 @@ int main()
 		}
 
 		cranpl_write_bmp("render.bmp", bitmap, mainRenderData.imgWidth, mainRenderData.imgHeight);
-		cranpl_open_file_with_default_app("render.bmp");
+		if (!renderConfig.renderToWindow)
+		{
+			cranpl_open_file_with_default_app("render.bmp");
+		}
 		crana_stack_free(&mainRenderContext.scratchStack, bitmap);
 	}
 
@@ -2308,6 +2396,16 @@ int main()
 #endif // cran_stats
 			fclose(fileHandle);
 		}
+	}
+
+	if (renderConfig.renderToWindow)
+	{
+		// Keep our window around until it's closed manually
+		while (!cranpl_tick_window(window))
+		{
+			on_draw(&drawData);
+		}
+		cranpl_destroy_window(window);
 	}
 
 	// Not worrying about individual memory cleanup, stack allocator is cleaned up in one swoop anyways.

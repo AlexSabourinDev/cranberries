@@ -104,6 +104,19 @@ bool cranpl_tick_window(void* cran_restrict windowHandle)
 	return isDone;
 }
 
+void cranpl_blit_bmp(void* window, uint8_t* cran_restrict pixels, uint32_t width, uint32_t height)
+{
+	HBITMAP map = CreateBitmap(width, height, 1, 8*4, pixels);
+	HDC windowDC = GetDC(window);
+	HDC src = CreateCompatibleDC(windowDC);
+	SelectObject(src, map);
+
+	RECT rect;
+	GetWindowRect(window, &rect);
+	StretchBlt(windowDC, 0, 0, rect.right - rect.left, rect.bottom - rect.top, src, 0, 0, width, height, SRCCOPY);
+	DeleteDC(src);
+}
+
 void cranpl_destroy_window(void* cran_restrict windowHandle)
 {
 	DestroyWindow(windowHandle);
@@ -195,9 +208,10 @@ void cranpl_wait_on_thread(void* threadHandle)
 	WaitForSingleObjectEx(threadHandle, INFINITE, FALSE);
 }
 
-void cranpl_wait_on_threads(void** threadHandles, uint32_t count)
+bool cranpl_wait_on_threads(void** threadHandles, uint32_t count, uint32_t waitTime)
 {
-	WaitForMultipleObjectsEx(count, threadHandles, TRUE, INFINITE, FALSE);
+	DWORD result = WaitForMultipleObjectsEx(count, threadHandles, TRUE, waitTime, FALSE);
+	return result == WAIT_OBJECT_0;
 }
 
 long cranpl_atomic_increment(cranpl_atomic_int_t* atomic)

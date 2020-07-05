@@ -13,6 +13,7 @@
 void cranpl_write_bmp(char const* cran_restrict fileName, uint8_t* cran_restrict pixels, uint32_t width, uint32_t height);
 void* cran_restrict cranpl_create_window(char const* cran_restrict windowName, uint32_t width, uint32_t height);
 bool cranpl_tick_window(void* cran_restrict windowHandle);
+void cranpl_blit_bmp(void* window, uint8_t* cran_restrict pixels, uint32_t width, uint32_t height);
 void cranpl_destroy_window(void* cran_restrict windowHandle);
 
 uint64_t cranpl_timestamp_micro(void);
@@ -30,7 +31,10 @@ void cranpl_unmap_file(cranpl_file_map_t fileMap);
 uint32_t cranpl_get_core_count();
 void* cranpl_create_thread(void(*function)(void*), void* data);
 void cranpl_wait_on_thread(void* threadHandle);
-void cranpl_wait_on_threads(void** threadHandle, uint32_t count);
+#define cranpl_infinite_wait (~(uint32_t)0)
+// waitTime in milliseconds
+// returns true when wait is complete
+bool cranpl_wait_on_threads(void** threadHandle, uint32_t count, uint32_t waitTime);
 
 cran_alignas(4) typedef struct
 {
