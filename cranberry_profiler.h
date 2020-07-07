@@ -120,7 +120,7 @@ void cranpr_terminate(void);
 cranpr_sample_t cranpr_create_sample(const char* category, const char* name, int64_t timeStamp, char eventType);
 void cranpr_write_sample(cranpr_sample_t sample);
 
-uint16_t cranpr_captured_size(void);
+uint32_t cranpr_captured_size(void);
 
 size_t cranpr_string_size(void);
 
@@ -286,7 +286,7 @@ cranpr_sample_t cranpr_create_sample(const char* category, const char* name, int
 }
 
 /* Bigger buffers mean less contention for the list, but also means longer flushes and more memory usage */
-#define cranpr_buffer_size (1024*1014)
+#define cranpr_buffer_size (1024)
 
 typedef struct
 {
@@ -307,7 +307,7 @@ typedef struct
 {
 	cranpr_buffer_node_t* first;
 	cranpr_buffer_node_t* last;
-	uint16_t listSize;
+	uint32_t listSize;
 
 	cranpr_lock_t lock;
 
@@ -344,7 +344,7 @@ void cranpr_terminate( void )
 	}
 }
 
-uint16_t cranpr_captured_size(void)
+uint32_t cranpr_captured_size(void)
 {
 	return cranpr_buffer_list.listSize;
 }
@@ -374,7 +374,7 @@ static void cranpr_add_node_ts(cranpr_buffer_node_t* node)
 	}
 	else
 	{
-		assert(cranpr_buffer_list.listSize != UINT16_MAX);
+		assert(cranpr_buffer_list.listSize != UINT32_MAX);
 		assert(cranpr_buffer_list.last->next == NULL);
 
 		cranpr_buffer_list.last->next = node;

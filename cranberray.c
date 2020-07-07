@@ -1445,7 +1445,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			microfacets[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
 			microfacets[i].refractiveIndex = matLib.materials[i].refractiveIndex;
 			microfacets[i].specularTint = (cv3) { matLib.materials[i].specular[0], matLib.materials[i].specular[1], matLib.materials[i].specular[2] };
-			microfacets[i].gloss = matLib.materials[i].specularAmount / 100.0f; // Arbitrary conversion from specularity to gloss
+			// Conversion taken from http://graphicrants.blogspot.com/2013/08/specular-brdf-reference.html
+			microfacets[i].gloss = 1.0f - sqrtf(cf_rcp(matLib.materials[i].specularAmount + 2.0f)*2.0f);
 
 			microfacets[i].albedoSampler = (sampler_t) {.type = sample_bilinear };
 			if (matLib.materials[i].albedoMap != NULL)
@@ -1614,8 +1615,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			{
 				uint32_t* meshCandidates;
 				uint32_t meshCandidateCount = traverse_bvh(context, &mesh->bvh, rayO, rayD, 0.0f, NoRayIntersection, &meshCandidates);
-				
-				cranpr_begin("scene", "cast-triangles");
+
 				for (uint32_t faceCandidate = 0; faceCandidate < meshCandidateCount; faceCandidate++)
 				{
 					// TODO: Lanes
@@ -1645,7 +1645,6 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 						closestHitInfo.barycentric = (cv3) { u, v, w };
 					}
 				}
-				cranpr_end("scene", "cast-triangles");
 				crana_stack_free(&context->stack, meshCandidates);
 			}
 		}
@@ -1771,7 +1770,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	cran_stat(uint64_t skyboxStartTime = cranpl_timestamp_micro());
-	cv3 skybox = (cv3) { 200.0f, 200.0f, 200.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 10.0f, 10.0f, 10.0f };// sample_hdr(rayD, backgroundSampler);
 	cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
 
 	context->depth--;
@@ -2070,7 +2069,7 @@ static void render_scene_async(void* cran_restrict data)
 				}
 
 				cv3 sceneColor = { 0 };
-				cv3 runningTotal = { 0 };
+	
 				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
 				{
 					cran_stat(renderContext->renderStats.primaryRayCount++);
@@ -2083,19 +2082,6 @@ static void render_scene_async(void* cran_restrict data)
 					cv3 rayDir = cv3_add(cv3_mulf(renderData->forward, renderData->near), cv3_add(cv3_mulf(renderData->right, randX), cv3_mulf(renderData->up, randY)));
 
 					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir, ~0ull);
-
-					if (renderConfig.renderToWindow)
-					{
-						runningTotal = cv3_add(runningTotal, hit.light);
-						cv3 displayColor = cv3_mulf(runningTotal, cf_rcp((float)(i + 1)));
-
-						int32_t imgIdx = ((y + renderData->halfImgHeight) * renderData->imgWidth + (x + renderData->halfImgWidth)) * renderData->imgStride;
-						threadContext->hdrOutput[imgIdx + 0] = displayColor.x;
-						threadContext->hdrOutput[imgIdx + 1] = displayColor.y;
-						threadContext->hdrOutput[imgIdx + 2] = displayColor.z;
-						threadContext->hdrOutput[imgIdx + 3] = 1.0f;
-					}
-
 					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, rsamplesPerPixel));
 				}
 
