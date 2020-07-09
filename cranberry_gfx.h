@@ -94,7 +94,6 @@ typedef struct
 {
 	float albedoTint[4];
 	crang_image_id_t albedoImage;
-	crang_sampler_id_t albedoSampler;
 } crang_deferred_desc_t;
 
 typedef enum
@@ -111,16 +110,10 @@ typedef struct
 	uint8_t* data;
 } crang_image_desc_t;
 
-typedef struct
-{
-	uint32_t temp;
-} crang_sampler_desc_t;
-
 crang_context_t* crang_init(crang_init_desc_t* desc);
 
 crang_mesh_id_t crang_create_mesh(crang_context_t* ctx, crang_mesh_desc_t const* desc);
 crang_image_id_t crang_create_image(crang_context_t* ctx, crang_image_desc_t const* desc);
-crang_sampler_id_t crang_create_sampler(crang_context_t* ctx, crang_sampler_desc_t const* desc);
 
 crang_material_id_t crang_create_mat_deferred(crang_context_t* ctx, crang_deferred_desc_t const* desc);
 

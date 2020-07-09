@@ -376,6 +376,7 @@ typedef enum
 #define crang_double_buffer_count 2
 #define crang_max_material_instance_count 100
 #define crang_max_physical_image_count 10
+#define crang_gbuffer_image_count 2
 typedef struct
 {
 	VkInstance vkInstance;
@@ -444,12 +445,6 @@ typedef struct
 			cranvk_allocation_t allocation;
 		} images[crang_max_image_count];
 		uint32_t imageCount;
-
-		struct
-		{
-			VkSampler vkSampler;
-		} samplers[crang_max_sampler_count];
-		uint32_t samplerCount;
 	} textures;
 
 	struct
@@ -457,6 +452,7 @@ typedef struct
 		struct
 		{
 			VkShaderModule vkGbufferVShader;
+			VkDescriptorSetLayout vkGbufferShaderInstanceLayout;
 			VkDescriptorSetLayout vkGbufferShaderLayout;
 
 			VkShaderModule vkGbufferFShader;
@@ -468,11 +464,13 @@ typedef struct
 			VkPipelineLayout vkPipelineLayout;
 			VkPipeline vkDeferredPipeline;
 
+			VkDescriptorSet vkGbufferShaderDescriptor;
+			VkSampler vkSampler;
 			struct
 			{
 				cranvk_allocation_t gbufferAllocation;
-				VkImage vkGbufferImage;
-				VkImageView vkGbufferImageView;
+				VkImage vkGbufferImage[crang_gbuffer_image_count];
+				VkImageView vkGbufferImageView[crang_gbuffer_image_count];
 				VkDescriptorSet vkGbufferComputeDescriptor;
 			} doubleBuffer[crang_double_buffer_count];
 
@@ -483,8 +481,9 @@ typedef struct
 					VkDescriptorSet vkGbufferShaderDescriptor;
 					VkBuffer vkGbufferFShaderData;
 					cranvk_allocation_t allocation;
-
 				} doubleBuffer[crang_double_buffer_count];
+
+				uint32_t albedoTextureIndex;
 			} instances[crang_max_material_instance_count];
 			uint32_t instanceCount;
 		} deferred;
@@ -683,9 +682,18 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 			}
 
 			VkPhysicalDeviceFeatures physicalDeviceFeatures = { .shaderStorageImageWriteWithoutFormat = VK_TRUE };
+
+			VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures = 
+			{
+				.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT,
+				.descriptorBindingPartiallyBound = VK_TRUE,
+				.runtimeDescriptorArray = VK_TRUE,
+			};
+
 			VkDeviceCreateInfo deviceCreateInfo =
 			{
 				.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+				.pNext = &indexingFeatures,
 				.enabledExtensionCount = crang_device_extension_count,
 				.queueCreateInfoCount = queueCreateInfoCount,
 				.pQueueCreateInfos = queueCreateInfo,
@@ -710,13 +718,15 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 #define crang_max_storage_image_count 100
 #define crang_max_image_sampler_count 1000
 #define crang_max_descriptor_set_count 1000
+#define crang_max_sampled_image_count 1000
 
 		VkDescriptorPoolSize descriptorPoolSizes[] =
 		{
 			{ .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,.descriptorCount = crang_max_uniform_buffer_count },
 			{ .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,.descriptorCount = crang_max_storage_buffer_count },
 			{ .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,.descriptorCount = crang_max_storage_image_count },
-			{ .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = crang_max_image_sampler_count }
+			{ .type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = crang_max_image_sampler_count },
+			{ .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = crang_max_sampled_image_count }
 		};
 
 		VkDescriptorPoolCreateInfo descriptorPoolCreate =
@@ -899,11 +909,19 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 	}
 
 	{
-		// TODO: We'll want to be able to define our render pass here.
 		{
-			VkAttachmentDescription attachments[] =
+			VkAttachmentDescription attachmentDescriptions[] =
 			{
-				// Gbuffer
+				// Gbuffer 0
+				{
+					.samples = VK_SAMPLE_COUNT_1_BIT,
+					.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+					.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+					.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+					.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+					.format = VK_FORMAT_R8G8B8A8_UNORM
+				},
+				// Gbuffer 1
 				{
 					.samples = VK_SAMPLE_COUNT_1_BIT,
 					.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
@@ -924,28 +942,34 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 			};
 
 			// Gbuffer attachment
-			VkAttachmentReference gbufferAttachment =
+			VkAttachmentReference gbufferAttachments[] =
 			{
-				.attachment = 0,
-				.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+				{
+					.attachment = 0,
+					.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+				},
+				{
+					.attachment = 1,
+					.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+				}
 			};
 
 			VkSubpassDescription subpasses[] =
 			{
 				{
 					.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-					.colorAttachmentCount = 1,
-					.pColorAttachments = &gbufferAttachment
+					.colorAttachmentCount = crang_array_size(gbufferAttachments),
+					.pColorAttachments = gbufferAttachments
 				}
 			};
 
 			VkRenderPassCreateInfo createRenderPass =
 			{
 				.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-				.attachmentCount = crang_array_size(attachments),
+				.attachmentCount = crang_array_size(attachmentDescriptions),
 				.subpassCount = crang_array_size(subpasses),
 				.dependencyCount = 0,
-				.pAttachments = attachments,
+				.pAttachments = attachmentDescriptions,
 				.pSubpasses = subpasses
 			};
 
@@ -955,6 +979,7 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 		for (uint32_t i = 0; i < crang_double_buffer_count; i++)
 		{
 			// Create the gbuffer image
+			for (uint32_t gbuffer = 0; gbuffer < crang_gbuffer_image_count; gbuffer++)
 			{
 				{
 					VkImageCreateInfo imageCreate =
@@ -972,13 +997,13 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 						.sharingMode = VK_SHARING_MODE_EXCLUSIVE
 					};
 
-					crang_check(vkCreateImage(ctx->present.vkDevice, &imageCreate, crang_no_allocator, &ctx->materials.deferred.doubleBuffer[i].vkGbufferImage));
+					crang_check(vkCreateImage(ctx->present.vkDevice, &imageCreate, crang_no_allocator, &ctx->materials.deferred.doubleBuffer[i].vkGbufferImage[gbuffer]));
 				}
 
 				// Allocation
 				{
 					VkMemoryRequirements memoryRequirements;
-					vkGetImageMemoryRequirements(ctx->present.vkDevice, ctx->materials.deferred.doubleBuffer[i].vkGbufferImage, &memoryRequirements);
+					vkGetImageMemoryRequirements(ctx->present.vkDevice, ctx->materials.deferred.doubleBuffer[i].vkGbufferImage[gbuffer], &memoryRequirements);
 
 					unsigned int preferredBits = 0;
 					uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
@@ -987,7 +1012,7 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 					*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex,
 						ctx->present.vkMaxSurfaceExtents.width * ctx->present.vkMaxSurfaceExtents.height * 4, memoryRequirements.alignment);
 
-					crang_check(vkBindImageMemory(ctx->present.vkDevice, ctx->materials.deferred.doubleBuffer[i].vkGbufferImage, allocation->memory, allocation->offset));
+					crang_check(vkBindImageMemory(ctx->present.vkDevice, ctx->materials.deferred.doubleBuffer[i].vkGbufferImage[gbuffer], allocation->memory, allocation->offset));
 				}
 
 				// Image view
@@ -995,7 +1020,7 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 					VkImageViewCreateInfo  imageCreateViewInfo =
 					{
 						.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-						.image = ctx->materials.deferred.doubleBuffer[i].vkGbufferImage,
+						.image = ctx->materials.deferred.doubleBuffer[i].vkGbufferImage[gbuffer],
 						.viewType = VK_IMAGE_VIEW_TYPE_2D,
 						.format = VK_FORMAT_R8G8B8A8_UNORM,
 
@@ -1009,7 +1034,7 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 						}
 					};
 
-					crang_check(vkCreateImageView(ctx->present.vkDevice, &imageCreateViewInfo, crang_no_allocator, &ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView));
+					crang_check(vkCreateImageView(ctx->present.vkDevice, &imageCreateViewInfo, crang_no_allocator, &ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView[gbuffer]));
 				}
 			}
 
@@ -1017,7 +1042,8 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 			{
 				VkImageView images[] = 
 				{
-					ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView,
+					ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView[0],
+					ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView[1],
 					ctx->present.doubleBuffer[i].vkSwapchainImageView
 				};
 
@@ -1106,24 +1132,32 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 			VkDescriptorSetLayoutBinding layoutBindings[] = 
 			{
 				{
-					.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+					.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
 					.binding = 0,
 					.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-					.descriptorCount = 1,
+					.descriptorCount = 2,
 					.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT
 				},
 				{
-					.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+					.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
 					.binding = 1,
 					.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
 					.descriptorCount = 1,
-					.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT
 				},
+			};
+
+			VkDescriptorBindingFlags bindFlag = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+			VkDescriptorSetLayoutBindingFlagsCreateInfo extendedInfo =
+			{
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+				.bindingCount = 1,
+				.pBindingFlags = &bindFlag,
 			};
 
 			VkDescriptorSetLayoutCreateInfo createLayout =
 			{
 				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+				.pNext = &extendedInfo,
 				.bindingCount = crang_array_size(layoutBindings),
 				.pBindings = layoutBindings
 			};
@@ -1152,11 +1186,15 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 					ctx->present.vkDevice, &descriptorSetAlloc,
 					&ctx->materials.deferred.doubleBuffer[i].vkGbufferComputeDescriptor));
 
-				VkDescriptorImageInfo gbufferInfo =
+				VkDescriptorImageInfo gbufferInfos[crang_gbuffer_image_count];
+				for (uint32_t gbuffer = 0; gbuffer < crang_gbuffer_image_count; gbuffer++)
 				{
-					.imageView = ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView,
-					.imageLayout = VK_IMAGE_LAYOUT_GENERAL
-				};
+					gbufferInfos[gbuffer] = (VkDescriptorImageInfo)
+					{
+						.imageView = ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView[gbuffer],
+						.imageLayout = VK_IMAGE_LAYOUT_GENERAL
+					};
+				}
 
 				VkWriteDescriptorSet computeSourceImageSet =
 				{
@@ -1164,8 +1202,8 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 					.dstSet = ctx->materials.deferred.doubleBuffer[i].vkGbufferComputeDescriptor,
 					.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
 					.dstBinding = 0,
-					.descriptorCount = 1,
-					.pImageInfo = &gbufferInfo
+					.descriptorCount = crang_array_size(gbufferInfos),
+					.pImageInfo = gbufferInfos
 				};
 
 				VkDescriptorImageInfo swapchainInfo =
@@ -1191,7 +1229,7 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 			VkComputePipelineCreateInfo info =
 			{
 				.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-				.stage = 
+				.stage =
 				{
 					.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
 					.stage = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1204,51 +1242,89 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 		}
 
 		// Graphics pipeline
-		VkDescriptorSetLayoutBinding layoutBindings[] = 
-		{
-			{
-				.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-				.binding = 0,
-				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-				.descriptorCount = 1
-			},
-			{
-				.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-				.binding = 1,
-				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-				.descriptorCount = 1
-			},
-			{
-				.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-				.binding = 2,
-				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-				.descriptorCount = 1
-			},
-		};
 
-		VkDescriptorSetLayoutCreateInfo createLayout =
+		// Per type binding
 		{
-			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-			.bindingCount = crang_array_size(layoutBindings),
-			.pBindings = layoutBindings
-		};
-		crang_check(vkCreateDescriptorSetLayout(ctx->present.vkDevice, &createLayout, crang_no_allocator, &ctx->materials.deferred.vkGbufferShaderLayout));
-
-		{
-			VkPushConstantRange pushConstantRange =
+			VkDescriptorSetLayoutBinding layoutBindings[] = 
 			{
-				.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-				.offset = 0,
-				.size = 128
+				{
+					.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+					.binding = 0,
+					.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+					.descriptorCount = 1
+				},
+				{
+					.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+					.binding = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+					.descriptorCount = 1
+				},
+				{
+					.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+					.binding = 2,
+					.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+					.descriptorCount = crang_max_image_count
+				}
+			};
+
+			VkDescriptorSetLayoutCreateInfo createLayout =
+			{
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+				.bindingCount = crang_array_size(layoutBindings),
+				.pBindings = layoutBindings
+			};
+			crang_check(vkCreateDescriptorSetLayout(ctx->present.vkDevice, &createLayout, crang_no_allocator, &ctx->materials.deferred.vkGbufferShaderLayout));
+		}
+
+		// Per instance descriptor layouts
+		{
+			VkDescriptorSetLayoutBinding layoutBindings[] = 
+			{
+				{
+					.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+					.binding = 0,
+					.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+					.descriptorCount = 1
+				}
+			};
+
+			VkDescriptorSetLayoutCreateInfo createLayout =
+			{
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+				.bindingCount = crang_array_size(layoutBindings),
+				.pBindings = layoutBindings
+			};
+			crang_check(vkCreateDescriptorSetLayout(ctx->present.vkDevice, &createLayout, crang_no_allocator, &ctx->materials.deferred.vkGbufferShaderInstanceLayout));
+		}
+		
+		{
+			VkPushConstantRange pushConstantRanges[] =
+			{
+				{
+					.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+					.offset = 0,
+					.size = 116
+				},
+				{
+					.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+					.offset = 116,
+					.size = 4
+				}
+			};
+
+			VkDescriptorSetLayout layouts[] =
+			{
+				ctx->materials.deferred.vkGbufferShaderLayout,
+				ctx->materials.deferred.vkGbufferShaderInstanceLayout,
 			};
 
 			VkPipelineLayoutCreateInfo pipelineLayoutCreate =
 			{
 				.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-				.setLayoutCount = 1,
-				.pSetLayouts = &ctx->materials.deferred.vkGbufferShaderLayout,
-				.pushConstantRangeCount = 1,
-				.pPushConstantRanges = &pushConstantRange
+				.setLayoutCount = crang_array_size(layouts),
+				.pSetLayouts = layouts,
+				.pushConstantRangeCount = crang_array_size(pushConstantRanges),
+				.pPushConstantRanges = pushConstantRanges
 			};
 
 			crang_check(vkCreatePipelineLayout(ctx->present.vkDevice, &pipelineLayoutCreate, crang_no_allocator, &ctx->materials.deferred.vkPipelineLayout));
@@ -1282,7 +1358,7 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 
 			VkPipelineColorBlendAttachmentState colorBlendAttachment =
 			{
-			.blendEnable = VK_TRUE,
+				.blendEnable = VK_TRUE,
 				.colorBlendOp = VK_BLEND_OP_ADD,
 				.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
 				.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
@@ -1292,11 +1368,18 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 				.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
 			};
 
+			// All gbuffers have the same attachments
+			VkPipelineColorBlendAttachmentState gbufferAttachments[] = 
+			{
+				colorBlendAttachment,
+				colorBlendAttachment
+			};
+
 			VkPipelineColorBlendStateCreateInfo colorBlendCreate =
 			{
 				.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-				.attachmentCount = 1,
-				.pAttachments = &colorBlendAttachment
+				.attachmentCount = crang_array_size(gbufferAttachments),
+				.pAttachments = gbufferAttachments
 			};
 
 			VkPipelineDepthStencilStateCreateInfo depthStencilCreate =
@@ -1404,6 +1487,78 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 		*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex, crang_mesh_buffer_size, memoryRequirements.alignment);
 
 		crang_check(vkBindBufferMemory(ctx->present.vkDevice, *buffer, allocation->memory, allocation->offset));
+	}
+
+	// Create our sampler
+	{
+		VkSamplerCreateInfo samplerCreate = 
+		{
+			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+			.magFilter = VK_FILTER_NEAREST,
+			.minFilter = VK_FILTER_NEAREST,
+			.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.anisotropyEnable = VK_FALSE,
+			.maxAnisotropy = 0,
+			.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+			.compareEnable = VK_FALSE,
+			.compareOp = VK_COMPARE_OP_ALWAYS,
+			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+			.mipLodBias = 0.0f,
+			.minLod = 0.0f,
+			.maxLod = 0.0f
+		};
+
+		crang_check(vkCreateSampler(ctx->present.vkDevice, &samplerCreate, crang_no_allocator, &ctx->materials.deferred.vkSampler));
+	}
+
+	// Write to our template descriptor set
+	{
+		VkDescriptorSetAllocateInfo descriptorSetAlloc =
+		{
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+			.descriptorPool = ctx->present.vkDescriptorPool,
+			.descriptorSetCount = 1,
+			.pSetLayouts = &ctx->materials.deferred.vkGbufferShaderLayout
+		};
+		crang_check(vkAllocateDescriptorSets(
+			ctx->present.vkDevice, &descriptorSetAlloc,
+			&ctx->materials.deferred.vkGbufferShaderDescriptor));
+
+		VkDescriptorBufferInfo meshBufferInfo =
+		{
+			.buffer = ctx->geometry.vkMeshDataBuffers,
+			.offset = 0,
+			.range = ctx->geometry.allocationSize
+		};
+		VkWriteDescriptorSet writeGeometry =
+		{
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = ctx->materials.deferred.vkGbufferShaderDescriptor,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			.dstBinding = 0,
+			.descriptorCount = 1,
+			.pBufferInfo = &meshBufferInfo
+		};
+
+		VkDescriptorImageInfo samplerInfo =
+		{
+			.sampler = ctx->materials.deferred.vkSampler
+		};
+
+		VkWriteDescriptorSet writeSamplerSet =
+		{
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = ctx->materials.deferred.vkGbufferShaderDescriptor,
+			.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+			.dstBinding = 1,
+			.descriptorCount = 1,
+			.pImageInfo = &samplerInfo
+		};
+
+		VkWriteDescriptorSet writeDescriptorSets[] = { writeSamplerSet, writeGeometry };
+		vkUpdateDescriptorSets(ctx->present.vkDevice, crang_array_size(writeDescriptorSets), writeDescriptorSets, 0, NULL);
 	}
 
 	return (crang_context_t*)ctx;
@@ -1714,40 +1869,30 @@ crang_image_id_t crang_create_image(crang_context_t* context, crang_image_desc_t
 	vkDestroyBuffer(ctx->present.vkDevice, srcBuffer, crang_no_allocator);
 	cranvk_allocator_free(&ctx->vkAllocator, allocation);
 
-	return (crang_image_id_t) { imageIndex + 1 };
-}
-
-crang_sampler_id_t crang_create_sampler(crang_context_t* context, crang_sampler_desc_t const* desc)
-{
-	(void)desc;
-	context_t* ctx = (context_t*)context;
-
-	// Sampler
-	uint32_t samplerIndex = ctx->textures.samplerCount++;
+	// Update our shader descriptor
 	{
-		VkSamplerCreateInfo samplerCreate = 
+		VkDescriptorImageInfo imageInfo =
 		{
-			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-			.magFilter = VK_FILTER_NEAREST,
-			.minFilter = VK_FILTER_NEAREST,
-			.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-			.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-			.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-			.anisotropyEnable = VK_FALSE,
-			.maxAnisotropy = 0,
-			.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
-			.compareEnable = VK_FALSE,
-			.compareOp = VK_COMPARE_OP_ALWAYS,
-			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-			.mipLodBias = 0.0f,
-			.minLod = 0.0f,
-			.maxLod = 0.0f
+			.imageView = ctx->textures.images[imageIndex].vkImageView,
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
 		};
 
-		crang_check(vkCreateSampler(ctx->present.vkDevice, &samplerCreate, crang_no_allocator, &ctx->textures.samplers[samplerIndex].vkSampler));
+		VkWriteDescriptorSet writeImageSet =
+		{
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = ctx->materials.deferred.vkGbufferShaderDescriptor,
+			.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+			.dstBinding = 2,
+			.dstArrayElement = imageIndex,
+			.descriptorCount = 1,
+			.pImageInfo = &imageInfo
+		};
+
+		VkWriteDescriptorSet writeDescriptorSets[] = { writeImageSet };
+		vkUpdateDescriptorSets(ctx->present.vkDevice, crang_array_size(writeDescriptorSets), writeDescriptorSets, 0, NULL);
 	}
 
-	return (crang_sampler_id_t) { samplerIndex + 1 };
+	return (crang_image_id_t) { imageIndex + 1 };
 }
 
 crang_material_id_t crang_create_mat_deferred(crang_context_t* context, crang_deferred_desc_t const* desc)
@@ -1761,6 +1906,7 @@ crang_material_id_t crang_create_mat_deferred(crang_context_t* context, crang_de
 	memcpy(matData.albedoTint, desc->albedoTint, sizeof(float) * 4);
 
 	uint32_t instanceIndex = ctx->materials.deferred.instanceCount++;
+	ctx->materials.deferred.instances[instanceIndex].albedoTextureIndex = desc->albedoImage.id - 1;
 	for (uint32_t i = 0; i < crang_double_buffer_count; i++)
 	{
 		VkBuffer dataBuffer;
@@ -1873,7 +2019,7 @@ crang_material_id_t crang_create_mat_deferred(crang_context_t* context, crang_de
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 			.descriptorPool = ctx->present.vkDescriptorPool,
 			.descriptorSetCount = 1,
-			.pSetLayouts = &ctx->materials.deferred.vkGbufferShaderLayout
+			.pSetLayouts = &ctx->materials.deferred.vkGbufferShaderInstanceLayout
 		};
 		crang_check(vkAllocateDescriptorSets(
 			ctx->present.vkDevice, &descriptorSetAlloc,
@@ -1891,45 +2037,12 @@ crang_material_id_t crang_create_mat_deferred(crang_context_t* context, crang_de
 			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 			.dstSet = ctx->materials.deferred.instances[instanceIndex].doubleBuffer[i].vkGbufferShaderDescriptor,
 			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-			.dstBinding = 1,
+			.dstBinding = 0,
 			.descriptorCount = 1,
 			.pBufferInfo = &bufferInfo
 		};
 
-		VkDescriptorBufferInfo meshBufferInfo =
-		{
-			.buffer = ctx->geometry.vkMeshDataBuffers,
-			.offset = 0,
-			.range = ctx->geometry.allocationSize
-		};
-		VkWriteDescriptorSet writeGeometry =
-		{
-			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-			.dstSet = ctx->materials.deferred.instances[instanceIndex].doubleBuffer[i].vkGbufferShaderDescriptor,
-			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-			.dstBinding = 0,
-			.descriptorCount = 1,
-			.pBufferInfo = &meshBufferInfo
-		};
-
-		VkDescriptorImageInfo imageInfo =
-		{
-			.imageView = ctx->textures.images[desc->albedoImage.id - 1].vkImageView,
-			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.sampler = ctx->textures.samplers[desc->albedoSampler.id - 1].vkSampler
-		};
-
-		VkWriteDescriptorSet writeImageSet =
-		{
-			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-			.dstSet = ctx->materials.deferred.instances[instanceIndex].doubleBuffer[i].vkGbufferShaderDescriptor,
-			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-			.dstBinding = 2,
-			.descriptorCount = 1,
-			.pImageInfo = &imageInfo
-		};
-
-		VkWriteDescriptorSet writeDescriptorSets[] = { writeGeometry, writeMaterial, writeImageSet };
+		VkWriteDescriptorSet writeDescriptorSets[] = { writeMaterial };
 		vkUpdateDescriptorSets(ctx->present.vkDevice, crang_array_size(writeDescriptorSets), writeDescriptorSets, 0, NULL);
 	}
 
@@ -1970,9 +2083,14 @@ void crang_draw_view(crang_context_t* context, crang_view_t* view)
 		crang_check(vkBeginCommandBuffer(currentCommands, &beginBufferInfo));
 
 		VkClearColorValue clearColor = { .float32 = { 0.8f, 0.5f, 0.1f, 0.0f } };
-		VkClearValue clearValue =
+		VkClearValue clearValues[] =
 		{
-			.color = clearColor
+			{
+				.color = clearColor
+			},
+			{
+				.color = clearColor
+			},
 		};
 
 		VkRenderPassBeginInfo renderPassBeginInfo =
@@ -1981,19 +2099,25 @@ void crang_draw_view(crang_context_t* context, crang_view_t* view)
 			.renderPass = ctx->present.vkRenderPass,
 			.framebuffer = ctx->present.doubleBuffer[buffer].vkFramebuffer,
 			.renderArea = {.extent = ctx->present.vkSurfaceExtents },
-			.clearValueCount = 1,
-			.pClearValues = &clearValue
+			.clearValueCount = crang_array_size(clearValues),
+			.pClearValues = clearValues
 		};
 		vkCmdBeginRenderPass(currentCommands, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
 		vkCmdBindPipeline(currentCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->materials.deferred.vkDeferredPipeline);
+
+		VkDescriptorSet gbufferSet = ctx->materials.deferred.vkGbufferShaderDescriptor;
+		vkCmdBindDescriptorSets(
+			currentCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->materials.deferred.vkPipelineLayout,
+			0, 1, &gbufferSet, 0, VK_NULL_HANDLE);
+
 		for (uint32_t i = 0; i < crang_max_batches && view->batches[crang_material_deferred][i].material.id > 0; i++)
 		{
 			uint32_t materialIndex = view->batches[crang_material_deferred][i].material.id - 1;
-			VkDescriptorSet gbufferSet = ctx->materials.deferred.instances[materialIndex].doubleBuffer[buffer].vkGbufferShaderDescriptor;
+			VkDescriptorSet gbufferInstanceSet = ctx->materials.deferred.instances[materialIndex].doubleBuffer[buffer].vkGbufferShaderDescriptor;
 			vkCmdBindDescriptorSets(
 				currentCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->materials.deferred.vkPipelineLayout,
-				0, 1, &gbufferSet, 0, VK_NULL_HANDLE);
+				1, 1, &gbufferInstanceSet, 0, VK_NULL_HANDLE);
 
 			for (uint32_t inst = 0; inst < crang_max_instances && view->batches[crang_material_deferred][i].instances[inst].mesh.id > 0; inst++)
 			{
@@ -2007,14 +2131,23 @@ void crang_draw_view(crang_context_t* context, crang_view_t* view)
 						crang_mat4_t vp;
 						crang_mat4x3_t m;
 						uint32_t vertexOffset;
-					} pushConstant;
+					} vertPushConstant;
 
-					pushConstant.vp = view->viewProj;
-					pushConstant.m = view->batches[crang_material_deferred][i].instances[inst].transforms[mat];
-					pushConstant.vertexOffset = ctx->geometry.meshes[meshIndex].vertexOffset / sizeof(crang_vertex_t);
+					vertPushConstant.vp = view->viewProj;
+					vertPushConstant.m = view->batches[crang_material_deferred][i].instances[inst].transforms[mat];
+					vertPushConstant.vertexOffset = ctx->geometry.meshes[meshIndex].vertexOffset / sizeof(crang_vertex_t);
 
 					vkCmdPushConstants(currentCommands, ctx->materials.deferred.vkPipelineLayout,
-						VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pushConstant), &pushConstant);
+						VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vertPushConstant), &vertPushConstant);
+
+					struct
+					{
+						uint32_t albedoTextureIndex;
+					} fragPushConstant;
+					fragPushConstant.albedoTextureIndex = ctx->materials.deferred.instances[materialIndex].albedoTextureIndex;
+
+					vkCmdPushConstants(currentCommands, ctx->materials.deferred.vkPipelineLayout,
+						VK_SHADER_STAGE_FRAGMENT_BIT, 116, sizeof(fragPushConstant), &fragPushConstant);
 
 					vkCmdDrawIndexed(currentCommands, ctx->geometry.meshes[meshIndex].indexCount, 1, 0, 0, 0);
 				}
@@ -2030,11 +2163,14 @@ void crang_draw_view(crang_context_t* context, crang_view_t* view)
 			.newLayout = VK_IMAGE_LAYOUT_GENERAL,
 			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.image = ctx->materials.deferred.doubleBuffer[buffer].vkGbufferImage,
+			.image = ctx->materials.deferred.doubleBuffer[buffer].vkGbufferImage[0],
 			.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,.levelCount = 1, .baseMipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
 			.srcAccessMask = 0,
 			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT
 		};
+		vkCmdPipelineBarrier(currentCommands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &gbufferBarrier);
+
+		gbufferBarrier.image = ctx->materials.deferred.doubleBuffer[buffer].vkGbufferImage[1];
 		vkCmdPipelineBarrier(currentCommands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &gbufferBarrier);
 
 		VkImageMemoryBarrier swapchainBarrier =

@@ -110,13 +110,11 @@ int main(void)
 			.width = 2,
 			.height = 2,
 		});
-	crang_sampler_id_t albedoSampler = crang_create_sampler(ctx, &(crang_sampler_desc_t){0});
 
 	crang_material_id_t someMaterial = crang_create_mat_deferred(ctx,
 		&(crang_deferred_desc_t)
 		{
 			.albedoTint = { 0.0f, 1.0f, 1.0f, 1.0f },
-			.albedoSampler = albedoSampler,
 			.albedoImage = albedoImage,
 		});
 
@@ -129,74 +127,74 @@ int main(void)
 				{ 
 					// Front Corners
 					{
-						.pos = {-1.0f, -1.0f, -1.0f},
-						.normal = {0.0f, 0.0f, -1.0f}
+						.pos = {-1.0f, -1.0f, -1.0f, 0.0f},
+						.normal = {0.0f, 0.0f, -1.0f, 0.0f}
 					},
 					{
-						.pos = {1.0f, -1.0f, -1.0f},
-						.normal = {0.0f, 0.0f, -1.0f}
+						.pos = {1.0f, -1.0f, -1.0f, 1.0f},
+						.normal = {0.0f, 0.0f, -1.0f, 0.0f}
 					},
 					{
-						.pos = {1.0f, 1.0f, -1.0f},
-						.normal = {0.0f, 0.0f, -1.0f}
+						.pos = {1.0f, 1.0f, -1.0f, 1.0f},
+						.normal = {0.0f, 0.0f, -1.0f, 1.0f}
 					},
 					{
-						.pos = {-1.0f, 1.0f, -1.0f},
-						.normal = {0.0f, 0.0f, -1.0f}
+						.pos = {-1.0f, 1.0f, -1.0f, 0.0f},
+						.normal = {0.0f, 0.0f, -1.0f, 1.0f}
 					},
 
 					// Back Corners
 					{
-						.pos = {-1.0f, -1.0f, 1.0f},
-						.normal = {0.0f, 0.0f, 1.0f}
+						.pos = {-1.0f, -1.0f, 1.0f, 0.0f},
+						.normal = {0.0f, 0.0f, 1.0f, 0.0f}
 					},
 					{
-						.pos = {1.0f, -1.0f, 1.0f},
-						.normal = {0.0f, 0.0f, 1.0f}
+						.pos = {1.0f, -1.0f, 1.0f, 1.0f},
+						.normal = {0.0f, 0.0f, 1.0f, 0.0f}
 					},
 					{
-						.pos = {1.0f, 1.0f, 1.0f},
-						.normal = {0.0f, 0.0f, 1.0f}
+						.pos = {1.0f, 1.0f, 1.0f, 1.0f},
+						.normal = {0.0f, 0.0f, 1.0f, 1.0f}
 					},
 					{
-						.pos = {-1.0f, 1.0f, 1.0f},
-						.normal = {0.0f, 0.0f, 1.0f}
+						.pos = {-1.0f, 1.0f, 1.0f, 0.0f},
+						.normal = {0.0f, 0.0f, 1.0f, 1.0f}
 					},
 
 					// Left Corners
 					{
-						.pos = {-1.0f, -1.0f,-1.0f},
-						.normal = {-1.0f, 0.0f, 0.0f}
+						.pos = {-1.0f, -1.0f,-1.0f, 0.0f},
+						.normal = {-1.0f, 0.0f, 0.0f, 0.0f}
 					},
 					{
-						.pos = {-1.0f, 1.0f, -1.0f},
-						.normal = {-1.0f, 0.0f, 0.0f}
+						.pos = {-1.0f, 1.0f, -1.0f, 1.0f},
+						.normal = {-1.0f, 0.0f, 0.0f, 0.0f}
 					},
 					{
-						.pos = {-1.0f, -1.0f, 1.0f},
-						.normal = {-1.0f, 0.0f, 0.0f}
+						.pos = {-1.0f, -1.0f, 1.0f, 1.0f},
+						.normal = {-1.0f, 0.0f, 0.0f, 1.0f}
 					},
 					{
-						.pos = {-1.0f, 1.0f, 1.0f},
-						.normal = {-1.0f, 0.0f, 0.0f}
+						.pos = {-1.0f, 1.0f, 1.0f, 0.0f},
+						.normal = {-1.0f, 0.0f, 0.0f, 1.0f}
 					},
 
 					// Right Corners
 					{
-						.pos = {1.0f, -1.0f,-1.0f},
-						.normal = {1.0f, 0.0f, 0.0f}
+						.pos = {1.0f, -1.0f,-1.0f, 0.0f},
+						.normal = {1.0f, 0.0f, 0.0f, 0.0f}
 					},
 					{
-						.pos = {1.0f, 1.0f, -1.0f},
-						.normal = {1.0f, 0.0f, 0.0f}
+						.pos = {1.0f, 1.0f, -1.0f, 1.0f},
+						.normal = {1.0f, 0.0f, 0.0f, 0.0f}
 					},
 					{
-						.pos = {1.0f, -1.0f, 1.0f},
-						.normal = {1.0f, 0.0f, 0.0f}
+						.pos = {1.0f, -1.0f, 1.0f, 1.0f},
+						.normal = {1.0f, 0.0f, 0.0f, 1.0f}
 					},
 					{
-						.pos = {1.0f, 1.0f, 1.0f},
-						.normal = {1.0f, 0.0f, 0.0f}
+						.pos = {1.0f, 1.0f, 1.0f, 0.0f},
+						.normal = {1.0f, 0.0f, 0.0f, 1.0f}
 					}
 				},
 				.count = 16
