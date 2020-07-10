@@ -102,10 +102,10 @@ int main(void)
 			.format = crang_image_format_rgba8,
 			.data = (uint8_t[])
 			{
-				0, 0, 255, 255,
-				255, 0, 0, 255,
-				0, 255, 0, 255,
-				0, 255, 255, 255,
+				80, 180, 255, 255,
+				80, 180, 255, 255,
+				80, 180, 255, 255,
+				255, 180, 80, 255,
 			},
 			.width = 2,
 			.height = 2,
@@ -225,30 +225,39 @@ int main(void)
 			}
 			else if (msg.message == WM_PAINT)
 			{
-				const float f = 4.0f;
+				Sleep(16);
+
+				float fov = 1.0f / tanf( 3.1415f * 0.25 );
+				const float f = 100.0f;
 				const float n = 1.0f;
-				const float w = 8.0f;
-				const float h = 4.5f;
+				const float a = 16.0f / 9.0f;
 				crang_mat4_t projection = 
 				{
 					{
-						{2.0f * n / w, 0.0f, 0.0f, 0.0f},
-						{0.0f, -2.0f * n / h, 0.0f, 0.0f},
+						{fov/a, 0.0f, 0.0f, 0.0f},
+						{0.0f, -fov, 0.0f, 0.0f},
 						{0.0f, 0.0f, f / (f - n),-n * f / (f - n)},
-						{0.0f, 0.0f, 1.0f, 0.0f }
+						{0.0f, 0.0f, 1.0, 0.0f }
 					}
 				};
 
 				static float spin = 0.0f;
 				spin += 0.01f;
-				crang_mat4x3_t transform = 
+
+				crang_mat4x3_t transforms[20];
+
+				for (uint32_t i = 0; i < 20; i++)
 				{
+					float x = (float)i * 2.0f - 20.0f;
+					transforms[i] = (crang_mat4x3_t)
 					{
-						{cosf(spin), 0.0f, -sinf(spin), 0.0f},
-						{0.0f, 1.0f, 0.0f, 0.0f},
-						{sinf(spin), 0.0f, cosf(spin), 3.0f}
-					}
-				};
+						{
+							{cosf(spin), 0.0f, -sinf(spin), x},
+							{0.0f, 1.0f, 0.0f, 0.0f},
+							{sinf(spin), 0.0f, cosf(spin),10.0f}
+						}
+					};
+				}
 
 				crang_draw_view(ctx, 
 					&(crang_view_t)
@@ -262,8 +271,8 @@ int main(void)
 								{
 									{
 										.mesh = someMesh,
-										.transforms = &transform,
-										.count = 1
+										.transforms = transforms,
+										.count = 20
 									}
 								}
 							}

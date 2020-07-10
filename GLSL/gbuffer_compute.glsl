@@ -11,9 +11,7 @@ layout (set = 0, binding = 1) uniform writeonly image2D swapchain;
 
 vec3 unpack_normal(vec4 normalBuffer)
 {
-	vec3 normal = vec3(normalBuffer.x, normalBuffer.y, 0.0) * 2.0f - 1.0;
-	normal.z = sqrt(1.0 - normal.x * normal.x - normal.y * normal.y);
-	normal.z = normalBuffer.z >= 0.5 ? -normal.z : normal.z;
+	vec3 normal = vec3(normalBuffer.x, normalBuffer.y, normalBuffer.z) * 2.0f - 1.0;
 	return normal;
 }
 
@@ -26,6 +24,6 @@ void main()
 	vec3 lightDir = normalize(vec3(0.707, 0.707, -0.707));
 	vec3 normal = unpack_normal(gbuffer1Load);
 
-	vec4 color = vec4(albedo,1.0)*max(dot(normal, lightDir),0.0)*gbuffer1Load.a;
+	vec4 color = vec4(albedo,1.0)*max(dot(normal, lightDir),0.1)*gbuffer1Load.a;
 	imageStore(swapchain, ivec2(gl_GlobalInvocationID.xy), color);
 }

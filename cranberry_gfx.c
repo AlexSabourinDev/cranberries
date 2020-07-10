@@ -415,6 +415,10 @@ typedef struct
 			VkFramebuffer vkFramebuffer;
 			VkCommandBuffer vkPrimaryCommandBuffer;
 			VkFence vkFinishedFence;
+
+			cranvk_allocation_t depthAllocation;
+			VkImage vkDepthImage;
+			VkImageView vkDepthImageView;
 		} doubleBuffer[crang_double_buffer_count];
 		uint32_t activeDoubleBuffer;
 	} present;
@@ -468,7 +472,7 @@ typedef struct
 			VkSampler vkSampler;
 			struct
 			{
-				cranvk_allocation_t gbufferAllocation;
+				cranvk_allocation_t gbufferAllocation[crang_gbuffer_image_count];
 				VkImage vkGbufferImage[crang_gbuffer_image_count];
 				VkImageView vkGbufferImageView[crang_gbuffer_image_count];
 				VkDescriptorSet vkGbufferComputeDescriptor;
@@ -686,8 +690,8 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 			VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures = 
 			{
 				.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT,
-				.descriptorBindingPartiallyBound = VK_TRUE,
-				.runtimeDescriptorArray = VK_TRUE,
+				.descriptorBindingPartiallyBound = VK_FALSE,
+				.runtimeDescriptorArray = VK_FALSE,
 			};
 
 			VkDeviceCreateInfo deviceCreateInfo =
@@ -938,6 +942,17 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 					.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 					.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
 					.format = ctx->present.vkSurfaceFormat.format
+				},
+				// Depth
+				{
+					.samples = VK_SAMPLE_COUNT_1_BIT,
+					.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+					.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+					.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+					.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+					.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+					.finalLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+					.format =  VK_FORMAT_D32_SFLOAT
 				}
 			};
 
@@ -954,12 +969,19 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 				}
 			};
 
+			VkAttachmentReference depthAttachment = 
+			{
+				.attachment = 3,
+				.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+			};
+
 			VkSubpassDescription subpasses[] =
 			{
 				{
 					.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
 					.colorAttachmentCount = crang_array_size(gbufferAttachments),
-					.pColorAttachments = gbufferAttachments
+					.pColorAttachments = gbufferAttachments,
+					.pDepthStencilAttachment = &depthAttachment
 				}
 			};
 
@@ -1008,7 +1030,7 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 					unsigned int preferredBits = 0;
 					uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
 
-					cranvk_allocation_t* allocation = &ctx->materials.deferred.doubleBuffer[i].gbufferAllocation;
+					cranvk_allocation_t* allocation = &ctx->materials.deferred.doubleBuffer[i].gbufferAllocation[gbuffer];
 					*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex,
 						ctx->present.vkMaxSurfaceExtents.width * ctx->present.vkMaxSurfaceExtents.height * 4, memoryRequirements.alignment);
 
@@ -1038,13 +1060,71 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 				}
 			}
 
+			// Depth image
+			{
+				VkImageCreateInfo imageCreate =
+				{
+					.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+					.imageType = VK_IMAGE_TYPE_2D,
+					.format = VK_FORMAT_D32_SFLOAT,
+					.extent = (VkExtent3D) { .width = ctx->present.vkMaxSurfaceExtents.width,.height = ctx->present.vkMaxSurfaceExtents.height,.depth = 1 },
+					.mipLevels = 1,
+					.arrayLayers = 1,
+					.samples = VK_SAMPLE_COUNT_1_BIT,
+					.tiling = VK_IMAGE_TILING_OPTIMAL,
+					.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+					.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+					.sharingMode = VK_SHARING_MODE_EXCLUSIVE
+				};
+
+				crang_check(vkCreateImage(ctx->present.vkDevice, &imageCreate, crang_no_allocator, &ctx->present.doubleBuffer[i].vkDepthImage));
+			}
+
+			// Allocation
+			{
+				VkMemoryRequirements memoryRequirements;
+				vkGetImageMemoryRequirements(ctx->present.vkDevice, ctx->present.doubleBuffer[i].vkDepthImage, &memoryRequirements);
+
+				unsigned int preferredBits = 0;
+				uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
+
+				cranvk_allocation_t* allocation = &ctx->present.doubleBuffer[i].depthAllocation;
+				*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex,
+					ctx->present.vkMaxSurfaceExtents.width * ctx->present.vkMaxSurfaceExtents.height * 4, memoryRequirements.alignment);
+
+				crang_check(vkBindImageMemory(ctx->present.vkDevice, ctx->present.doubleBuffer[i].vkDepthImage, allocation->memory, allocation->offset));
+			}
+
+			// Image view
+			{
+				VkImageViewCreateInfo  imageCreateViewInfo =
+				{
+					.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+					.image = ctx->present.doubleBuffer[i].vkDepthImage,
+					.viewType = VK_IMAGE_VIEW_TYPE_2D,
+					.format = VK_FORMAT_D32_SFLOAT,
+
+					.components = {.r = VK_COMPONENT_SWIZZLE_R,.g = VK_COMPONENT_SWIZZLE_G,.b = VK_COMPONENT_SWIZZLE_B,.a = VK_COMPONENT_SWIZZLE_A },
+					.subresourceRange =
+					{
+						.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+						.levelCount = 1,
+						.layerCount = 1,
+						.baseMipLevel = 0
+					}
+				};
+
+				crang_check(vkCreateImageView(ctx->present.vkDevice, &imageCreateViewInfo, crang_no_allocator, &ctx->present.doubleBuffer[i].vkDepthImageView));
+			}
+
 			// Create the framebuffer
 			{
 				VkImageView images[] = 
 				{
 					ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView[0],
 					ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView[1],
-					ctx->present.doubleBuffer[i].vkSwapchainImageView
+					ctx->present.doubleBuffer[i].vkSwapchainImageView,
+					ctx->present.doubleBuffer[i].vkDepthImageView
 				};
 
 				VkFramebufferCreateInfo framebufferCreate =
@@ -1385,9 +1465,9 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 			VkPipelineDepthStencilStateCreateInfo depthStencilCreate =
 			{
 				.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-				.depthTestEnable = VK_FALSE,
-				.depthWriteEnable = VK_FALSE,
-				.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+				.depthTestEnable = VK_TRUE,
+				.depthWriteEnable = VK_TRUE,
+				.depthCompareOp = VK_COMPARE_OP_LESS,
 				.depthBoundsTestEnable = VK_FALSE,
 				.minDepthBounds = 0.0f,
 				.maxDepthBounds = 1.0f,
@@ -2090,6 +2170,12 @@ void crang_draw_view(crang_context_t* context, crang_view_t* view)
 			},
 			{
 				.color = clearColor
+			},
+			{
+				.color = clearColor
+			},
+			{
+				.depthStencil = { 1.0f, 0 }
 			},
 		};
 

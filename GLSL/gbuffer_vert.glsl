@@ -42,7 +42,8 @@ void main()
 
 	mat3 rotation = mat3(M4);
 
-	gl_Position = vec4(mesh.data[index].pos.xyz, 1.0)*M4*perDraw.VP;
+	gl_Position = (vec4(mesh.data[index].pos.xyz, 1.0)*M4)*perDraw.VP;
+
 	var_normal = mesh.data[index].normal.xyz*rotation;
 	var_uv = unpack_uv(mesh.data[index]);
 }
