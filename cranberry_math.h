@@ -16,6 +16,7 @@
 #define cran_align(a) __declspec(align(a))
 
 #ifdef _MSC_BUILD
+#pragma warning(disable : 4201)
 #define cran_restrict __restrict
 #else
 #define cran_restrict restrict
@@ -39,14 +40,30 @@ typedef struct
 	float x, y;
 } cv2;
 
-typedef struct
+typedef union
 {
-	float x, y, z;
+	struct
+	{
+		float x, y, z;
+	};
+
+	struct
+	{
+		float r, g, b;
+	};
 } cv3;
 
-typedef struct
+typedef union
 {
-	float x, y, z, w;
+	struct
+	{
+		float x, y, z, w;
+	};
+
+	struct
+	{
+		float r, g, b, a;
+	};
 } cv4;
 
 typedef struct
@@ -644,10 +661,8 @@ cran_forceinline float caabb_surface_area(caabb l)
 // Miscellaneous Implementation
 cran_forceinline cv3 cmi_fresnel_schlick_r0(cv3 r0, cv3 n, cv3 i)
 {
-	cv3 f0 = r0;
-	f0 = cv3_mul(f0,f0);
 	float a = fminf(1.0f + cv3_dot(n, i), 1.0f);
-	return cv3_add(f0, cv3_mulf(cv3_sub((cv3) { 1.0f, 1.0f, 1.0f }, f0), a*a*a*a*a));
+	return cv3_add(r0, cv3_mulf(cv3_sub((cv3) { 1.0f, 1.0f, 1.0f }, r0), a*a*a*a*a));
 }
 
 // r1 = exiting refractive index (usually air)

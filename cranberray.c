@@ -323,15 +323,19 @@ static cv3 hemisphere_surface_random_uniform(float r1, float r2, float* pdf)
 	return (cv3) { x, y, r1 };
 }
 
-static cv3 hemisphere_surface_random_lambert(float r1, float r2, float* pdf)
+static cv3 hemisphere_surface_random_lambert(float r1, float r2)
 {
 	float theta = acosf(1.0f - 2.0f*r1) * 0.5f;
 	float cosTheta = cosf(theta);
 	float sinTheta = sinf(theta);
 	float phi = cran_tao * r2;
 
-	*pdf = cosTheta * cf_rcp(cran_pi);
 	return (cv3) { sinTheta*cosf(phi), sinTheta*sinf(phi), cosTheta };
+}
+
+static float lambert_pdf(cv3 d, cv3 n)
+{
+	return cv3_dot(d, n) * cran_rpi;
 }
 
 static cv3 hemisphere_surface_random_ggx_h(float r1, float r2, float a)
@@ -349,12 +353,6 @@ static cv3 box_random(random_seed_t* seed)
 
 static cv4 sample_rgb_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	uv.y = cf_frac(uv.y);
-	uv.x = cf_frac(uv.x);
-
-	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
-	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
-
 	float readY = uv.y * (float)height;
 	float readX = uv.x * (float)width;
 
@@ -375,12 +373,6 @@ static cv4 sample_rgb_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, u
 
 static cv4 sample_rg_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	uv.y = cf_frac(uv.y);
-	uv.x = cf_frac(uv.x);
-
-	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
-	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
-
 	float readY = uv.y * (float)height;
 	float readX = uv.x * (float)width;
 
@@ -401,12 +393,6 @@ static cv4 sample_rg_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, ui
 
 static cv4 sample_r_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	uv.y = cf_frac(uv.y);
-	uv.x = cf_frac(uv.x);
-
-	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
-	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
-
 	float readY = uv.y * (float)height;
 	float readX = uv.x * (float)width;
 
@@ -422,12 +408,6 @@ static cv4 sample_r_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uin
 
 static cv4 sample_rgba_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	uv.y = cf_frac(uv.y);
-	uv.x = cf_frac(uv.x);
-
-	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
-	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
-
 	float readY = uv.y * (float)height;
 	float readX = uv.x * (float)width;
 
@@ -448,12 +428,6 @@ static cv4 sample_rgba_u8(cv2 uv, uint8_t* cran_restrict image, uint32_t width, 
 
 static cv4 sample_rgba_f32(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	uv.y = cf_frac(uv.y);
-	uv.x = cf_frac(uv.x);
-
-	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
-	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
-
 	float readY = uv.y * (float)height;
 	float readX = uv.x * (float)width;
 
@@ -474,12 +448,6 @@ static cv4 sample_rgba_f32(cv2 uv, uint8_t* cran_restrict image, uint32_t width,
 
 static cv4 sample_rgb_f32(cv2 uv, uint8_t* cran_restrict image, uint32_t width, uint32_t height, uint32_t offsetX, uint32_t offsetY)
 {
-	uv.y = cf_frac(uv.y);
-	uv.x = cf_frac(uv.x);
-
-	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
-	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
-
 	float readY = uv.y * (float)height;
 	float readX = uv.x * (float)width;
 
@@ -632,6 +600,14 @@ cv4 sampler_sample(texture_store_t const* store, sampler_t sampler, texture_id_t
 		[texture_rgb_f32] = &sample_rgb_f32,
 		[texture_rgba_f32] = &sample_rgba_f32
 	};
+
+	float sx = cf_sign(uv.x);
+	float sy = cf_sign(uv.y);
+	uv.x = cf_frac(fabsf(uv.x)) * sx;
+	uv.y = cf_frac(fabsf(uv.y)) * sy;
+	uv.x = uv.x < 0.0f ? 1.0f + uv.x : uv.x;
+	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
+	uv.y = 1.0f - uv.y;
 
 	texture_t const* texture = &store->textures[textureid.id - 1];
 	if (sampler.type == sample_nearest)
@@ -1770,7 +1746,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	cran_stat(uint64_t skyboxStartTime = cranpl_timestamp_micro());
-	cv3 skybox = (cv3) { 10.0f, 10.0f, 10.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox = (cv3) { 50.0f, 50.0f, 50.0f };// sample_hdr(rayD, backgroundSampler);
 	cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
 
 	context->depth--;
@@ -1813,9 +1789,9 @@ static shader_outputs_t shader_lambert(const void* cran_restrict materialData, u
 
 	float r1 = random01f(&context->randomSeed);
 	float r2 = random01f(&context->randomSeed);
-	float pdf;
-	cv3 castDir = hemisphere_surface_random_lambert(r1,r2,&pdf);
+	cv3 castDir = hemisphere_surface_random_lambert(r1,r2);
 	castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
+	float pdf = lambert_pdf(castDir, normal);
 	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 
 	const bool ImportanceSampling = false;
@@ -1874,25 +1850,62 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
 
 	float roughness = fmaxf(1.0f - microfacetData.gloss, 0.01f);
+
 	float r1 = random01f(&context->randomSeed);
 	float r2 = random01f(&context->randomSeed);
-	cv3 h = hemisphere_surface_random_ggx_h(r1, r2, roughness);
-	h = cm3_rotate_cv3(cm3_basis_from_normal(normal), h);
 
-	// If we don't want any specular, don't bother.
+	enum
+	{
+		distribution_lambert = 0,
+		distribution_ggx,
+		distribution_count
+	};
+
+	cv3 castDir, h;
+	uint32_t distribution = 0;// randomRange(&context->randomSeed, 0, distribution_count);
+	if (distribution == distribution_lambert) // Lambert distribution
+	{
+		castDir = hemisphere_surface_random_lambert(r1, r2);
+		castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
+		h = cv3_normalize(cv3_add(castDir, viewDir));
+	}
+	else // ggx distribution
+	{
+		h = hemisphere_surface_random_ggx_h(r1, r2, roughness);
+		h = cm3_rotate_cv3(cm3_basis_from_normal(normal), h);
+		castDir = cv3_reflect(cv3_inverse(viewDir), h);
+	}
+
+	// GGX PDF
+	float chn = cv3_dot(h, normal);
+	float t = chn * chn*(roughness*roughness - 1.0f) + 1.0f;
+	float D = (roughness*roughness)*cf_rcp(cran_pi*t*t);
 	float specularAmount = cv3_sqrlength(microfacetData.specularTint) > 0.0f ? 1.0f : 0.0f;
 	float F = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, h, viewDir) * specularAmount;
+	float ggxPDF = D*chn*cf_rcp(4.0f*fabsf(cv3_dot(castDir, h)));
 
-	float pdf = 0.0f;
-	cv3 light;
-	if(random01f(&context->randomSeed) >= F)
+	float lambertPDF = lambert_pdf(castDir, normal);
+
+	float selectedPDF;
+	if (distribution == distribution_lambert)
 	{
-		float lr1 = random01f(&context->randomSeed);
-		float lr2 = random01f(&context->randomSeed);
-		float diffusePDF;
-		cv3 castDir = hemisphere_surface_random_lambert(lr1, lr2, &diffusePDF);
-		castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
+		selectedPDF = lambertPDF;
+	}
+	else
+	{
+		selectedPDF = ggxPDF;
+	}
 
+	// final weight and PDF
+	float weight = 0.0f;
+	if (ggxPDF > 0.0f && lambertPDF > 0.0f)
+	{
+		weight = 0.5f*selectedPDF * cf_rcp(0.5f * ggxPDF + 0.5f * lambertPDF);
+	}
+
+	cv3 light;
+	if(distribution == distribution_lambert)
+	{
 		ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 		if (result.hit)
 		{
@@ -1907,47 +1920,47 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 
 		cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
 		light = cv3_mul(light, cv3_mulf(albedo, cran_rpi));
-
-		pdf = diffusePDF * (1.0f - F);
 	}
 	else
 	{
-		// https://schuttejoe.github.io/post/ggximportancesamplingpart1/
-		// https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf
-		// specular BRDF
-		cv3 castDir = cv3_reflect(cv3_inverse(viewDir), h);
-
-		float chn = cv3_dot(h, normal);
-		float cvn = cv3_dot(viewDir, normal);
-		float cln = cv3_dot(castDir, normal);
-
-		// GGX
-		float t = chn * chn*(roughness*roughness - 1.0f) + 1.0f;
-		float D = (roughness*roughness)*cf_rcp(cran_pi*t*t);
-		// Smith shadowing
-		float Gv = cvn*sqrtf(roughness*roughness+(1.0f - roughness*roughness)*cln*cln);
-		float Gl = cln*sqrtf(roughness*roughness+(1.0f - roughness*roughness)*cvn*cvn);
-		float G = 2.0f*cln*cvn / (Gv + Gl);
-
-		// F(L,H)D(H)G(L,V,H)/(4*N.L*V.N)
-		float brdf = F*G*D*cf_rcp(4.0f*cv3_dot(castDir, normal)*cv3_dot(viewDir, normal));
-		
-		ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
-		if (result.hit)
+		if (cv3_dot(castDir, normal) >= 0.0f)
 		{
-			result.light = cv3_mulf(result.light, light_attenuation(result.surface, inputs.surface));
+			// https://schuttejoe.github.io/post/ggximportancesamplingpart1/
+			// https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf
+			// specular BRDF
+
+			float cvn = cv3_dot(viewDir, normal);
+			float cln = cv3_dot(castDir, normal);
+
+			// GGX
+			// Smith shadowing
+			float Gv = cvn * sqrtf(roughness*roughness + (1.0f - roughness * roughness)*cln*cln);
+			float Gl = cln * sqrtf(roughness*roughness + (1.0f - roughness * roughness)*cvn*cvn);
+			float G = 2.0f*cln*cvn / (Gv + Gl);
+
+			// F(L,H)D(H)G(L,V,H)/(4*N.L*V.N)
+			float brdf = F * G*D*cf_rcp(4.0f*cv3_dot(castDir, normal)*cv3_dot(viewDir, normal));
+
+			ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
+			if (result.hit)
+			{
+				result.light = cv3_mulf(result.light, light_attenuation(result.surface, inputs.surface));
+			}
+
+			light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
+
+			cv4 specColor = sampler_sample(&scene->textureStore, microfacetData.specSampler, microfacetData.specTexture, inputs.uv);
+			specColor = gamma_to_linear(specColor);
+			cv3 specularAlbedo = cv3_mul(microfacetData.specularTint, (cv3) { specColor.x, specColor.y, specColor.z });
+			light = cv3_mul(light, specularAlbedo); // TODO: Is there any physics behind this specular albedo concept?
+
 		}
-
-		light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
-
-		cv4 specColor = sampler_sample(&scene->textureStore, microfacetData.specSampler, microfacetData.specTexture, inputs.uv);
-		specColor = gamma_to_linear(specColor);
-		cv3 specularAlbedo = cv3_mul(microfacetData.specularTint, (cv3) { specColor.x, specColor.y, specColor.z });
-		light = cv3_mul(light, specularAlbedo); // TODO: Is there any physics behind this specular albedo concept?
-
-		pdf = D*chn*cf_rcp(4.0f*cv3_dot(castDir,h))*F;
+		else
+		{
+			light = (cv3) { 0 };
+		}
 	}
-	light = cv3_mulf(light, cf_rcp(pdf));
+	light = cv3_mulf(light, weight * cf_rcp(selectedPDF * 0.5f));
 
 	cranpr_end("shader", "microfacet");
 	return (shader_outputs_t)
