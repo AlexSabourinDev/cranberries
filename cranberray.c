@@ -1911,7 +1911,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	};
 
 	cv3 castDir, h;
-	uint32_t distribution = 0;// randomRange(&context->randomSeed, 0, distribution_count);
+	uint32_t distribution = randomRange(&context->randomSeed, 0, distribution_count);
 	if (distribution == distribution_lambert) // Lambert distribution
 	{
 		castDir = hemisphere_surface_random_lambert(r1, r2);
@@ -1927,11 +1927,11 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 
 	// GGX PDF
 	float chn = cv3_dot(h, normal);
-	float t = chn * chn*(roughness*roughness - 1.0f) + 1.0f;
-	float D = (roughness*roughness)*cf_rcp(cran_pi*t*t);
+	float t = chn*chn*roughness*roughness - (chn*chn - 1.0f);
+	float D = (roughness*roughness)*cf_rcp(t*t)*cran_rpi;
 	float specularAmount = cv3_sqrlength(microfacetData.specularTint) > 0.0f ? 1.0f : 0.0f;
 	float F = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, h, viewDir) * specularAmount;
-	float ggxPDF = D*chn*cf_rcp(4.0f*fabsf(cv3_dot(castDir, h)));
+	float ggxPDF = D*chn*cf_rcp(4.0f*fabsf(cv3_dot(viewDir, h)));
 
 	float lambertPDF = lambert_pdf(castDir, normal);
 
@@ -1998,12 +1998,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			}
 
 			light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
-
-			cv4 specColor = sampler_sample(&scene->textureStore, microfacetData.specSampler, microfacetData.specTexture, inputs.uv);
-			specColor = gamma_to_linear(specColor);
-			cv3 specularAlbedo = cv3_mul(microfacetData.specularTint, (cv3) { specColor.x, specColor.y, specColor.z });
-			light = cv3_mul(light, specularAlbedo); // TODO: Is there any physics behind this specular albedo concept?
-
+			light = cv3_mul(light, microfacetData.specularTint); // TODO: Is there any physics behind this specular albedo concept?
 		}
 		else
 		{
@@ -2205,14 +2200,14 @@ int main()
 	render_config_t renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 4,
+		.samplesPerPixel = 512,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,
 		.renderBlockHeight = 12,
 		.useDirectionalMat = false,
 
-		.renderToWindow = true,
+		.renderToWindow = false,
 		.renderRefreshRate = 1000,
 
 		.workingDir = "bistro/exterior",
