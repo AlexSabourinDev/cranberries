@@ -65,6 +65,7 @@ typedef struct
 	char* maskMap; // map_d
 	float albedo[3]; // Kd
 	float specular[3]; // Ks
+	float emission[3]; // Ke
 	float refractiveIndex; // Ni
 	float specularAmount; // Ns
 } cranl_material_t;

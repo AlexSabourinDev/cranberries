@@ -43,3 +43,4 @@ cran_alignas(4) typedef struct
 long cranpl_atomic_increment(cranpl_atomic_int_t* atomic);
 
 void cranpl_open_file_with_default_app(char const* cran_restrict fileName);
+void cranpl_set_working_dir(char const* cran_restrict path);

@@ -224,3 +224,8 @@ void cranpl_open_file_with_default_app(char const* cran_restrict fileName)
 {
 	ShellExecuteA(0, 0, fileName, 0, 0, SW_SHOW);
 }
+
+void cranpl_set_working_dir(char const* cran_restrict path)
+{
+	SetCurrentDirectory(path);
+}

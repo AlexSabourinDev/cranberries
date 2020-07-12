@@ -16,7 +16,14 @@
 #define cran_debug
 #ifdef cran_debug
 #include <assert.h>
-#define cran_assert(a) assert(a)
+#define cran_assert(a) \
+	do \
+	{ \
+		if (!(a)) \
+		{ \
+			__debugbreak(); \
+		} \
+	} while (0)
 #else
 # define cran_assert(a) (void)(a)
 #endif
@@ -150,8 +157,20 @@ typedef struct
 	bool useDirectionalMat; // Force Shader To Directional
 	bool renderToWindow;
 	uint32_t renderRefreshRate;
+
+	char const* cran_restrict workingDir;
+	char const* cran_restrict model;
+	char const* cran_restrict environmentMap;
+	cv3 environmentLightFallback;
+
+	cv3 cameraOrigin;
+	cv3 cameraForward;
+	cv3 cameraUp;
+	cv3 cameraRight;
+
+	uint64_t mainStackMemory;
+	uint64_t scratchStackMemory;
 } render_config_t;
-render_config_t renderConfig;
 
 typedef uint32_t random_seed_t;
 typedef struct
@@ -162,6 +181,7 @@ typedef struct
 	crana_stack_t scratchStack;
 
 	render_stats_t renderStats;
+	const render_config_t renderConfig;
 } render_context_t;
 
 static float micro_to_seconds(uint64_t time)
@@ -505,7 +525,7 @@ typedef struct
 
 // TODO: Improve our texture cache system,
 // We likely want a set amount of memory and page out textures as needed
-#define max_texture_count 100
+#define max_texture_count 500
 typedef struct
 {
 	uint32_t hashes[max_texture_count];
@@ -531,6 +551,7 @@ texture_id_t texture_request(texture_store_t* store, char const* cran_restrict p
 	texture_t* texture = &store->textures[store->nextTexture];
 
 	texture->data = stbi_load(path, &texture->width, &texture->height, &texture->stride, 0);
+	cran_assert(texture->data != NULL);
 
 	texture_format_e formats[] =
 	{
@@ -710,8 +731,8 @@ typedef struct
 	{
 		struct
 		{
-			uint16_t left;
-			uint16_t right;
+			uint32_t left;
+			uint32_t right;
 		} jumps;
 
 		uint32_t index;
@@ -748,6 +769,7 @@ typedef struct
 {
 	cv3 albedoTint;
 	cv3 specularTint;
+	cv3 emission;
 	sampler_t albedoSampler;
 	sampler_t bumpSampler;
 	sampler_t specSampler;
@@ -905,7 +927,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	{
 		index_aabb_pair_t* start;
 		uint32_t count;
-		uint16_t* parentIndex;
+		uint32_t* parentIndex;
 	} bvh_workgroup_t;
 
 	// Simple ring buffer
@@ -948,8 +970,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 		if (bvhWorkgroup[workgroupIter].parentIndex != NULL)
 		{
-			*(bvhWorkgroup[workgroupIter].parentIndex) = (uint16_t)(buildingBVHIter - buildingBVHStart);
-			assert((buildingBVHIter - buildingBVHStart) < UINT16_MAX);
+			*(bvhWorkgroup[workgroupIter].parentIndex) = (uint32_t)(buildingBVHIter - buildingBVHStart);
+			cran_assert((buildingBVHIter - buildingBVHStart) < UINT32_MAX);
 		}
 
 		caabb bounds = start[0].bound;
@@ -1129,8 +1151,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 		if (leafWorkgroup[i].parentIndex != NULL)
 		{
-			*(leafWorkgroup[i].parentIndex) = (uint16_t)(buildingBVHIter - buildingBVHStart);
-			assert((buildingBVHIter - buildingBVHStart) < UINT16_MAX);
+			*(leafWorkgroup[i].parentIndex) = (uint32_t)(buildingBVHIter - buildingBVHStart);
+			cran_assert((buildingBVHIter - buildingBVHStart) < UINT32_MAX);
 		}
 
 		caabb bounds = start[0].bound;
@@ -1280,13 +1302,19 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	cranpr_begin("scene", "generate");
 	cran_stat(uint64_t startTime = cranpl_timestamp_micro());
 
-	static mesh_source_t meshSource;
+	mesh_source_t* meshSource = crana_stack_alloc(&context->stack, sizeof(mesh_source_t));
 	// Mesh
 	mesh_t* meshes;
 	{
 		// TODO: We likely don't want a stack allocator here
 		// clean up would be too tedious, think of a way to encapsulate meshes
-		meshSource.data = cranl_obj_load("sponza.obj", cranl_flip_yz | cranl_cm_to_m,
+
+		if (context->renderConfig.workingDir != NULL && context->renderConfig.workingDir[0] != 0)
+		{
+			cranpl_set_working_dir(context->renderConfig.workingDir);
+		}
+
+		meshSource->data = cranl_obj_load(context->renderConfig.model, cranl_flip_yz | cranl_cm_to_m,
 			(cranl_allocator_t)
 			{
 				.instance = &context->stack,
@@ -1294,13 +1322,13 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 				.free = &crana_stack_free
 			});
 
-		meshes = crana_stack_alloc(&context->stack, sizeof(mesh_t) * meshSource.data.groups.count);
-		for (uint32_t groupIndex = 0; groupIndex < meshSource.data.groups.count; groupIndex++)
+		meshes = crana_stack_alloc(&context->stack, sizeof(mesh_t) * meshSource->data.groups.count);
+		for (uint32_t groupIndex = 0; groupIndex < meshSource->data.groups.count; groupIndex++)
 		{
 			meshes[groupIndex].meshSourceIndex = 0;
 
-			uint32_t faceStart = meshSource.data.groups.groupOffsets[groupIndex];
-			uint32_t faceEnd = (groupIndex + 1) < meshSource.data.groups.count ? meshSource.data.groups.groupOffsets[groupIndex + 1] : meshSource.data.faces.count;
+			uint32_t faceStart = meshSource->data.groups.groupOffsets[groupIndex];
+			uint32_t faceEnd = (groupIndex + 1) < meshSource->data.groups.count ? meshSource->data.groups.groupOffsets[groupIndex + 1] : meshSource->data.faces.count;
 			if (faceEnd - faceStart == 0)
 			{
 				meshes[groupIndex] = (mesh_t) { 0 };
@@ -1312,14 +1340,14 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			{
 				leafs[leafIndex].index = i;
 
-				uint32_t vertIndexA = meshSource.data.faces.vertexIndices[i * 3 + 0];
-				uint32_t vertIndexB = meshSource.data.faces.vertexIndices[i * 3 + 1];
-				uint32_t vertIndexC = meshSource.data.faces.vertexIndices[i * 3 + 2];
+				uint32_t vertIndexA = meshSource->data.faces.vertexIndices[i * 3 + 0];
+				uint32_t vertIndexB = meshSource->data.faces.vertexIndices[i * 3 + 1];
+				uint32_t vertIndexC = meshSource->data.faces.vertexIndices[i * 3 + 2];
 
 				cv3 vertA, vertB, vertC;
-				memcpy(&vertA, meshSource.data.vertices.data + vertIndexA * 3, sizeof(cv3));
-				memcpy(&vertB, meshSource.data.vertices.data + vertIndexB * 3, sizeof(cv3));
-				memcpy(&vertC, meshSource.data.vertices.data + vertIndexC * 3, sizeof(cv3));
+				memcpy(&vertA, meshSource->data.vertices.data + vertIndexA * 3, sizeof(cv3));
+				memcpy(&vertB, meshSource->data.vertices.data + vertIndexB * 3, sizeof(cv3));
+				memcpy(&vertC, meshSource->data.vertices.data + vertIndexC * 3, sizeof(cv3));
 
 				leafs[leafIndex].bound.min = cv3_min(cv3_min(vertA, vertB), vertC);
 				leafs[leafIndex].bound.max = cv3_max(cv3_max(vertA, vertB), vertC);
@@ -1352,11 +1380,12 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	texture_store_t textureStore = { 0 };
 
 	// Environment map
-	sampler_t backgroundSampler = (sampler_t) {.type = sample_nearest};
-	texture_id_t backgroundTextureId;
-	sphere_importance_t backgroundImportance;
+	sampler_t backgroundSampler = (sampler_t) { .type = sample_nearest };
+	texture_id_t backgroundTextureId = { 0 };
+	sphere_importance_t backgroundImportance = { 0 };
+	if (context->renderConfig.environmentMap != NULL && context->renderConfig.environmentMap[0] != 0)
 	{
-		backgroundTextureId = texture_request_f32(&textureStore, "background_4k.hdr");
+		backgroundTextureId = texture_request_f32(&textureStore, context->renderConfig.environmentMap);
 		texture_t const* texture = &textureStore.textures[backgroundTextureId.id - 1];
 
 		backgroundImportance.cdf2d = (float*)crana_stack_alloc(&context->stack, sizeof(float) * texture->width * texture->height);
@@ -1394,7 +1423,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 		for (int y = 0; y < texture->height; y++)
 		{
-			backgroundImportance.cdf1d[y] = backgroundImportance.cdf1d[y]  * cf_rcp(ysum);
+			backgroundImportance.cdf1d[y] = backgroundImportance.cdf1d[y] * cf_rcp(ysum);
 		}
 
 		backgroundImportance.sumTotal = ysum;
@@ -1406,8 +1435,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	{
 		mirror = (material_mirror_t){ .color = (cv3) {1.0f, 1.0f, 1.0f} };
 
-		cran_assert(meshSource.data.materialLibraries.count == 1); // Assume only one material library for now
-		cranl_material_lib_t matLib = cranl_obj_mat_load(meshSource.data.materialLibraries.names[0], (cranl_allocator_t)
+		cran_assert(meshSource->data.materialLibraries.count == 1); // Assume only one material library for now
+		cranl_material_lib_t matLib = cranl_obj_mat_load(meshSource->data.materialLibraries.names[0], (cranl_allocator_t)
 			{
 				.instance = &context->stack,
 				.alloc = &crana_stack_alloc,
@@ -1421,6 +1450,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			microfacets[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
 			microfacets[i].refractiveIndex = matLib.materials[i].refractiveIndex;
 			microfacets[i].specularTint = (cv3) { matLib.materials[i].specular[0], matLib.materials[i].specular[1], matLib.materials[i].specular[2] };
+			microfacets[i].emission = (cv3) { matLib.materials[i].emission[0], matLib.materials[i].emission[1], matLib.materials[i].emission[2] };
 			// Conversion taken from http://graphicrants.blogspot.com/2013/08/specular-brdf-reference.html
 			microfacets[i].gloss = 1.0f - sqrtf(cf_rcp(matLib.materials[i].specularAmount + 2.0f)*2.0f);
 
@@ -1450,13 +1480,13 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			}
 		}
 
-		material_index_t* materialIndices = crana_stack_alloc(&context->stack, sizeof(material_index_t) * meshSource.data.materials.count);
-		for (uint32_t i = 0; i < meshSource.data.materials.count; i++)
+		material_index_t* materialIndices = crana_stack_alloc(&context->stack, sizeof(material_index_t) * meshSource->data.materials.count);
+		for (uint32_t i = 0; i < meshSource->data.materials.count; i++)
 		{
 			uint16_t dataIndex = 0;
 			for (; dataIndex < matLib.count; dataIndex++)
 			{
-				if (strcmp(matLib.materials[dataIndex].name, meshSource.data.materials.materialNames[i]) == 0)
+				if (strcmp(matLib.materials[dataIndex].name, meshSource->data.materials.materialNames[i]) == 0)
 				{
 					break;
 				}
@@ -1465,11 +1495,11 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			materialIndices[i] = (material_index_t) { .dataIndex = dataIndex, .typeIndex = material_microfacet };
 		}
 
-		meshSource.materialIndices = materialIndices;
+		meshSource->materialIndices = materialIndices;
 	}
 
-	instance_t* instances = crana_stack_alloc(&context->stack, sizeof(instance_t)*meshSource.data.groups.count);
-	for (uint32_t i = 0; i < meshSource.data.groups.count; i++)
+	instance_t* instances = crana_stack_alloc(&context->stack, sizeof(instance_t)*meshSource->data.groups.count);
+	for (uint32_t i = 0; i < meshSource->data.groups.count; i++)
 	{
 		instances[i] = (instance_t)
 		{
@@ -1484,7 +1514,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		.instances =
 		{
 			.data = instances,
-			.count = meshSource.data.groups.count
+			.count = meshSource->data.groups.count
 		},
 		.renderables = meshes,
 		.materials =
@@ -1494,7 +1524,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		},
 		.meshStore =
 		{
-			.sources = &meshSource,
+			.sources = meshSource,
 			.count = 1,
 		},
 		.textureStore = textureStore,
@@ -1545,7 +1575,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	cranpr_begin("scene", "cast");
 
 	context->depth++;
-	if (context->depth >= renderConfig.maxDepth)
+	if (context->depth >= context->renderConfig.maxDepth)
 	{
 		context->depth--;
 		cranpr_end("scene", "cast");
@@ -1679,10 +1709,10 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			memcpy(&vertB, sourceMesh->data.vertices.data + vertIndexB * 3, sizeof(cv3));
 			memcpy(&vertC, sourceMesh->data.vertices.data + vertIndexC * 3, sizeof(cv3));
 
-			float du0 = uvB.x - uvA.x;
-			float dv0 = uvB.y - uvA.y;
-			float du1 = uvC.x - uvA.x;
-			float dv1 = uvC.y - uvA.y;
+			float du0 = uvC.x - uvA.x;
+			float dv0 = uvC.y - uvA.y;
+			float du1 = uvB.x - uvA.x;
+			float dv1 = uvB.y - uvA.y;
 
 			// TODO: Hack, will have to find a better way to do this.
 			// Getting repeating UV value indices causing 0s to appear
@@ -1691,8 +1721,10 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			du1 = du1 == 0.0f ? 0.0001f : du1;
 			dv1 = dv1 == 0.0f ? 0.0001f : dv1;
 
-			cv3 e0 = cv3_sub(vertB, vertA);
-			cv3 e1 = cv3_sub(vertC, vertA);
+			cv3 e0 = cv3_sub(vertA, vertC);
+			cv3 e1 = cv3_sub(vertB, vertC);
+			cran_assert(cv3_dot(e0, closestHitInfo.normal) != 1.0f);
+			cran_assert(cv3_dot(e1, closestHitInfo.normal) != 1.0f);
 
 			// e0=du0T+dv0B (1)
 			// e1=du1T+dv1B (2)
@@ -1711,6 +1743,8 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			cran_assert(cv3_sqrlength(closestHitInfo.tangent) > 0.0f);
 			closestHitInfo.tangent = cv3_normalize(closestHitInfo.tangent);
 			closestHitInfo.bitangent = cv3_normalize(cv3_cross(closestHitInfo.normal, closestHitInfo.tangent));
+			cran_assert(cf_finite(closestHitInfo.bitangent.x) && cf_finite(closestHitInfo.bitangent.y) && cf_finite(closestHitInfo.bitangent.z));
+			cran_assert(cf_finite(closestHitInfo.tangent.x) && cf_finite(closestHitInfo.tangent.y) && cf_finite(closestHitInfo.tangent.z));
 		}
 
 		crana_stack_free(&context->stack, candidates);
@@ -1722,7 +1756,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 		material_index_t materialIndex = closestHitInfo.materialIndex;
 		cv3 intersectionPoint = cv3_add(rayO, cv3_mulf(rayD, closestHitInfo.distance));
 
-		uint32_t shaderIndex = renderConfig.useDirectionalMat ? material_directional : materialIndex.typeIndex;
+		uint32_t shaderIndex = context->renderConfig.useDirectionalMat ? material_directional : materialIndex.typeIndex;
 		shader_outputs_t shaderResults = shaders[shaderIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
 			(shader_inputs_t)
 			{
@@ -1746,7 +1780,16 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 
 	cran_stat(uint64_t skyboxStartTime = cranpl_timestamp_micro());
-	cv3 skybox = (cv3) { 50.0f, 50.0f, 50.0f };// sample_hdr(rayD, backgroundSampler);
+	cv3 skybox;
+	if (scene->environment.texture.id == 0)
+	{
+		skybox = context->renderConfig.environmentLightFallback;
+	}
+	else
+	{
+		cv4 skyboxColor = sampler_sample_3D(&scene->textureStore, scene->environment.sampler, scene->environment.texture, rayD);
+		skybox = (cv3) { skyboxColor.r, skyboxColor.g, skyboxColor.b };
+	}
 	cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
 
 	context->depth--;
@@ -1849,7 +1892,13 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	normal = cv3_normalize(normal);
 	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
 
-	float roughness = fmaxf(1.0f - microfacetData.gloss, 0.01f);
+	float gloss = microfacetData.gloss;
+	if (microfacetData.specTexture.id != 0)
+	{
+		cv4 glossAmount = sampler_sample(&scene->textureStore, microfacetData.specSampler, microfacetData.specTexture, inputs.uv);
+		gloss = gamma_to_linear(glossAmount).r;
+	}
+	float roughness = fmaxf(1.0f - gloss, 0.00001f);
 
 	float r1 = random01f(&context->randomSeed);
 	float r2 = random01f(&context->randomSeed);
@@ -1896,7 +1945,8 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		selectedPDF = ggxPDF;
 	}
 
-	// final weight and PDF
+	// final weight and PDF using balance heuristic
+	// https://graphics.stanford.edu/courses/cs348b-03/papers/veach-chapter9.pdf
 	float weight = 0.0f;
 	if (ggxPDF > 0.0f && lambertPDF > 0.0f)
 	{
@@ -1961,6 +2011,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		}
 	}
 	light = cv3_mulf(light, weight * cf_rcp(selectedPDF * 0.5f));
+	light = cv3_add(light, microfacetData.emission);
 
 	cranpr_end("shader", "microfacet");
 	return (shader_outputs_t)
@@ -2061,10 +2112,10 @@ static void render_scene_async(void* cran_restrict data)
 
 				// N-Rooks sampling
 				// http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.15.1601&rep=rep1&type=pdf
-				cv2* samplingPoints = crana_stack_alloc(&renderContext->stack, sizeof(cv2) * renderConfig.samplesPerPixel);
+				cv2* samplingPoints = crana_stack_alloc(&renderContext->stack, sizeof(cv2) * renderContext->renderConfig.samplesPerPixel);
 				
-				float rsamplesPerPixel = cf_rcp((float)renderConfig.samplesPerPixel);
-				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
+				float rsamplesPerPixel = cf_rcp((float)renderContext->renderConfig.samplesPerPixel);
+				for (uint32_t i = 0; i < renderContext->renderConfig.samplesPerPixel; i++)
 				{
 					samplingPoints[i] = (cv2)
 					{
@@ -2073,17 +2124,17 @@ static void render_scene_async(void* cran_restrict data)
 					};
 				}
 
-				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
+				for (uint32_t i = 0; i < renderContext->renderConfig.samplesPerPixel; i++)
 				{
 					float t = samplingPoints[i].x;
-					uint32_t source = randomRange(&renderContext->randomSeed, i, renderConfig.samplesPerPixel);
+					uint32_t source = randomRange(&renderContext->randomSeed, i, renderContext->renderConfig.samplesPerPixel);
 					samplingPoints[i].x = samplingPoints[source].x;
 					samplingPoints[source].x = t;
 				}
 
 				cv3 sceneColor = { 0 };
 	
-				for (uint32_t i = 0; i < renderConfig.samplesPerPixel; i++)
+				for (uint32_t i = 0; i < renderContext->renderConfig.samplesPerPixel; i++)
 				{
 					cran_stat(renderContext->renderStats.primaryRayCount++);
 
@@ -2151,17 +2202,31 @@ int main()
 	cranpr_init();
 	cranpr_begin("cranberray","main");
 
-	renderConfig = (render_config_t)
+	render_config_t renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 4,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,
 		.renderBlockHeight = 12,
 		.useDirectionalMat = false,
+
 		.renderToWindow = true,
-		.renderRefreshRate = 1000
+		.renderRefreshRate = 1000,
+
+		.workingDir = "bistro/exterior",
+		.model = "exterior.obj",
+
+		.cameraOrigin = (cv3){ -10.0f, 0.0f, 2.0f },
+		.cameraForward = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f },
+		.cameraRight = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f },
+		.cameraUp = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f },
+
+		.mainStackMemory = 1024ull*1024ull*1024ull*3,
+		.scratchStackMemory = 1024ull*1024ull*1024ull,
+
+		.environmentLightFallback = (cv3) { 10.0f, 10.0f, 10.0f }
 	};
 
 	// 3GB for persistent memory
@@ -2171,14 +2236,15 @@ int main()
 		.randomSeed = 57,
 		.stack =
 		{
-			.mem = malloc(1024ull * 1024ull * 1024ull * 3),
-			.size = 1024ull*1024ull*1024ull*3
+			.mem = malloc(renderConfig.mainStackMemory),
+			.size = renderConfig.mainStackMemory
 		},
 		.scratchStack =
 		{
-			.mem = malloc(1024 * 1024 * 1024),
-			.size = 1024*1024*1024
-		}
+			.mem = malloc(renderConfig.scratchStackMemory),
+			.size = renderConfig.scratchStackMemory
+		},
+		.renderConfig = renderConfig
 	};
 
 	static render_data_t mainRenderData;
@@ -2200,10 +2266,10 @@ int main()
 	mainRenderData.xStep = nearWidth / (float)mainRenderData.imgWidth;
 	mainRenderData.yStep = nearHeight / (float)mainRenderData.imgHeight;
 
-	mainRenderData.origin = (cv3){ 1.0f, 0.0f, 1.0f };
-	mainRenderData.forward = (cv3){ .x = -1.0f,.y = 0.0f,.z = 0.0f };
-	mainRenderData.right = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f };
-	mainRenderData.up = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f };
+	mainRenderData.origin = renderConfig.cameraOrigin;
+	mainRenderData.forward = renderConfig.cameraForward;
+	mainRenderData.right = renderConfig.cameraRight;
+	mainRenderData.up = renderConfig.cameraUp;
 
 	float* cran_restrict hdrImage = crana_stack_alloc(&mainRenderContext.stack, mainRenderData.imgWidth * mainRenderData.imgHeight * mainRenderData.imgStride * sizeof(float));
 
@@ -2262,7 +2328,8 @@ int main()
 				{
 					.mem = crana_stack_alloc(&mainRenderContext.stack, threadStackSize),
 					.size = threadStackSize
-				}
+				},
+				.renderConfig = renderConfig
 			},
 			.hdrOutput = hdrImage
 		};

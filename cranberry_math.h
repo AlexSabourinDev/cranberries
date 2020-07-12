@@ -93,6 +93,7 @@ cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restri
 cran_forceinline float cf_bilinear(float topLeft, float topRight, float bottomLeft, float bottomRight, float tx, float ty);
 cran_forceinline float cf_lerp(float a, float b, float t);
 cran_forceinline float cf_sign(float a);
+cran_forceinline bool cf_finite(float a);
 cran_forceinline float cf_frac(float a);
 
 // Lane API
@@ -252,6 +253,17 @@ cran_forceinline float cf_sign(float a)
 	conv.f = a;
 	conv.u = conv.u & 0x80000000 | 0x3F800000;
 	return conv.f;
+}
+
+cran_forceinline bool cf_finite(float a)
+{
+	union
+	{
+		uint32_t u;
+		float f;
+	} conv;
+	conv.f = a;
+	return (conv.u & 0x7F800000) != 0x7F800000;
 }
 
 cran_forceinline float cf_frac(float a)

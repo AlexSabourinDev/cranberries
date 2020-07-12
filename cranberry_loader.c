@@ -377,6 +377,7 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 	cranl_material_t* materials = allocator.alloc(allocator.instance, materialCount * sizeof(cranl_material_t));
 	memset(materials, 0, materialCount * sizeof(cranl_material_t));
 
+	const char* fileNameDelim = "\n\r";
 	uint32_t materialIndex = 0;
 	for (char* cran_restrict fileIter = fileStart; fileIter != fileEnd; fileIter = token(fileIter, fileEnd, delim))
 	{
@@ -417,6 +418,16 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 					materials[materialIndex].specular[1] = g;
 					materials[materialIndex].specular[2] = b;
 				}
+				else if (memcmp(fileIter, "Ke ", 3) == 0)
+				{
+					float r=strtof(fileIter + 2, &fileIter);
+					float g=strtof(fileIter + 1, &fileIter);
+					float b=strtof(fileIter + 1, &fileIter);
+
+					materials[materialIndex].emission[0] = r;
+					materials[materialIndex].emission[1] = g;
+					materials[materialIndex].emission[2] = b;
+				}
 				else if (memcmp(fileIter, "Ni ", 3) == 0)
 				{
 					float r=strtof(fileIter + 2, &fileIter);
@@ -433,7 +444,7 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 				{
 					char* albedoMap = fileIter + strlen("map_Kd") + 1;
 
-					char const* albedoMapEnd = advance_to(albedoMap, fileEnd, delim);
+					char const* albedoMapEnd = advance_to(albedoMap, fileEnd, fileNameDelim);
 					assert(albedoMapEnd != NULL);
 
 					uint64_t nameLength = (albedoMapEnd - albedoMap);
@@ -445,7 +456,7 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 				{
 					char* bumpMap = fileIter + strlen("map_bump") + 1;
 
-					char const* bumpMapEnd = advance_to(bumpMap, fileEnd, delim);
+					char const* bumpMapEnd = advance_to(bumpMap, fileEnd, fileNameDelim);
 					assert(bumpMapEnd != NULL);
 
 					uint64_t nameLength = (bumpMapEnd - bumpMap);
@@ -457,7 +468,7 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 				{
 					char* map = fileIter + strlen("map_Ks") + 1;
 
-					char const* mapEnd = advance_to(map, fileEnd, delim);
+					char const* mapEnd = advance_to(map, fileEnd, fileNameDelim);
 					assert(mapEnd != NULL);
 
 					uint64_t nameLength = (mapEnd - map);
@@ -469,7 +480,7 @@ cranl_material_lib_t cranl_obj_mat_load(char const* cran_restrict filePath, cran
 				{
 					char* map = fileIter + strlen("map_d") + 1;
 
-					char const* mapEnd = advance_to(map, fileEnd, delim);
+					char const* mapEnd = advance_to(map, fileEnd, fileNameDelim);
 					assert(mapEnd != NULL);
 
 					uint64_t nameLength = (mapEnd - map);
