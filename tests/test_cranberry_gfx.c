@@ -244,11 +244,11 @@ int main(void)
 				static float spin = 0.0f;
 				spin += 0.01f;
 
-				crang_mat4x3_t transforms[20];
+				crang_mat4x3_t transforms[10];
 
-				for (uint32_t i = 0; i < 20; i++)
+				for (uint32_t i = 0; i < 10; i++)
 				{
-					float x = (float)i * 2.0f - 20.0f;
+					float x = (float)i * 4.0f - 20.0f;
 					transforms[i] = (crang_mat4x3_t)
 					{
 						{
@@ -272,7 +272,7 @@ int main(void)
 									{
 										.mesh = someMesh,
 										.transforms = transforms,
-										.count = 20
+										.count = 10
 									}
 								}
 							}

@@ -514,6 +514,89 @@ const char* crang_validation_layers[crang_validation_count] = { "VK_LAYER_LUNARG
 const char* crang_validation_layers[crang_validation_count] = {};
 #endif
 
+typedef struct
+{
+	VkDevice vkDevice;
+	VkPhysicalDevice vkPhysicalDevice;
+	VkImageUsageFlagBits vkUsage;
+	VkFormat vkFormat;
+	VkImageAspectFlagBits vkImageAspect;
+	uint32_t width;
+	uint32_t height;
+	uint32_t stride;
+	cranvk_allocator_t* allocator;
+} crang_image_alloc_t;
+
+typedef struct
+{
+	cranvk_allocation_t allocation;
+	VkImage vkImage;
+	VkImageView vkImageView;
+} crang_image_and_view_t;
+
+static crang_image_and_view_t crang_alloc_image_and_view(crang_image_alloc_t alloc)
+{
+	crang_image_and_view_t imageAndView;
+
+	{
+		VkImageCreateInfo imageCreate =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.imageType = VK_IMAGE_TYPE_2D,
+			.format = alloc.vkFormat,
+			.extent = (VkExtent3D) { .width = alloc.width,.height = alloc.height,.depth = 1 },
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.tiling = VK_IMAGE_TILING_OPTIMAL,
+			.usage = alloc.vkUsage,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.sharingMode = VK_SHARING_MODE_EXCLUSIVE
+		};
+
+		crang_check(vkCreateImage(alloc.vkDevice, &imageCreate, crang_no_allocator, &imageAndView.vkImage));
+	}
+
+	// Allocation
+	{
+		VkMemoryRequirements memoryRequirements;
+		vkGetImageMemoryRequirements(alloc.vkDevice, imageAndView.vkImage, &memoryRequirements);
+
+		unsigned int preferredBits = 0;
+		uint32_t memoryIndex = cranvk_find_memory_index(alloc.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
+
+		cranvk_allocation_t* allocation = &imageAndView.allocation;
+		*allocation = cranvk_allocator_allocate(alloc.vkDevice, alloc.allocator, memoryIndex,
+			alloc.width * alloc.height * alloc.stride, memoryRequirements.alignment);
+
+		crang_check(vkBindImageMemory(alloc.vkDevice, imageAndView.vkImage, allocation->memory, allocation->offset));
+	}
+
+	// Image view
+	{
+		VkImageViewCreateInfo  imageCreateViewInfo =
+		{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = imageAndView.vkImage,
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = alloc.vkFormat,
+
+			.components = {.r = VK_COMPONENT_SWIZZLE_R,.g = VK_COMPONENT_SWIZZLE_G,.b = VK_COMPONENT_SWIZZLE_B,.a = VK_COMPONENT_SWIZZLE_A },
+			.subresourceRange =
+			{
+				.aspectMask = alloc.vkImageAspect,
+				.levelCount = 1,
+				.layerCount = 1,
+				.baseMipLevel = 0
+			}
+		};
+
+		crang_check(vkCreateImageView(alloc.vkDevice, &imageCreateViewInfo, crang_no_allocator, &imageAndView.vkImageView));
+	}
+
+	return imageAndView;
+}
+
 crang_context_t* crang_init(crang_init_desc_t* desc)
 {
 	context_t* ctx = malloc(sizeof(context_t));
@@ -1003,118 +1086,44 @@ crang_context_t* crang_init(crang_init_desc_t* desc)
 			// Create the gbuffer image
 			for (uint32_t gbuffer = 0; gbuffer < crang_gbuffer_image_count; gbuffer++)
 			{
+				crang_image_alloc_t imageAlloc = 
 				{
-					VkImageCreateInfo imageCreate =
-					{
-						.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-						.imageType = VK_IMAGE_TYPE_2D,
-						.format = VK_FORMAT_R8G8B8A8_UNORM,
-						.extent = (VkExtent3D) { .width = ctx->present.vkMaxSurfaceExtents.width,.height = ctx->present.vkMaxSurfaceExtents.height,.depth = 1 },
-						.mipLevels = 1,
-						.arrayLayers = 1,
-						.samples = VK_SAMPLE_COUNT_1_BIT,
-						.tiling = VK_IMAGE_TILING_OPTIMAL,
-						.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
-						.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-						.sharingMode = VK_SHARING_MODE_EXCLUSIVE
-					};
+					.vkDevice = ctx->present.vkDevice,
+					.vkPhysicalDevice = ctx->present.vkPhysicalDevice,
+					.vkUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+					.vkFormat = VK_FORMAT_R8G8B8A8_UNORM,
+					.vkImageAspect = VK_IMAGE_ASPECT_COLOR_BIT,
+					.width = ctx->present.vkMaxSurfaceExtents.width,
+					.height = ctx->present.vkMaxSurfaceExtents.height,
+					.stride = 4,
+					.allocator = &ctx->vkAllocator
+				};
 
-					crang_check(vkCreateImage(ctx->present.vkDevice, &imageCreate, crang_no_allocator, &ctx->materials.deferred.doubleBuffer[i].vkGbufferImage[gbuffer]));
-				}
-
-				// Allocation
-				{
-					VkMemoryRequirements memoryRequirements;
-					vkGetImageMemoryRequirements(ctx->present.vkDevice, ctx->materials.deferred.doubleBuffer[i].vkGbufferImage[gbuffer], &memoryRequirements);
-
-					unsigned int preferredBits = 0;
-					uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
-
-					cranvk_allocation_t* allocation = &ctx->materials.deferred.doubleBuffer[i].gbufferAllocation[gbuffer];
-					*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex,
-						ctx->present.vkMaxSurfaceExtents.width * ctx->present.vkMaxSurfaceExtents.height * 4, memoryRequirements.alignment);
-
-					crang_check(vkBindImageMemory(ctx->present.vkDevice, ctx->materials.deferred.doubleBuffer[i].vkGbufferImage[gbuffer], allocation->memory, allocation->offset));
-				}
-
-				// Image view
-				{
-					VkImageViewCreateInfo  imageCreateViewInfo =
-					{
-						.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-						.image = ctx->materials.deferred.doubleBuffer[i].vkGbufferImage[gbuffer],
-						.viewType = VK_IMAGE_VIEW_TYPE_2D,
-						.format = VK_FORMAT_R8G8B8A8_UNORM,
-
-						.components = {.r = VK_COMPONENT_SWIZZLE_R,.g = VK_COMPONENT_SWIZZLE_G,.b = VK_COMPONENT_SWIZZLE_B,.a = VK_COMPONENT_SWIZZLE_A },
-						.subresourceRange =
-						{
-							.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-							.levelCount = 1,
-							.layerCount = 1,
-							.baseMipLevel = 0
-						}
-					};
-
-					crang_check(vkCreateImageView(ctx->present.vkDevice, &imageCreateViewInfo, crang_no_allocator, &ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView[gbuffer]));
-				}
+				crang_image_and_view_t imageAndView = crang_alloc_image_and_view(imageAlloc);
+				ctx->materials.deferred.doubleBuffer[i].vkGbufferImage[gbuffer] = imageAndView.vkImage;
+				ctx->materials.deferred.doubleBuffer[i].vkGbufferImageView[gbuffer] = imageAndView.vkImageView;
+				ctx->materials.deferred.doubleBuffer[i].gbufferAllocation[gbuffer] = imageAndView.allocation;
 			}
 
 			// Depth image
 			{
-				VkImageCreateInfo imageCreate =
+				crang_image_alloc_t imageAlloc =
 				{
-					.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-					.imageType = VK_IMAGE_TYPE_2D,
-					.format = VK_FORMAT_D32_SFLOAT,
-					.extent = (VkExtent3D) { .width = ctx->present.vkMaxSurfaceExtents.width,.height = ctx->present.vkMaxSurfaceExtents.height,.depth = 1 },
-					.mipLevels = 1,
-					.arrayLayers = 1,
-					.samples = VK_SAMPLE_COUNT_1_BIT,
-					.tiling = VK_IMAGE_TILING_OPTIMAL,
-					.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-					.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-					.sharingMode = VK_SHARING_MODE_EXCLUSIVE
+					.vkDevice = ctx->present.vkDevice,
+					.vkPhysicalDevice = ctx->present.vkPhysicalDevice,
+					.vkUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+					.vkFormat = VK_FORMAT_D24_UNORM_S8_UINT,
+					.vkImageAspect = VK_IMAGE_ASPECT_DEPTH_BIT,
+					.width = ctx->present.vkMaxSurfaceExtents.width,
+					.height = ctx->present.vkMaxSurfaceExtents.height,
+					.stride = 4,
+					.allocator = &ctx->vkAllocator
 				};
 
-				crang_check(vkCreateImage(ctx->present.vkDevice, &imageCreate, crang_no_allocator, &ctx->present.doubleBuffer[i].vkDepthImage));
-			}
-
-			// Allocation
-			{
-				VkMemoryRequirements memoryRequirements;
-				vkGetImageMemoryRequirements(ctx->present.vkDevice, ctx->present.doubleBuffer[i].vkDepthImage, &memoryRequirements);
-
-				unsigned int preferredBits = 0;
-				uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
-
-				cranvk_allocation_t* allocation = &ctx->present.doubleBuffer[i].depthAllocation;
-				*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex,
-					ctx->present.vkMaxSurfaceExtents.width * ctx->present.vkMaxSurfaceExtents.height * 4, memoryRequirements.alignment);
-
-				crang_check(vkBindImageMemory(ctx->present.vkDevice, ctx->present.doubleBuffer[i].vkDepthImage, allocation->memory, allocation->offset));
-			}
-
-			// Image view
-			{
-				VkImageViewCreateInfo  imageCreateViewInfo =
-				{
-					.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-					.image = ctx->present.doubleBuffer[i].vkDepthImage,
-					.viewType = VK_IMAGE_VIEW_TYPE_2D,
-					.format = VK_FORMAT_D32_SFLOAT,
-
-					.components = {.r = VK_COMPONENT_SWIZZLE_R,.g = VK_COMPONENT_SWIZZLE_G,.b = VK_COMPONENT_SWIZZLE_B,.a = VK_COMPONENT_SWIZZLE_A },
-					.subresourceRange =
-					{
-						.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-						.levelCount = 1,
-						.layerCount = 1,
-						.baseMipLevel = 0
-					}
-				};
-
-				crang_check(vkCreateImageView(ctx->present.vkDevice, &imageCreateViewInfo, crang_no_allocator, &ctx->present.doubleBuffer[i].vkDepthImageView));
+				crang_image_and_view_t imageAndView = crang_alloc_image_and_view(imageAlloc);
+				ctx->present.doubleBuffer[i].vkDepthImage = imageAndView.vkImage;
+				ctx->present.doubleBuffer[i].vkDepthImageView = imageAndView.vkImageView;
+				ctx->present.doubleBuffer[i].depthAllocation = imageAndView.allocation;
 			}
 
 			// Create the framebuffer
@@ -1761,61 +1770,23 @@ crang_image_id_t crang_create_image(crang_context_t* context, crang_image_desc_t
 
 	// Image
 	uint32_t imageIndex = ctx->textures.imageCount++;
+	crang_image_alloc_t imageAlloc =
 	{
-		VkImageCreateInfo imageCreate =
-		{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-			.imageType = VK_IMAGE_TYPE_2D,
-			.format = formats[desc->format],
-			.extent = {.width = desc->width, .height = desc->height,.depth = 1 },
-			.mipLevels = 1,
-			.arrayLayers = 1,
-			.samples = VK_SAMPLE_COUNT_1_BIT,
-			.tiling = VK_IMAGE_TILING_OPTIMAL,
-			.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT ,
-			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-			.sharingMode = VK_SHARING_MODE_EXCLUSIVE
-		};
+		.vkDevice = ctx->present.vkDevice,
+		.vkPhysicalDevice = ctx->present.vkPhysicalDevice,
+		.vkUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		.vkFormat = formats[desc->format],
+		.vkImageAspect = VK_IMAGE_ASPECT_COLOR_BIT,
+		.width = desc->width,
+		.height = desc->height,
+		.stride = formatSize[desc->format],
+		.allocator = &ctx->vkAllocator
+	};
 
-		crang_check(vkCreateImage(ctx->present.vkDevice, &imageCreate, crang_no_allocator, &ctx->textures.images[imageIndex].vkImage));
-	}
-
-	// Allocation
-	{
-		VkMemoryRequirements memoryRequirements;
-		vkGetImageMemoryRequirements(ctx->present.vkDevice, ctx->textures.images[imageIndex].vkImage, &memoryRequirements);
-
-		unsigned int preferredBits = 0;
-		uint32_t memoryIndex = cranvk_find_memory_index(ctx->present.vkPhysicalDevice, memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, preferredBits);
-
-		cranvk_allocation_t* allocation = &ctx->textures.images[imageIndex].allocation;
-		*allocation = cranvk_allocator_allocate(ctx->present.vkDevice, &ctx->vkAllocator, memoryIndex,
-			desc->width * desc->height * formatSize[desc->format], memoryRequirements.alignment);
-
-		crang_check(vkBindImageMemory(ctx->present.vkDevice, ctx->textures.images[imageIndex].vkImage, allocation->memory, allocation->offset));
-	}
-
-	// Image view
-	{
-		VkImageViewCreateInfo  imageCreateViewInfo =
-		{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.image = ctx->textures.images[imageIndex].vkImage,
-			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-			.format = formats[desc->format],
-
-			.components = {.r = VK_COMPONENT_SWIZZLE_R,.g = VK_COMPONENT_SWIZZLE_G,.b = VK_COMPONENT_SWIZZLE_B,.a = VK_COMPONENT_SWIZZLE_A },
-			.subresourceRange =
-			{
-				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-				.levelCount = 1,
-				.layerCount = 1,
-				.baseMipLevel = 0
-			}
-		};
-
-		crang_check(vkCreateImageView(ctx->present.vkDevice, &imageCreateViewInfo, crang_no_allocator, &ctx->textures.images[imageIndex].vkImageView));
-	}
+	crang_image_and_view_t imageAndView = crang_alloc_image_and_view(imageAlloc);
+	ctx->textures.images[imageIndex].vkImage = imageAndView.vkImage;
+	ctx->textures.images[imageIndex].vkImageView = imageAndView.vkImageView;
+	ctx->textures.images[imageIndex].allocation = imageAndView.allocation;
 
 	VkBuffer srcBuffer;
 	cranvk_allocation_t allocation;

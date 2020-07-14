@@ -41,6 +41,7 @@ typedef struct
 
 typedef struct
 {
+	// uv pos[3], normal[3]
 	float pos[4];
 	float normal[4];
 } crang_vertex_t;
