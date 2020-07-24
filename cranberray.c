@@ -724,7 +724,6 @@ static float light_attenuation(cv3 l, cv3 r)
 	return cf_rcp(1.0f + cv3_sqrlength(cv3_sub(l, r)));
 }
 
-// TODO: Refine our scene description
 typedef struct
 {
 	union
@@ -1892,11 +1891,11 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	normal = cv3_normalize(normal);
 	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
 
-	float gloss = microfacetData.gloss;
+	float gloss = microfacetData.gloss; // Sharing gloss as both "minimum reflectance" and "roughness"...
 	if (microfacetData.specTexture.id != 0)
 	{
 		cv4 glossAmount = sampler_sample(&scene->textureStore, microfacetData.specSampler, microfacetData.specTexture, inputs.uv);
-		gloss = gamma_to_linear(glossAmount).r;
+		gloss = glossAmount.r;
 	}
 	float roughness = fmaxf(1.0f - gloss, 0.00001f);
 
@@ -1910,8 +1909,18 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		distribution_count
 	};
 
+	float geometricFresnel = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, normal, viewDir);
+	geometricFresnel = fmaxf(geometricFresnel, microfacetData.specularTint.r * gloss); // Force how much we can reflect at a minimum
+	float weights[distribution_count] =
+	{
+		[distribution_lambert] = 1.0f - geometricFresnel,
+		[distribution_ggx] = geometricFresnel
+	};
+
 	cv3 castDir, h;
-	uint32_t distribution = randomRange(&context->randomSeed, 0, distribution_count);
+
+	bool reflected = random01f(&context->randomSeed) < weights[distribution_ggx];
+	uint32_t distribution = reflected ? distribution_ggx : distribution_lambert;
 	if (distribution == distribution_lambert) // Lambert distribution
 	{
 		castDir = hemisphere_surface_random_lambert(r1, r2);
@@ -1950,7 +1959,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	float weight = 0.0f;
 	if (ggxPDF > 0.0f && lambertPDF > 0.0f)
 	{
-		weight = 0.5f*selectedPDF * cf_rcp(0.5f * ggxPDF + 0.5f * lambertPDF);
+		weight = weights[distribution]*selectedPDF * cf_rcp(weights[distribution_ggx] * ggxPDF + weights[distribution_lambert] * lambertPDF);
 	}
 
 	cv3 light;
@@ -1997,7 +2006,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 				result.light = cv3_mulf(result.light, light_attenuation(result.surface, inputs.surface));
 			}
 
-			light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
+			light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, h), 0.0f));
 			light = cv3_mul(light, microfacetData.specularTint); // TODO: Is there any physics behind this specular albedo concept?
 		}
 		else
@@ -2005,7 +2014,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			light = (cv3) { 0 };
 		}
 	}
-	light = cv3_mulf(light, weight * cf_rcp(selectedPDF * 0.5f));
+	light = cv3_mulf(light, weight * cf_rcp(selectedPDF * weights[distribution]));
 	light = cv3_add(light, microfacetData.emission);
 
 	cranpr_end("shader", "microfacet");
@@ -2197,23 +2206,47 @@ int main()
 	cranpr_init();
 	cranpr_begin("cranberray","main");
 
+	typedef struct
+	{
+		const char* cran_restrict dir;
+		const char* cran_restrict model;
+		cv3 origin;
+	} scene_setup_t;
+
+	scene_setup_t sponza = 
+	{
+		.dir = "",
+		.model = "sponza.obj",
+		.origin = (cv3) {.x = -4.0f, 0.0f, 1.0f}
+	};
+	(void)sponza;
+
+	scene_setup_t bistro = 
+	{
+		.dir = "bistro/exterior",
+		.model = "exterior.obj",
+		.origin = (cv3){ -10.0f, 0.0f, 2.0f }
+	};
+	(void)bistro;
+
+	scene_setup_t scene = bistro;
 	render_config_t renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 512,
+		.samplesPerPixel = 10,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,
 		.renderBlockHeight = 12,
 		.useDirectionalMat = false,
 
-		.renderToWindow = false,
+		.renderToWindow = true,
 		.renderRefreshRate = 1000,
 
-		.workingDir = "bistro/exterior",
-		.model = "exterior.obj",
+		.workingDir = scene.dir,
+		.model = scene.model,
 
-		.cameraOrigin = (cv3){ -10.0f, 0.0f, 2.0f },
+		.cameraOrigin = scene.origin,
 		.cameraForward = (cv3){ .x = 1.0f,.y = 0.0f,.z = 0.0f },
 		.cameraRight = (cv3){ .x = 0.0f,.y = 1.0f,.z = 0.0f },
 		.cameraUp = (cv3){ .x = 0.0f,.y = 0.0f,.z = 1.0f },

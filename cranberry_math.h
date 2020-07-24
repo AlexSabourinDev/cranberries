@@ -673,7 +673,7 @@ cran_forceinline float caabb_surface_area(caabb l)
 // Miscellaneous Implementation
 cran_forceinline cv3 cmi_fresnel_schlick_r0(cv3 r0, cv3 n, cv3 i)
 {
-	float a = fminf(1.0f + cv3_dot(n, i), 1.0f);
+	float a = fminf(1.0f - cv3_dot(n, i), 1.0f);
 	return cv3_add(r0, cv3_mulf(cv3_sub((cv3) { 1.0f, 1.0f, 1.0f }, r0), a*a*a*a*a));
 }
 
@@ -683,6 +683,6 @@ cran_forceinline float cmi_fresnel_schlick(float r1, float r2, cv3 n, cv3 i)
 {
 	float r0 = (r1 - r2) / (r1 + r2);
 	r0 *= r0;
-	float a = fminf(1.0f + cv3_dot(n, i), 1.0f);
+	float a = fminf(1.0f - cv3_dot(n, i), 1.0f);
 	return r0 + (1.0f - r0)*a*a*a*a*a;
 }

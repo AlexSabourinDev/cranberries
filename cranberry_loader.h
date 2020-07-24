@@ -58,11 +58,11 @@ typedef struct
 
 typedef struct
 {
-	char* name;
-	char* albedoMap; // map_Kd
-	char* bumpMap; // map_bump
-	char* specMap; // map_ks
-	char* maskMap; // map_d
+	char* cran_restrict name;
+	char* cran_restrict albedoMap; // map_Kd
+	char* cran_restrict bumpMap; // map_bump
+	char* cran_restrict specMap; // map_ks
+	char* cran_restrict maskMap; // map_d
 	float albedo[3]; // Kd
 	float specular[3]; // Ks
 	float emission[3]; // Ke
