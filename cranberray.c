@@ -358,12 +358,31 @@ static float lambert_pdf(cv3 d, cv3 n)
 	return cv3_dot(d, n) * cran_rpi;
 }
 
+static float ggx_smith_uncorrelated(float roughness, float hdotn, float vdotn, float ldotn, float fresnel)
+{
+	float t = hdotn*hdotn*roughness*roughness - (hdotn*hdotn - 1.0f);
+	float D = (roughness*roughness)*cf_rcp(t*t)*cran_rpi;
+	float F = fresnel;
+	float Gv = vdotn * sqrtf(roughness*roughness + (1.0f - roughness * roughness)*ldotn*ldotn);
+	float Gl = ldotn * sqrtf(roughness*roughness + (1.0f - roughness * roughness)*vdotn*vdotn);
+	float G = cf_rcp(Gv + Gl);
+	return F*G*D*cf_rcp(2.0f);
+}
+
 static cv3 hemisphere_surface_random_ggx_h(float r1, float r2, float a)
 {
 	float cosTheta = sqrtf((1.0f-r1)*cf_rcp(r1*(a*a-1.0f)+1.0f));
 	float sinTheta = sqrtf(1.0f - cosTheta*cosTheta);
 	float phi = cran_tao * r2;
 	return (cv3) { sinTheta*cosf(phi), sinTheta*sinf(phi), cosTheta };
+}
+
+static float ggx_pdf(float roughness, float hdotn, float vdoth)
+{
+	float chn = cv3_dot(h, normal);
+	float t = hdotn*hdotn*roughness*roughness - (hdotn*hdotn - 1.0f);
+	float D = (roughness*roughness)*cf_rcp(t*t)*cran_rpi;
+	return D*hdotn*cf_rcp(4.0f*fabsf(vdoth));
 }
 
 static cv3 box_random(random_seed_t* seed)
@@ -891,7 +910,7 @@ static int index_aabb_sort_min_x(const void* cran_restrict l, const void* cran_r
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
 	// If equal, well they're equivalent
-	return (int)copysignf(1.0f, caabb_centroid(left->bound, caabb_x) - caabb_centroid(right->bound, caabb_x));
+	return (int)cf_sign(caabb_centroid(left->bound, caabb_x) - caabb_centroid(right->bound, caabb_x));
 }
 
 static int index_aabb_sort_min_y(const void* cran_restrict l, const void* cran_restrict r)
@@ -902,7 +921,7 @@ static int index_aabb_sort_min_y(const void* cran_restrict l, const void* cran_r
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
 	// If equal, well they're equivalent
-	return (int)copysignf(1.0f, caabb_centroid(left->bound, caabb_y) - caabb_centroid(right->bound, caabb_y));
+	return (int)cf_sign(caabb_centroid(left->bound, caabb_y) - caabb_centroid(right->bound, caabb_y));
 }
 
 static int index_aabb_sort_min_z(const void* cran_restrict l, const void* cran_restrict r)
@@ -913,7 +932,7 @@ static int index_aabb_sort_min_z(const void* cran_restrict l, const void* cran_r
 	// If left is greater than right, result is > 0 - left goes after right
 	// If right is greater than left, result is < 0 - right goes after left
 	// If equal, well they're equivalent
-	return (int)copysignf(1.0f, caabb_centroid(left->bound, caabb_z) - caabb_centroid(right->bound, caabb_z));
+	return (int)cf_sign(caabb_centroid(left->bound, caabb_z) - caabb_centroid(right->bound, caabb_z));
 }
 
 static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint32_t leafCount)
@@ -1788,6 +1807,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	{
 		cv4 skyboxColor = sampler_sample_3D(&scene->textureStore, scene->environment.sampler, scene->environment.texture, rayD);
 		skybox = (cv3) { skyboxColor.r, skyboxColor.g, skyboxColor.b };
+		skybox = cv3_mulf(skybox, 100.0f);
 	}
 	cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
 
@@ -1934,24 +1954,14 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		castDir = cv3_reflect(cv3_inverse(viewDir), h);
 	}
 
-	// GGX PDF
-	float chn = cv3_dot(h, normal);
-	float t = chn*chn*roughness*roughness - (chn*chn - 1.0f);
-	float D = (roughness*roughness)*cf_rcp(t*t)*cran_rpi;
-	float specularAmount = cv3_sqrlength(microfacetData.specularTint) > 0.0f ? 1.0f : 0.0f;
-	float F = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, h, viewDir) * specularAmount;
-	float ggxPDF = D*chn*cf_rcp(4.0f*fabsf(cv3_dot(viewDir, h)));
-
-	float lambertPDF = lambert_pdf(castDir, normal);
-
 	float selectedPDF;
 	if (distribution == distribution_lambert)
 	{
-		selectedPDF = lambertPDF;
+		selectedPDF = lambert_pdf(castDir, normal);
 	}
 	else
 	{
-		selectedPDF = ggxPDF;
+		selectedPDF = ggx_pdf(roughness, cv3_dot(h, normal), cv3_dot(viewDir, h));
 	}
 
 	// final weight and PDF using balance heuristic
@@ -1988,17 +1998,8 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			// https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf
 			// specular BRDF
 
-			float cvn = cv3_dot(viewDir, normal);
-			float cln = cv3_dot(castDir, normal);
-
-			// GGX
-			// Smith shadowing
-			float Gv = cvn * sqrtf(roughness*roughness + (1.0f - roughness * roughness)*cln*cln);
-			float Gl = cln * sqrtf(roughness*roughness + (1.0f - roughness * roughness)*cvn*cvn);
-			float G = 2.0f*cln*cvn / (Gv + Gl);
-
-			// F(L,H)D(H)G(L,V,H)/(4*N.L*V.N)
-			float brdf = F * G*D*cf_rcp(4.0f*cv3_dot(castDir, normal)*cv3_dot(viewDir, normal));
+			float F = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, h, viewDir);
+			float brdf = ggx_smith_uncorrelated(roughness, cv3_dot(h, normal), cv3_dot(viewDir, normal), cv3_dot(castDir, normal), F);
 
 			ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 			if (result.hit)
@@ -2006,7 +2007,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 				result.light = cv3_mulf(result.light, light_attenuation(result.surface, inputs.surface));
 			}
 
-			light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, h), 0.0f));
+			light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
 			light = cv3_mul(light, microfacetData.specularTint); // TODO: Is there any physics behind this specular albedo concept?
 		}
 		else
@@ -2254,7 +2255,8 @@ int main()
 		.mainStackMemory = 1024ull*1024ull*1024ull*3,
 		.scratchStackMemory = 1024ull*1024ull*1024ull,
 
-		.environmentLightFallback = (cv3) { 10.0f, 10.0f, 10.0f }
+		//.environmentMap = "background.hdr",
+		.environmentLightFallback = (cv3) { 0.1f, 0.1f, 0.1f }
 	};
 
 	// 3GB for persistent memory

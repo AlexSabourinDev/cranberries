@@ -93,6 +93,8 @@ cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restri
 cran_forceinline float cf_bilinear(float topLeft, float topRight, float bottomLeft, float bottomRight, float tx, float ty);
 cran_forceinline float cf_lerp(float a, float b, float t);
 cran_forceinline float cf_sign(float a);
+// Guarantees to return either -1 or 1
+cran_forceinline float cf_sign_no_zero(float a);
 cran_forceinline bool cf_finite(float a);
 cran_forceinline float cf_frac(float a);
 
@@ -175,9 +177,11 @@ cran_forceinline caabb caabb_merge(caabb l, caabb r);
 cran_forceinline float caabb_surface_area(caabb l);
 
 // Miscellaneous API
+// Expecting i to be exitant (i.n > 0)
 cran_forceinline cv3 cmi_fresnel_schlick_r0(cv3 r0, cv3 n, cv3 i);
 // r1 = exiting refractive index (usually air)
 // r2 = entering refactive index
+// Expecting i to be exitant (i.n > 0)
 cran_forceinline float cmi_fresnel_schlick(float r1, float r2, cv3 n, cv3 i);
 
 // Single Implementation
@@ -244,15 +248,40 @@ cran_forceinline float cf_lerp(float a, float b, float t)
 
 cran_forceinline float cf_sign(float a)
 {
-	// Don't handle NaN, 0, inf
-	union
+	// Don't handle NaN, inf
+	/*union
 	{
 		uint32_t u;
 		float f;
 	} conv;
 	conv.f = a;
-	conv.u = conv.u & 0x80000000 | 0x3F800000;
-	return conv.f;
+	conv.u = (conv.u & 0x80000000 | 0x3F800000) & ((int32_t)(-conv.u ^ conv.u) >> 31);
+	return conv.f;*/
+
+	__m128 f = _mm_load_ss(&a);
+	__m128 c0 = _mm_castsi128_ps(_mm_set1_epi32(0x80000000));
+	__m128 c1 = _mm_castsi128_ps(_mm_set1_epi32(0x3F800000));
+	__m128i c2 = _mm_setzero_si128();
+
+	__m128 s = _mm_or_ps(_mm_and_ps(f, c0), c1);
+
+	__m128i u = _mm_castps_si128(f);
+	u = _mm_srai_epi32(_mm_xor_si128(_mm_sub_epi32(c2, u), u), 31);
+
+	_mm_store_ss(&a, _mm_and_ps(s, _mm_castsi128_ps(u)));
+	return a;
+}
+
+cran_forceinline float cf_sign_no_zero(float a)
+{
+	// Don't handle NaN, inf or 0
+
+	__m128 f = _mm_load_ss(&a);
+	__m128 c0 = _mm_castsi128_ps(_mm_set1_epi32(0x80000000));
+	__m128 c1 = _mm_castsi128_ps(_mm_set1_epi32(0x3F800000));
+
+	_mm_store_ss(&a, _mm_or_ps(_mm_and_ps(f, c0), c1));
+	return a;
 }
 
 cran_forceinline bool cf_finite(float a)
@@ -564,7 +593,7 @@ cran_forceinline cm3 cm3_basis_from_normal(cv3 n)
 {
 	// Frisvad ONB from https://backend.orbit.dtu.dk/ws/portalfiles/portal/126824972/onb_frisvad_jgt2012_v2.pdf
 	// revised from Pixar https://graphics.pixar.com/library/OrthonormalB/paper.pdf#page=2&zoom=auto,-233,561
-	float sign = cf_sign(n.z);
+	float sign = cf_sign_no_zero(n.z);
 	float a = -cf_rcp(sign + n.z);
 	float b = n.x*n.y*a;
 	cv3 i = (cv3) { 1.0f + sign * n.x*n.x*a, sign * b, -sign * n.x };
