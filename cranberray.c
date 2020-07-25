@@ -530,7 +530,7 @@ typedef enum
 	sample_type_mask = 0xFF,
 
 	sample_flag_begin = 0x00FF,
-	sample_flag_gamma_to_linear = 0x01FF,
+	sample_flag_gamma_to_linear = 0x0100,
 	sample_flag_end = 0xFFFF,
 	sample_flag_mask = 0xFF00
 } sampling_settings_e;
@@ -2272,7 +2272,7 @@ int main()
 		.scratchStackMemory = 1024ull*1024ull*1024ull,
 
 		//.environmentMap = "background.hdr",
-		.environmentLightFallback = (cv3) { 0.1f, 0.1f, 0.1f }
+		.environmentLightFallback = (cv3) { 10.1f, 10.1f, 10.1f }
 	};
 
 	// 3GB for persistent memory
