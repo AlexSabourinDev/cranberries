@@ -379,7 +379,6 @@ static cv3 hemisphere_surface_random_ggx_h(float r1, float r2, float a)
 
 static float ggx_pdf(float roughness, float hdotn, float vdoth)
 {
-	float chn = cv3_dot(h, normal);
 	float t = hdotn*hdotn*roughness*roughness - (hdotn*hdotn - 1.0f);
 	float D = (roughness*roughness)*cf_rcp(t*t)*cran_rpi;
 	return D*hdotn*cf_rcp(4.0f*fabsf(vdoth));
@@ -523,14 +522,22 @@ typedef struct
 
 typedef enum
 {
-	sample_nearest,
-	sample_bilinear,
-	sample_bump,
-} sampling_type_e;
+	sample_type_begin = 0,
+	sample_type_nearest = 0,
+	sample_type_bilinear,
+	sample_type_bump,
+	sample_type_end = 0xFF,
+	sample_type_mask = 0xFF,
+
+	sample_flag_begin = 0x00FF,
+	sample_flag_gamma_to_linear = 0x01FF,
+	sample_flag_end = 0xFFFF,
+	sample_flag_mask = 0xFF00
+} sampling_settings_e;
 
 typedef struct
 {
-	sampling_type_e type;
+	sampling_settings_e settings;
 } sampler_t;
 
 typedef struct
@@ -619,7 +626,7 @@ cv4 sampler_sample(texture_store_t const* store, sampler_t sampler, texture_id_t
 {
 	if (textureid.id == 0)
 	{
-		if (sampler.type == sample_bump)
+		if ((sampler.settings & sample_type_mask)  == sample_type_bump)
 		{
 			return (cv4) { 0 };
 		}
@@ -649,12 +656,15 @@ cv4 sampler_sample(texture_store_t const* store, sampler_t sampler, texture_id_t
 	uv.y = uv.y < 0.0f ? 1.0f + uv.y : uv.y;
 	uv.y = 1.0f - uv.y;
 
+	cv4 color = (cv4) { 0 };
+
 	texture_t const* texture = &store->textures[textureid.id - 1];
-	if (sampler.type == sample_nearest)
+	uint32_t sampleType = sampler.settings & sample_type_mask;
+	if (sampleType == sample_type_nearest)
 	{
-		return samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 0);
+		color = samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 0);
 	}
-	else if (sampler.type == sample_bilinear)
+	else if (sampleType == sample_type_bilinear)
 	{
 		cv4 s00 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 0);
 		cv4 s01 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 1);
@@ -666,7 +676,7 @@ cv4 sampler_sample(texture_store_t const* store, sampler_t sampler, texture_id_t
 
 		wf = wf < 0.0f ? 1.0f + wf : wf;
 		hf = hf < 0.0f ? 1.0f + hf : hf;
-		return (cv4)
+		color = (cv4)
 		{
 			cf_bilinear(s00.x, s01.x, s10.x, s11.x, wf, hf),
 			cf_bilinear(s00.y, s01.y, s10.y, s11.y, wf, hf),
@@ -674,16 +684,21 @@ cv4 sampler_sample(texture_store_t const* store, sampler_t sampler, texture_id_t
 			cf_bilinear(s00.w, s01.w, s10.w, s11.w, wf, hf)
 		};
 	}
-	else if (sampler.type == sample_bump)
+	else if (sampleType == sample_type_bump)
 	{
 		float s00 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 0).x;
 		float s10 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 1, 0).x;
 		float s01 = samplers[texture->format](uv, texture->data, texture->width, texture->height, 0, 1).x;
 
-		return (cv4) { s10 - s00, s01 - s00, 0.0f, 0.0f };
+		color =  (cv4) { s10 - s00, s01 - s00, 0.0f, 0.0f };
 	}
 
-	return (cv4) { 0 };
+	if (sampler.settings | sample_flag_gamma_to_linear)
+	{
+		color = gamma_to_linear(color);
+	}
+
+	return color;
 }
 
 cv4 sampler_sample_3D(texture_store_t const* store, sampler_t sampler, texture_id_t texture, cv3 direction)
@@ -1398,7 +1413,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	texture_store_t textureStore = { 0 };
 
 	// Environment map
-	sampler_t backgroundSampler = (sampler_t) { .type = sample_nearest };
+	sampler_t backgroundSampler = (sampler_t) { .settings = sample_type_nearest };
 	texture_id_t backgroundTextureId = { 0 };
 	sphere_importance_t backgroundImportance = { 0 };
 	if (context->renderConfig.environmentMap != NULL && context->renderConfig.environmentMap[0] != 0)
@@ -1472,26 +1487,26 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			// Conversion taken from http://graphicrants.blogspot.com/2013/08/specular-brdf-reference.html
 			microfacets[i].gloss = 1.0f - sqrtf(cf_rcp(matLib.materials[i].specularAmount + 2.0f)*2.0f);
 
-			microfacets[i].albedoSampler = (sampler_t) {.type = sample_bilinear };
+			microfacets[i].albedoSampler = (sampler_t) {.settings = sample_type_bilinear | sample_flag_gamma_to_linear };
 			if (matLib.materials[i].albedoMap != NULL)
 			{
 				microfacets[i].albedoTexture = texture_request(&textureStore, matLib.materials[i].albedoMap);
 			}
 
-			microfacets[i].bumpSampler = (sampler_t) {.type = sample_bump };
+			microfacets[i].bumpSampler = (sampler_t) {.settings = sample_type_bump };
 			if (matLib.materials[i].bumpMap != NULL)
 			{
 				microfacets[i].bumpTexture = texture_request(&textureStore, matLib.materials[i].bumpMap);
 			}
 
-			microfacets[i].specSampler = (sampler_t) {.type = sample_bilinear };
+			microfacets[i].specSampler = (sampler_t) {.settings = sample_type_bilinear };
 			if (matLib.materials[i].specMap != NULL)
 			{
 				microfacets[i].specTexture = texture_request(&textureStore, matLib.materials[i].specMap);
 
 			}
 
-			microfacets[i].maskSampler = (sampler_t) {.type = sample_nearest };
+			microfacets[i].maskSampler = (sampler_t) {.settings = sample_type_nearest };
 			if (matLib.materials[i].maskMap != NULL)
 			{
 				microfacets[i].maskTexture = texture_request(&textureStore, matLib.materials[i].maskMap);
@@ -1955,13 +1970,15 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	}
 
 	float selectedPDF;
+	float lambertPDF = lambert_pdf(castDir, normal);
+	float ggxPDF = ggx_pdf(roughness, cv3_dot(h, normal), cv3_dot(viewDir, h));
 	if (distribution == distribution_lambert)
 	{
-		selectedPDF = lambert_pdf(castDir, normal);
+		selectedPDF = lambertPDF;
 	}
 	else
 	{
-		selectedPDF = ggx_pdf(roughness, cv3_dot(h, normal), cv3_dot(viewDir, h));
+		selectedPDF = ggxPDF;
 	}
 
 	// final weight and PDF using balance heuristic
@@ -1985,7 +2002,6 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 
 		cv3 albedoTint = microfacetData.albedoTint;
 		cv4 samplerAlbedo = sampler_sample(&scene->textureStore, microfacetData.albedoSampler, microfacetData.albedoTexture, inputs.uv);
-		samplerAlbedo = gamma_to_linear(samplerAlbedo);
 
 		cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
 		light = cv3_mul(light, cv3_mulf(albedo, cran_rpi));
