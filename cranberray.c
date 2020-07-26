@@ -2119,8 +2119,13 @@ static shader_outputs_t shader_lambert(const void* cran_restrict materialData, u
 	};
 }
 
-static cv3 sample_light_bvh(render_context_t* context, ray_scene_t const* scene, cv3 surface, cv3 normal)
+static cv3 sample_light_bvh(render_context_t* context, ray_scene_t const* scene, cv3 surface, cv3 normal, float* pmf)
 {
+	// http://www.aconty.com/pdf/many-lights-hpg2018.pdf
+	// https://psychopath.io/post/2020_04_20_light_trees
+	float randomNumber = random01f(&context->randomSeed);
+	float probability = 1.0f;
+
 	// Stochastic bvh traversal
 	uint32_t nextNode = 0;
 	uint32_t selectedLight = 0;
@@ -2142,23 +2147,24 @@ static cv3 sample_light_bvh(render_context_t* context, ray_scene_t const* scene,
 		surfaceToRight = cv3_mulf(surfaceToRight, cf_fast_rcp(rightDistance));
 
 		// Heuristic by distance + cosine lobe
-		float leftPMF = cf_rcp(1.0f + leftDistance * leftDistance) * fmaxf(cv3_dot(surfaceToLeft, normal), 0.00001f);
-		float rightPMF = cf_rcp(1.0f + rightDistance * rightDistance) * fmaxf(cv3_dot(surfaceToRight, normal), 0.0001f);
+		float leftPMF = fmaxf(cf_rcp(1.0f + leftDistance * leftDistance) * cv3_dot(surfaceToLeft, normal), 0.00001f);
+		float rightPMF = fmaxf(cf_rcp(1.0f + rightDistance * rightDistance) * cv3_dot(surfaceToRight, normal), 0.00001f);
 
 		float maxPMF = leftPMF + rightPMF;
-
-		float leftWeight = leftPMF * cf_rcp(maxPMF);
-		float rightWeight = rightPMF * cf_rcp(maxPMF);
-
-		uint32_t lowerIndex = leftPMF < rightPMF ? left : right;
-		uint32_t higherIndex = leftPMF < rightPMF ? right : left;
-		if (random01f(&context->randomSeed) < fminf(leftWeight, rightWeight))
+		cran_assert(maxPMF > 0.0f);
+		if (randomNumber < leftPMF * cf_rcp(maxPMF))
 		{
-			nextNode = lowerIndex;
+			nextNode = left;
+			randomNumber = randomNumber * maxPMF * cf_rcp(leftPMF);
+
+			probability *= leftPMF * cf_rcp(maxPMF);
 		}
 		else
 		{
-			nextNode = higherIndex;
+			nextNode = right;
+			randomNumber = (randomNumber * maxPMF - leftPMF) * cf_rcp(rightPMF);
+
+			probability *= rightPMF * cf_rcp(maxPMF);
 		}
 	}
 
@@ -2173,7 +2179,8 @@ static cv3 sample_light_bvh(render_context_t* context, ray_scene_t const* scene,
 	float w = random01f(&context->randomSeed) * (1.0f - u - v);
 	cv3 p = cv3_barycentric(vertA, vertB, vertC, (cv3) { u, v, w });
 
-	return cv3_normalize(cv3_sub(p, inputs.surface));
+	*pmf = probability;
+	return cv3_normalize(cv3_sub(p, surface));
 }
 
 static shader_outputs_t shader_microfacet(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
@@ -2215,9 +2222,6 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	}
 	float roughness = fmaxf(1.0f - gloss, 0.00001f);
 
-	float r1 = random01f(&context->randomSeed);
-	float r2 = random01f(&context->randomSeed);
-
 	enum
 	{
 		distribution_lambert = 0,
@@ -2225,58 +2229,67 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		distribution_count
 	};
 
-	float geometricFresnel = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, normal, viewDir);
-	geometricFresnel = fmaxf(geometricFresnel, microfacetData.specularTint.r * gloss); // Force how much we can reflect at a minimum
-	float weights[distribution_count] =
-	{
-		[distribution_lambert] = 1.0f - geometricFresnel,
-		[distribution_ggx] = geometricFresnel
-	};
-
 	cv3 castDir, h;
+	float weight;
+	uint32_t distribution;
+	{
+		float geometricFresnel = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, normal, viewDir);
+		geometricFresnel = fmaxf(geometricFresnel, microfacetData.specularTint.r * gloss); // Force how much we can reflect at a minimum
+		float weights[distribution_count] =
+		{
+			[distribution_lambert] = 1.0f - geometricFresnel,
+			[distribution_ggx] = geometricFresnel
+		};
 
-	bool reflected = random01f(&context->randomSeed) < weights[distribution_ggx];
-	uint32_t distribution = reflected ? distribution_ggx : distribution_lambert;
-	if (distribution == distribution_lambert) // Lambert distribution
-	{
-		castDir = hemisphere_surface_random_lambert(r1, r2);
-		castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
-		h = cv3_normalize(cv3_add(castDir, viewDir));
-	}
-	else // ggx distribution
-	{
-		h = hemisphere_surface_random_ggx_h(r1, r2, roughness);
-		h = cm3_rotate_cv3(cm3_basis_from_normal(normal), h);
-		castDir = cv3_reflect(cv3_inverse(viewDir), h);
-	}
+		float explicitLightSamplingChance = 1.0f;
+		if (random01f(&context->randomSeed) < explicitLightSamplingChance) // Explicit light sampling
+		{
+			float pmf;
+			// TODO: Probability is tiny, causing the lights to be over exposed...
+			castDir = sample_light_bvh(context, scene, inputs.surface, normal, &pmf);
+			h = cv3_normalize(cv3_add(castDir, viewDir));
 
-	// TODO: Select between surface and lights
-	bool explicitLightSampling = true;
-	if(explicitLightSampling)
-	{
-		castDir = sample_light_bvh(context, scene, inputs.surface, normal);
-		h = cv3_normalize(cv3_add(castDir, viewDir));
-	}
+			bool reflected = random01f(&context->randomSeed) < weights[distribution_ggx];
+			distribution = reflected ? distribution_ggx : distribution_lambert;
 
+			weight = cf_rcp(pmf) * explicitLightSamplingChance * weights[distribution];
+		}
+		else
+		{
+			float r1 = random01f(&context->randomSeed);
+			float r2 = random01f(&context->randomSeed);
 
-	float selectedPDF;
-	float lambertPDF = lambert_pdf(castDir, normal);
-	float ggxPDF = ggx_pdf(roughness, cv3_dot(h, normal), cv3_dot(viewDir, h));
-	if (distribution == distribution_lambert)
-	{
-		selectedPDF = lambertPDF;
-	}
-	else
-	{
-		selectedPDF = ggxPDF;
-	}
+			bool reflected = random01f(&context->randomSeed) < weights[distribution_ggx];
+			distribution = reflected ? distribution_ggx : distribution_lambert;
+			if (distribution == distribution_lambert) // Lambert distribution
+			{
+				castDir = hemisphere_surface_random_lambert(r1, r2);
+				castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
+				h = cv3_normalize(cv3_add(castDir, viewDir));
+			}
+			else // ggx distribution
+			{
+				h = hemisphere_surface_random_ggx_h(r1, r2, roughness);
+				h = cm3_rotate_cv3(cm3_basis_from_normal(normal), h);
+				castDir = cv3_reflect(cv3_inverse(viewDir), h);
+			}
 
-	// final weight and PDF using balance heuristic
-	// https://graphics.stanford.edu/courses/cs348b-03/papers/veach-chapter9.pdf
-	float weight = 0.0f;
-	if (ggxPDF > 0.0f && lambertPDF > 0.0f)
-	{
-		weight = weights[distribution]*selectedPDF * cf_rcp(weights[distribution_ggx] * ggxPDF + weights[distribution_lambert] * lambertPDF);
+			float PDFs[distribution_count] =
+			{
+				[distribution_lambert] = lambert_pdf(castDir, normal),
+				[distribution_ggx] = ggx_pdf(roughness, cv3_dot(h, normal), cv3_dot(viewDir, h))
+			};
+
+			// final weight and PDF using balance heuristic
+			// https://graphics.stanford.edu/courses/cs348b-03/papers/veach-chapter9.pdf
+			float sum = 0.00001f;
+			for (uint32_t i = 0; i < distribution_count; i++)
+			{
+				sum += weights[i] * PDFs[i];
+			}
+
+			weight = cf_rcp(sum) * (1.0f - explicitLightSamplingChance);
+		}
 	}
 
 	cv3 light;
@@ -2321,7 +2334,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			light = (cv3) { 0 };
 		}
 	}
-	light = cv3_mulf(light, weight * cf_rcp(selectedPDF * weights[distribution]));
+	light = cv3_mulf(light, weight);
 	light = cv3_add(light, cv3_mulf(microfacetData.emission, 5.0f));
 
 	cranpr_end("shader", "microfacet");
