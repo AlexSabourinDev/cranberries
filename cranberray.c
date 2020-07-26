@@ -766,10 +766,13 @@ typedef struct
 		{
 			uint32_t left;
 			uint32_t right;
-		} jumps;
+		} jumpIndices;
 
-		uint32_t index;
-	} indices;
+		struct
+		{
+			uint32_t index;
+		} leaf;
+	};
 } bvh_jump_t;
 
 typedef struct
@@ -858,8 +861,43 @@ typedef struct
 
 typedef struct
 {
+	cv3 vertA, vertB, vertC;
+} light_t;
+
+typedef struct
+{
+	union
+	{
+		struct
+		{
+			uint32_t children[8];
+		} jumps;
+
+		struct
+		{
+			uint32_t indexOffset;
+			uint32_t indexCount;
+		} leaf;
+	};
+} octree_node_t;
+
+typedef struct
+{
+	octree_node_t* nodes;
+	uint32_t* indices;
+} octree_t;
+
+typedef struct
+{
 	void* cran_restrict materials[material_count];
 	mesh_t* cran_restrict renderables;
+
+	struct
+	{
+		bvh_t bvh;
+		light_t* data;
+		uint32_t count;
+	} lights;
 
 	struct
 	{
@@ -996,7 +1034,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 	// Lock our stack, we're free to advance our pointer as much as we please
 	bvh_pair_t* buildingBVHStart = (bvh_pair_t*)crana_stack_lock(&context->scratchStack);
 	bvh_pair_t* buildingBVHIter = buildingBVHStart;
-	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % workgroupSize) // TODO: constant for workgroup size
+	for (uint32_t workgroupIter = 0; workgroupIter != workgroupQueueEnd; workgroupIter = (workgroupIter + 1) % workgroupSize)
 	{
 		index_aabb_pair_t* start = bvhWorkgroup[workgroupIter].start;
 		uint32_t count = bvhWorkgroup[workgroupIter].count;
@@ -1018,7 +1056,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		buildingBVHIter->bound = bounds;
 		buildingBVHIter->jump = (bvh_jump_t)
 		{
-			.indices.index = start[0].index,
+			.leaf.index = start[0].index,
 		};
 
 		// TODO: Since we're doing all the iteration work in the sort, maybe we could also do the partitioning in the sort?
@@ -1138,7 +1176,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			bvhWorkgroup[workgroupQueueEnd].start = start;
 			bvhWorkgroup[workgroupQueueEnd].count = centerIndex;
 			cran_assert(bvhWorkgroup[workgroupQueueEnd].count > 0);
-			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.left;
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.jumpIndices.left;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			cran_assert(workgroupQueueEnd != workgroupIter);
 		}
@@ -1147,7 +1185,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			leafWorkgroup[leafWorkgroupEnd].start = start;
 			leafWorkgroup[leafWorkgroupEnd].count = centerIndex;
 			cran_assert(leafWorkgroup[leafWorkgroupEnd].count > 0);
-			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.left;
+			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.jumpIndices.left;
 			leafWorkgroupEnd++;
 			cran_assert(leafWorkgroupEnd <= leafCount);
 		}
@@ -1159,7 +1197,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			bvhWorkgroup[workgroupQueueEnd].count = count - centerIndex;
 			cran_assert(bvhWorkgroup[workgroupQueueEnd].count > 0);
 
-			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.right;
+			bvhWorkgroup[workgroupQueueEnd].parentIndex = &buildingBVHIter->jump.jumpIndices.right;
 			workgroupQueueEnd = (workgroupQueueEnd + 1) % workgroupSize;
 			cran_assert(workgroupQueueEnd != workgroupIter);
 		}
@@ -1168,7 +1206,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			leafWorkgroup[leafWorkgroupEnd].start = start + centerIndex;
 			leafWorkgroup[leafWorkgroupEnd].count = count - centerIndex;
 			cran_assert(leafWorkgroup[leafWorkgroupEnd].count > 0);
-			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.indices.jumps.right;
+			leafWorkgroup[leafWorkgroupEnd].parentIndex = &buildingBVHIter->jump.jumpIndices.right;
 			leafWorkgroupEnd++;
 			cran_assert(leafWorkgroupEnd <= leafCount);
 		}
@@ -1193,7 +1231,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		buildingBVHIter->bound = bounds;
 		buildingBVHIter->jump = (bvh_jump_t)
 		{
-			.indices.index = start[0].index,
+			.leaf.index = start[0].index,
 		};
 
 		buildingBVHIter++;
@@ -1225,7 +1263,6 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 // Allocates candidates from bottom stack
 // Uses top stack for working memory
-// TODO: Maybe 2 seperate stacks would be better than using a single stack with 2 apis
 static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 rayO, cv3 rayD, float rayMin, float rayMax, uint32_t** candidates)
 {
 	cranpr_begin("bvh", "traverse");
@@ -1298,7 +1335,7 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 			for (uint32_t i = 0; i < leafCount; i++)
 			{
 				uint32_t nodeIndex = indexUnion.i[i];
-				candidateIter[i] = bvh->jumps[nodeIndex].indices.index;
+				candidateIter[i] = bvh->jumps[nodeIndex].leaf.index;
 			}
 			candidateIter+=leafCount;
 
@@ -1307,8 +1344,8 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 			{
 				uint32_t nodeIndex = indexUnion.i[i];
 				cran_assert(nodeIndex < bvh->count);
-				testQueueEnd[i*2] = bvh->jumps[nodeIndex].indices.jumps.left;
-				testQueueEnd[i*2 + 1] = bvh->jumps[nodeIndex].indices.jumps.right;
+				testQueueEnd[i*2] = bvh->jumps[nodeIndex].jumpIndices.left;
+				testQueueEnd[i*2 + 1] = bvh->jumps[nodeIndex].jumpIndices.right;
 			}
 			testQueueEnd += parentCount * 2;
 		}
@@ -1328,6 +1365,121 @@ static uint32_t traverse_bvh(render_context_t* context, bvh_t const* bvh, cv3 ra
 
 	cranpr_end("bvh", "traverse");
 	return (uint32_t)(candidateIter - *candidates);
+}
+
+octree_t build_light_octree(render_context_t* context, light_t* lights, uint32_t lightCount)
+{
+	typedef struct
+	{
+		uint32_t children[8];
+
+		uint32_t indices[100];
+		uint32_t indexCount;
+	} octree_working_node_t;
+
+	octree_working_node_t* workingOctreeStart = (octree_working_node_t*)crana_stack_lock(&context->stack);
+
+	octree_working_node_t* workingOctree = workingOctreeStart;
+	memset(workingOctree, 0, sizeof(octree_working_node_t));
+
+	typedef struct
+	{
+		caabb aabb;
+		uint32_t nodeIndex;
+	} octree_stack_t;
+
+	for (uint32_t light = 0; light < lightCount; light++)
+	{
+		octree_stack_t* nodeStack = crana_stack_lock(&context->scratchStack);
+		octree_stack_t* nodeStackStart = nodeStack;
+		nodeStack->aabb = (caabb)
+		{
+			.min = (cv3) {-1000.0f, -1000.0f, -1000.0f},
+			.max = (cv3) { 1000.0f,  1000.0f,  1000.0f}
+		};
+		nodeStack->nodeIndex = 0;
+
+		while (nodeStack > nodeStackStart)
+		{
+			octree_stack_t* currentNode = nodeStack--;
+
+			caabb children[8];
+			caabb_split_8(currentNode->aabb, children);
+
+			for (uint32_t aabb = 0; aabb < 8; aabb++)
+			{
+				bool intersects = caabb_does_line_intersect(lights[light].vertA, lights[light].vertB, children[aabb]);
+				intersects = intersects || caabb_does_line_intersect(lights[light].vertB, lights[light].vertC, children[aabb]);
+				intersects = intersects || caabb_does_line_intersect(lights[light].vertC, lights[light].vertA, children[aabb]);
+
+				if (intersects)
+				{
+					octree_working_node_t* workingNode = &workingOctreeStart[currentNode->nodeIndex];
+					if (workingNode->children[aabb] == 0)
+					{
+						workingOctree++;
+						workingNode->children[aabb] = (uint32_t)(workingOctree - workingOctreeStart);
+						memset(workingOctree, 0, sizeof(octree_working_node_t));
+					}
+
+					const float minNodeSize = 0.5f;
+					if ((children[aabb].max.x - children[aabb].min.x) < minNodeSize)
+					{
+						octree_working_node_t* childNode = &workingOctreeStart[workingNode->children[aabb]];
+						childNode->indices[workingNode->indexCount++] = light;
+						cran_assert(childNode->indexCount <= 100);
+					}
+					else
+					{
+						octree_stack_t* nextNode = nodeStack++;
+						nextNode->aabb = children[aabb];
+						nextNode->nodeIndex = workingNode->children[aabb];
+					}
+				}
+			}
+		}
+
+		crana_stack_revert(&context->scratchStack);
+	}
+
+	octree_working_node_t* octreeSource = (octree_working_node_t*)crana_stack_lock(&context->scratchStack);
+	memcpy(octreeSource, workingOctreeStart, (workingOctree - workingOctreeStart) * sizeof(octree_working_node_t));
+	octree_working_node_t* octreeSourceEnd = octreeSource + (workingOctree - workingOctreeStart);
+	crana_stack_revert(&context->stack);
+
+	// Flatten our working octree
+	uint32_t totalIndexCount = 0;
+	for (uint32_t i = 0; i < octreeSourceEnd - octreeSource; i++)
+	{
+		totalIndexCount += octreeSource[i].indexCount;
+	}
+
+	uint32_t* indices = crana_stack_alloc(&context->stack, sizeof(uint32_t) * totalIndexCount);
+	octree_node_t* nodes = crana_stack_alloc(&context->stack, sizeof(uint32_t) * (workingOctree - workingOctreeStart));
+
+	uint32_t* indexWriteIter = indices;
+	for (uint32_t i = 0; i < octreeSourceEnd - octreeSource; i++)
+	{
+		if (octreeSource[i].indexCount > 0)
+		{
+			nodes[i].leaf.indexOffset = (uint32_t)(indexWriteIter - indices);
+			nodes[i].leaf.indexCount = octreeSource[i].indexCount;
+
+			memcpy(indexWriteIter, octreeSource[i].indices, sizeof(uint32_t) * octreeSource[i].indexCount);
+			indexWriteIter += octreeSource[i].indexCount;
+		}
+		else
+		{
+			memcpy(nodes[i].jumps.children, octreeSource[i].children, sizeof(uint32_t) * 8);
+		}
+	}
+
+	crana_stack_revert(&context->scratchStack);
+
+	octree_t lightOctree;
+	lightOctree.indices = indices;
+	lightOctree.nodes = nodes;
+	return lightOctree;
 }
 
 static void generate_scene(render_context_t* context, ray_scene_t* scene)
@@ -1465,11 +1617,13 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	// materials
 	material_microfacet_t* microfacets;
 	static material_mirror_t mirror;
+
+	cranl_material_lib_t matLib;
 	{
 		mirror = (material_mirror_t){ .color = (cv3) {1.0f, 1.0f, 1.0f} };
 
 		cran_assert(meshSource->data.materialLibraries.count == 1); // Assume only one material library for now
-		cranl_material_lib_t matLib = cranl_obj_mat_load(meshSource->data.materialLibraries.names[0], (cranl_allocator_t)
+		matLib = cranl_obj_mat_load(meshSource->data.materialLibraries.names[0], (cranl_allocator_t)
 			{
 				.instance = &context->stack,
 				.alloc = &crana_stack_alloc,
@@ -1531,6 +1685,67 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		meshSource->materialIndices = materialIndices;
 	}
 
+	// Track our emissive materials (lights)
+	light_t* lights;
+	uint32_t lightCount = 0;
+	{
+		lights = (light_t*)crana_stack_lock(&context->stack);
+
+		light_t* lightIter = lights;
+		uint32_t previousBoundary = 0;
+		for (uint32_t i = 0; i < meshSource->data.materials.count; i++)
+		{
+			uint16_t dataIndex = 0;
+			for (; dataIndex < matLib.count; dataIndex++)
+			{
+				if (strcmp(matLib.materials[dataIndex].name, meshSource->data.materials.materialNames[i]) == 0)
+				{
+					break;
+				}
+			}
+
+			if(cv3_sqrlength(microfacets[dataIndex].emission) > 0.0f)
+			{
+				uint32_t boundary = meshSource->data.materials.materialBoundaries[i+1];
+
+				for (uint32_t triangleIndex = previousBoundary; triangleIndex < boundary; triangleIndex++)
+				{
+					uint32_t vertIndexA = meshSource->data.faces.vertexIndices[triangleIndex * 3 + 0];
+					uint32_t vertIndexB = meshSource->data.faces.vertexIndices[triangleIndex * 3 + 1];
+					uint32_t vertIndexC = meshSource->data.faces.vertexIndices[triangleIndex * 3 + 2];
+
+					memcpy(&lightIter->vertA, meshSource->data.vertices.data + vertIndexA * 3, sizeof(cv3));
+					memcpy(&lightIter->vertB, meshSource->data.vertices.data + vertIndexB * 3, sizeof(cv3));
+					memcpy(&lightIter->vertC, meshSource->data.vertices.data + vertIndexC * 3, sizeof(cv3));
+
+					lightCount++;
+					lightIter++;
+				}
+			}
+
+			previousBoundary = meshSource->data.materials.materialBoundaries[i];
+		}
+
+		crana_stack_commit(&context->stack, lightIter);
+	}
+
+	bvh_t lightBVH;
+	{
+		uint32_t leafCount = lightCount;
+		index_aabb_pair_t* leafs = crana_stack_alloc(&context->scratchStack, sizeof(index_aabb_pair_t) * leafCount);
+		for (uint32_t i = 0; i < leafCount; i++)
+		{
+			leafs[i].index = i;
+
+			leafs[i].bound = (caabb) { .min = lights[i].vertA, .max = lights[i].vertA };
+			leafs[i].bound = caabb_consume(leafs[i].bound, lights[i].vertB);
+			leafs[i].bound = caabb_consume(leafs[i].bound, lights[i].vertC);
+		}
+
+		lightBVH = build_bvh(context, leafs, leafCount);
+		crana_stack_free(&context->scratchStack, leafs);
+	}
+
 	instance_t* instances = crana_stack_alloc(&context->stack, sizeof(instance_t)*meshSource->data.groups.count);
 	for (uint32_t i = 0; i < meshSource->data.groups.count; i++)
 	{
@@ -1548,6 +1763,12 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		{
 			.data = instances,
 			.count = meshSource->data.groups.count
+		},
+		.lights = 
+		{
+			.bvh = lightBVH,
+			.data = lights,
+			.count = lightCount
 		},
 		.renderables = meshes,
 		.materials =
@@ -1721,7 +1942,7 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 			memcpy(&normalB, sourceMesh->data.normals.data + normalIndexB * 3, sizeof(cv3));
 			memcpy(&normalC, sourceMesh->data.normals.data + normalIndexC * 3, sizeof(cv3));
 
-			closestHitInfo.normal = cv3_add(cv3_add(cv3_mulf(normalA, u), cv3_mulf(normalB, v)), cv3_mulf(normalC, w));
+			closestHitInfo.normal = cv3_barycentric(normalA, normalB, normalC, (cv3) { u, v, w });
 
 			uint32_t uvIndexA = sourceMesh->data.faces.uvIndices[faceIndex * 3 + 0];
 			uint32_t uvIndexB = sourceMesh->data.faces.uvIndices[faceIndex * 3 + 1];
@@ -1898,6 +2119,63 @@ static shader_outputs_t shader_lambert(const void* cran_restrict materialData, u
 	};
 }
 
+static cv3 sample_light_bvh(render_context_t* context, ray_scene_t const* scene, cv3 surface, cv3 normal)
+{
+	// Stochastic bvh traversal
+	uint32_t nextNode = 0;
+	uint32_t selectedLight = 0;
+	while (nextNode < scene->lights.bvh.count - scene->lights.bvh.leafCount)
+	{
+		uint32_t left = scene->lights.bvh.jumps[nextNode].jumpIndices.left;
+		uint32_t right = scene->lights.bvh.jumps[nextNode].jumpIndices.right;
+
+		caabb leftBounds = scene->lights.bvh.bounds[left];
+		caabb rightBounds = scene->lights.bvh.bounds[right];
+
+		// Use light attenuation equation as our importance function
+		cv3 surfaceToLeft = cv3_sub(caabb_center(leftBounds), surface);
+		cv3 surfaceToRight = cv3_sub(caabb_center(rightBounds), surface);
+
+		float leftDistance = cv3_length(surfaceToLeft);
+		float rightDistance = cv3_length(surfaceToRight);
+		surfaceToLeft = cv3_mulf(surfaceToLeft, cf_fast_rcp(leftDistance));
+		surfaceToRight = cv3_mulf(surfaceToRight, cf_fast_rcp(rightDistance));
+
+		// Heuristic by distance + cosine lobe
+		float leftPMF = cf_rcp(1.0f + leftDistance * leftDistance) * fmaxf(cv3_dot(surfaceToLeft, normal), 0.00001f);
+		float rightPMF = cf_rcp(1.0f + rightDistance * rightDistance) * fmaxf(cv3_dot(surfaceToRight, normal), 0.0001f);
+
+		float maxPMF = leftPMF + rightPMF;
+
+		float leftWeight = leftPMF * cf_rcp(maxPMF);
+		float rightWeight = rightPMF * cf_rcp(maxPMF);
+
+		uint32_t lowerIndex = leftPMF < rightPMF ? left : right;
+		uint32_t higherIndex = leftPMF < rightPMF ? right : left;
+		if (random01f(&context->randomSeed) < fminf(leftWeight, rightWeight))
+		{
+			nextNode = lowerIndex;
+		}
+		else
+		{
+			nextNode = higherIndex;
+		}
+	}
+
+	selectedLight = scene->lights.bvh.jumps[nextNode].leaf.index;
+
+	cv3 vertA = scene->lights.data[selectedLight].vertA;
+	cv3 vertB = scene->lights.data[selectedLight].vertB;
+	cv3 vertC = scene->lights.data[selectedLight].vertC;
+
+	float u = random01f(&context->randomSeed);
+	float v = random01f(&context->randomSeed) * (1.0f - u);
+	float w = random01f(&context->randomSeed) * (1.0f - u - v);
+	cv3 p = cv3_barycentric(vertA, vertB, vertC, (cv3) { u, v, w });
+
+	return cv3_normalize(cv3_sub(p, inputs.surface));
+}
+
 static shader_outputs_t shader_microfacet(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
 	cranpr_begin("shader", "microfacet");
@@ -1920,11 +2198,14 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 
 	cv3 viewDir = cv3_inverse(cv3_normalize(inputs.viewDir));
 
+	// Bump mapping
 	cv3 normal = cv3_normalize(inputs.normal);
-	cv4 partialDerivative = sampler_sample(&scene->textureStore, microfacetData.bumpSampler, microfacetData.bumpTexture, inputs.uv);
-	normal = cv3_cross(cv3_add(inputs.tangent, cv3_mulf(normal, partialDerivative.x)), cv3_add(inputs.bitangent, cv3_mulf(normal, partialDerivative.y)));
-	normal = cv3_normalize(normal);
-	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
+	{
+		cv4 partialDerivative = sampler_sample(&scene->textureStore, microfacetData.bumpSampler, microfacetData.bumpTexture, inputs.uv);
+		normal = cv3_cross(cv3_add(inputs.tangent, cv3_mulf(normal, partialDerivative.x)), cv3_add(inputs.bitangent, cv3_mulf(normal, partialDerivative.y)));
+		normal = cv3_normalize(normal);
+		cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
+	}
 
 	float gloss = microfacetData.gloss; // Sharing gloss as both "minimum reflectance" and "roughness"...
 	if (microfacetData.specTexture.id != 0)
@@ -1968,6 +2249,15 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		h = cm3_rotate_cv3(cm3_basis_from_normal(normal), h);
 		castDir = cv3_reflect(cv3_inverse(viewDir), h);
 	}
+
+	// TODO: Select between surface and lights
+	bool explicitLightSampling = true;
+	if(explicitLightSampling)
+	{
+		castDir = sample_light_bvh(context, scene, inputs.surface, normal);
+		h = cv3_normalize(cv3_add(castDir, viewDir));
+	}
+
 
 	float selectedPDF;
 	float lambertPDF = lambert_pdf(castDir, normal);
@@ -2032,7 +2322,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		}
 	}
 	light = cv3_mulf(light, weight * cf_rcp(selectedPDF * weights[distribution]));
-	light = cv3_add(light, microfacetData.emission);
+	light = cv3_add(light, cv3_mulf(microfacetData.emission, 5.0f));
 
 	cranpr_end("shader", "microfacet");
 	return (shader_outputs_t)
@@ -2272,7 +2562,7 @@ int main()
 		.scratchStackMemory = 1024ull*1024ull*1024ull,
 
 		//.environmentMap = "background.hdr",
-		.environmentLightFallback = (cv3) { 10.1f, 10.1f, 10.1f }
+		.environmentLightFallback = (cv3) { 0.0f, 0.0f, 0.0f }
 	};
 
 	// 3GB for persistent memory

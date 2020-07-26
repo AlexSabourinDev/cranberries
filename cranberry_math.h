@@ -128,6 +128,7 @@ cran_forceinline cv3 cv3_lerp(cv3 l, cv3 r, float t);
 cran_forceinline float cv3_length(cv3 v);
 cran_forceinline float cv3_rlength(cv3 v);
 cran_forceinline float cv3_sqrlength(cv3 v);
+cran_forceinline float cv3_sqrdistance(cv3 l, cv3 r);
 cran_forceinline cv3 cv3_normalize(cv3 v);
 cran_forceinline cv3 cv3_min(cv3 v, cv3 m);
 cran_forceinline cv3 cv3_max(cv3 v, cv3 m);
@@ -142,6 +143,7 @@ cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cra
 // theta is between 0 and PI (vertical plane)
 // phi is between 0 and 2PI (horizontal plane)
 cran_forceinline cv3 cv3_from_spherical(float theta, float phi, float radius);
+cran_forceinline cv3 cv3_barycentric(cv3 a, cv3 b, cv3 c, cv3 uvw);
 
 // V3 Lane API
 cran_forceinline cv3l cv3l_replicate(cv3 v);
@@ -163,6 +165,7 @@ cran_forceinline cv3 cm3_rotate_cv3(cm3 m, cv3 v);
 
 // AABB API
 cran_forceinline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin, float rayMax, caabb aabb);
+cran_forceinline bool caabb_does_line_intersect(cv3 a, cv3 b, caabb aabb);
 cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax);
 
 enum
@@ -171,10 +174,13 @@ enum
 	caabb_y,
 	caabb_z
 };
+cran_forceinline cv3 caabb_center(caabb l);
 cran_forceinline float caabb_centroid(caabb l, uint32_t axis);
 cran_forceinline float caabb_side(caabb l, uint32_t axis);
 cran_forceinline caabb caabb_merge(caabb l, caabb r);
 cran_forceinline float caabb_surface_area(caabb l);
+cran_forceinline void caabb_split_8(caabb parent, caabb children[8]);
+cran_forceinline caabb caabb_consume(caabb parent, cv3 point);
 
 // Miscellaneous API
 // Expecting i to be exitant (i.n > 0)
@@ -192,13 +198,9 @@ cran_forceinline float cf_rcp(float f)
 
 cran_forceinline float cf_fast_rcp(float f)
 {
-	union
-	{
-		__m128 sse;
-		float f[4];
-	} conv;
-	conv.sse = _mm_rcp_ss(_mm_set_ss(f));
-	return conv.f[0];
+	__m128 sse = _mm_rcp_ss(_mm_load_ss(&f));
+	_mm_store_ss(&f, sse);
+	return f;
 }
 
 cran_forceinline float cf_rsqrt(float f)
@@ -433,6 +435,11 @@ cran_forceinline float cv3_sqrlength(cv3 v)
 	return (v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
+cran_forceinline float cv3_sqrdistance(cv3 l, cv3 r)
+{
+	return cv3_sqrlength(cv3_sub(l, r));
+}
+
 cran_forceinline cv3 cv3_normalize(cv3 v)
 {
 	return cv3_mulf(v, cv3_rlength(v));
@@ -486,6 +493,11 @@ cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cra
 cran_forceinline cv3 cv3_from_spherical(float theta, float phi, float radius)
 {
 	return (cv3) { cosf(phi) * sinf(theta) * radius, sinf(phi) * sinf(theta) * radius, radius * cosf(theta) };
+}
+
+cran_forceinline cv3 cv3_barycentric(cv3 a, cv3 b, cv3 c, cv3 uvw)
+{
+	return cv3_add(cv3_add(cv3_mulf(a, uvw.x), cv3_mulf(b, uvw.y)), cv3_mulf(c, uvw.z));
 }
 
 // V3 Lane Implementation
@@ -661,6 +673,12 @@ cran_forceinline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin,
 	return cfl_mask(cfl_lt(vrayMin, vrayMax));
 }
 
+cran_forceinline bool caabb_does_line_intersect(cv3 a, cv3 b, caabb aabb)
+{
+	// TODO: Can we specialize this intersection?
+	return caabb_does_ray_intersect(a, cv3_sub(b, a), 0.0f, 1.0f, aabb);
+}
+
 cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax)
 {
 	cv3l rayOLanes = cv3l_replicate(rayO);
@@ -677,6 +695,11 @@ cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, flo
 	cfl tmax = cfl_min(rayMaxLane, cfl_min(tbigger.x, cfl_min(tbigger.y, tbigger.z)));
 	cfl result = cfl_less(tmin, tmax);
 	return cfl_mask(result);
+}
+
+cran_forceinline cv3 caabb_center(caabb l)
+{
+	return (cv3) { (l.max.x + l.min.x)*0.5f, (l.max.y + l.min.y)*0.5f, (l.max.z + l.min.z)*0.5f };
 }
 
 cran_forceinline float caabb_centroid(caabb l, uint32_t axis)
@@ -697,6 +720,33 @@ cran_forceinline caabb caabb_merge(caabb l, caabb r)
 cran_forceinline float caabb_surface_area(caabb l)
 {
 	return ((caabb_side(l,caabb_x)*caabb_side(l,caabb_y))+(caabb_side(l,caabb_y)*caabb_side(l,caabb_z))+(caabb_side(l,caabb_x)*caabb_side(l,caabb_z)))*2.0f;
+}
+
+cran_forceinline void caabb_split_8(caabb parent, caabb children[8])
+{
+	cv3 center = cv3_mulf(cv3_sub(parent.max, parent.min), 0.5f);
+	cv3 childSize = cv3_mulf(cv3_sub(parent.max, parent.min), 0.5f);
+
+	children[0] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.x = -childSize.x;
+	children[1] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.y = -childSize.y;
+	children[2] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.x = -childSize.x;
+	children[3] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.z = -childSize.z;
+	children[4] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.y = -childSize.y;
+	children[5] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.x = -childSize.x;
+	children[6] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.y = -childSize.y;
+	children[7] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+}
+
+cran_forceinline caabb caabb_consume(caabb parent, cv3 point)
+{
+	return (caabb) { .min = cv3_min(parent.min, point), .max = cv3_max(parent.max, point) };
 }
 
 // Miscellaneous Implementation
