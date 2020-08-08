@@ -15,7 +15,7 @@
 
 #define cran_debug
 #ifdef cran_debug
-#include <assert.h>
+#include <stdio.h>
 #define cran_assert(a) \
 	do \
 	{ \
@@ -24,8 +24,11 @@
 			__debugbreak(); \
 		} \
 	} while (0)
+
+#define cran_log(a,...) printf(a, __VA_ARGS__)
 #else
 # define cran_assert(a) (void)(a)
+#define cran_log(a, ...)
 #endif
 
 #define cran_stats
@@ -1484,6 +1487,8 @@ octree_t build_light_octree(render_context_t* context, light_t* lights, uint32_t
 
 static void generate_scene(render_context_t* context, ray_scene_t* scene)
 {
+	cran_log("Generating Scene\n");
+
 	cranpr_begin("scene", "generate");
 	cran_stat(uint64_t startTime = cranpl_timestamp_micro());
 
@@ -1491,6 +1496,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	// Mesh
 	mesh_t* meshes;
 	{
+		cran_log("Loading Mesh\n");
+
 		// TODO: We likely don't want a stack allocator here
 		// clean up would be too tedious, think of a way to encapsulate meshes
 
@@ -1570,6 +1577,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	sphere_importance_t backgroundImportance = { 0 };
 	if (context->renderConfig.environmentMap != NULL && context->renderConfig.environmentMap[0] != 0)
 	{
+		cran_log("Loading Environment Map\n");
+
 		backgroundTextureId = texture_request_f32(&textureStore, context->renderConfig.environmentMap);
 		texture_t const* texture = &textureStore.textures[backgroundTextureId.id - 1];
 
@@ -1620,6 +1629,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 	cranl_material_lib_t matLib;
 	{
+		cran_log("Loading Materials\n");
+
 		mirror = (material_mirror_t){ .color = (cv3) {1.0f, 1.0f, 1.0f} };
 
 		cran_assert(meshSource->data.materialLibraries.count == 1); // Assume only one material library for now
@@ -1689,6 +1700,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 	light_t* lights;
 	uint32_t lightCount = 0;
 	{
+		cran_log("Initializing Lights\n");
+
 		lights = (light_t*)crana_stack_lock(&context->stack);
 
 		light_t* lightIter = lights;
@@ -1731,6 +1744,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 	bvh_t lightBVH;
 	{
+		cran_log("Partitioning Lights\n");
+
 		uint32_t leafCount = lightCount;
 		index_aabb_pair_t* leafs = crana_stack_alloc(&context->scratchStack, sizeof(index_aabb_pair_t) * leafCount);
 		for (uint32_t i = 0; i < leafCount; i++)
@@ -1792,6 +1807,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 	// BVH
 	{
+		cran_log("Partitioning Triangles\n");
+
 		uint32_t leafCount = scene->instances.count;
 		index_aabb_pair_t* leafs = crana_stack_alloc(&context->scratchStack, sizeof(index_aabb_pair_t) * leafCount);
 		for (uint32_t i = 0; i < leafCount; i++)
@@ -1815,6 +1832,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 
 	cran_stat(context->renderStats.sceneGenerationTime = cranpl_timestamp_micro() - startTime);
 	cranpr_end("scene", "generate");
+
+	cran_log("Scene Generated\n");
 }
 
 typedef struct
@@ -2119,7 +2138,13 @@ static shader_outputs_t shader_lambert(const void* cran_restrict materialData, u
 	};
 }
 
-static cv3 sample_light_bvh(render_context_t* context, ray_scene_t const* scene, cv3 surface, cv3 normal, float* pmf)
+typedef struct
+{
+	cv3 direction;
+	float probability;
+} light_bvh_sample_t;
+
+static light_bvh_sample_t sample_light_bvh(render_context_t* context, ray_scene_t const* scene, cv3 surface, cv3 normal)
 {
 	// http://www.aconty.com/pdf/many-lights-hpg2018.pdf
 	// https://psychopath.io/post/2020_04_20_light_trees
@@ -2128,7 +2153,6 @@ static cv3 sample_light_bvh(render_context_t* context, ray_scene_t const* scene,
 
 	// Stochastic bvh traversal
 	uint32_t nextNode = 0;
-	uint32_t selectedLight = 0;
 	while (nextNode < scene->lights.bvh.count - scene->lights.bvh.leafCount)
 	{
 		uint32_t left = scene->lights.bvh.jumps[nextNode].jumpIndices.left;
@@ -2146,41 +2170,45 @@ static cv3 sample_light_bvh(render_context_t* context, ray_scene_t const* scene,
 		surfaceToLeft = cv3_mulf(surfaceToLeft, cf_fast_rcp(leftDistance));
 		surfaceToRight = cv3_mulf(surfaceToRight, cf_fast_rcp(rightDistance));
 
-		// Heuristic by distance + cosine lobe
-		float leftPMF = fmaxf(cf_rcp(1.0f + leftDistance * leftDistance) * cv3_dot(surfaceToLeft, normal), 0.00001f);
-		float rightPMF = fmaxf(cf_rcp(1.0f + rightDistance * rightDistance) * cv3_dot(surfaceToRight, normal), 0.00001f);
+		// Heuristic by distance attenuation + cosine lobe
+		float leftPMF = fmaxf(cf_fast_rcp(1.0f + leftDistance * leftDistance) * cv3_dot(surfaceToLeft, normal), 0.00001f);
+		float rightPMF = fmaxf(cf_fast_rcp(1.0f + rightDistance * rightDistance) * cv3_dot(surfaceToRight, normal), 0.00001f);
 
 		float maxPMF = leftPMF + rightPMF;
 		cran_assert(maxPMF > 0.0f);
-		if (randomNumber < leftPMF * cf_rcp(maxPMF))
+		if (randomNumber < leftPMF * cf_fast_rcp(maxPMF))
 		{
 			nextNode = left;
 			randomNumber = randomNumber * maxPMF * cf_rcp(leftPMF);
 
-			probability *= leftPMF * cf_rcp(maxPMF);
+			probability *= leftPMF * cf_fast_rcp(maxPMF);
 		}
 		else
 		{
 			nextNode = right;
 			randomNumber = (randomNumber * maxPMF - leftPMF) * cf_rcp(rightPMF);
 
-			probability *= rightPMF * cf_rcp(maxPMF);
+			probability *= rightPMF * cf_fast_rcp(maxPMF);
 		}
 	}
 
-	selectedLight = scene->lights.bvh.jumps[nextNode].leaf.index;
+	uint32_t selectedLight = scene->lights.bvh.jumps[nextNode].leaf.index;
 
+	// Not transforming to world space right now
 	cv3 vertA = scene->lights.data[selectedLight].vertA;
 	cv3 vertB = scene->lights.data[selectedLight].vertB;
 	cv3 vertC = scene->lights.data[selectedLight].vertC;
 
 	float u = random01f(&context->randomSeed);
 	float v = random01f(&context->randomSeed) * (1.0f - u);
-	float w = random01f(&context->randomSeed) * (1.0f - u - v);
+	float w = 1.0f - u - v;
 	cv3 p = cv3_barycentric(vertA, vertB, vertC, (cv3) { u, v, w });
 
-	*pmf = probability;
-	return cv3_normalize(cv3_sub(p, surface));
+	return (light_bvh_sample_t)
+	{
+		.probability = probability,
+		.direction = cv3_normalize(cv3_sub(p, surface))
+	};
 }
 
 static shader_outputs_t shader_microfacet(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
@@ -2241,26 +2269,22 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			[distribution_ggx] = geometricFresnel
 		};
 
-		float explicitLightSamplingChance = 1.0f;
-		if (random01f(&context->randomSeed) < explicitLightSamplingChance) // Explicit light sampling
+		bool reflected = random01f(&context->randomSeed) < weights[distribution_ggx];
+		distribution = reflected ? distribution_ggx : distribution_lambert;
+		if (random01f(&context->randomSeed) < 0.5f) // Explicit light sampling
 		{
-			float pmf;
 			// TODO: Probability is tiny, causing the lights to be over exposed...
-			castDir = sample_light_bvh(context, scene, inputs.surface, normal, &pmf);
+			light_bvh_sample_t result = sample_light_bvh(context, scene, inputs.surface, normal);
+			castDir = result.direction;
 			h = cv3_normalize(cv3_add(castDir, viewDir));
 
-			bool reflected = random01f(&context->randomSeed) < weights[distribution_ggx];
-			distribution = reflected ? distribution_ggx : distribution_lambert;
-
-			weight = cf_rcp(pmf) * explicitLightSamplingChance * weights[distribution];
+			weight = cf_rcp(result.probability);
 		}
 		else
 		{
 			float r1 = random01f(&context->randomSeed);
 			float r2 = random01f(&context->randomSeed);
 
-			bool reflected = random01f(&context->randomSeed) < weights[distribution_ggx];
-			distribution = reflected ? distribution_ggx : distribution_lambert;
 			if (distribution == distribution_lambert) // Lambert distribution
 			{
 				castDir = hemisphere_surface_random_lambert(r1, r2);
@@ -2288,7 +2312,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 				sum += weights[i] * PDFs[i];
 			}
 
-			weight = cf_rcp(sum) * (1.0f - explicitLightSamplingChance);
+			weight = cf_rcp(sum);
 		}
 	}
 
@@ -2553,7 +2577,7 @@ int main()
 	render_config_t renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 1,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,

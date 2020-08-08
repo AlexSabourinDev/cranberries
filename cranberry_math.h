@@ -127,6 +127,7 @@ cran_forceinline cv3 cv3_cross(cv3 l, cv3 r);
 cran_forceinline cv3 cv3_lerp(cv3 l, cv3 r, float t);
 cran_forceinline float cv3_length(cv3 v);
 cran_forceinline float cv3_rlength(cv3 v);
+cran_forceinline float cv3_fast_rlength(cv3 v);
 cran_forceinline float cv3_sqrlength(cv3 v);
 cran_forceinline float cv3_sqrdistance(cv3 l, cv3 r);
 cran_forceinline cv3 cv3_normalize(cv3 v);
@@ -428,6 +429,11 @@ cran_forceinline float cv3_length(cv3 v)
 cran_forceinline float cv3_rlength(cv3 v)
 {
 	return cf_rsqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+cran_forceinline float cv3_fast_rlength(cv3 v)
+{
+	return cf_fast_rsqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
 cran_forceinline float cv3_sqrlength(cv3 v)
