@@ -179,7 +179,6 @@ typedef uint32_t random_seed_t;
 typedef struct
 {
 	random_seed_t randomSeed;
-	uint32_t depth;
 	crana_stack_t stack;
 	crana_stack_t scratchStack;
 
@@ -788,21 +787,11 @@ typedef struct
 
 typedef enum
 {
-	material_lambert,
 	material_mirror,
 	material_directional,
 	material_microfacet,
 	material_count
 } material_type_e;
-
-typedef struct
-{
-	cv3 albedoTint;
-	sampler_t albedoSampler;
-	sampler_t bumpSampler;
-	texture_id_t albedoTexture;
-	texture_id_t bumpTexture;
-} material_lambert_t;
 
 typedef struct
 {
@@ -940,19 +929,20 @@ typedef struct
 
 typedef struct
 {
-	cv3 light;
-	cv3 shadedSurface; // Allows the shader to modify the hit surface
+	cv3 emission;
+	cv3 absorption;
+	cv3 castDir;
+	bool terminate;
+	bool skip;
 } shader_outputs_t;
 
 typedef shader_outputs_t(material_shader_t)(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs);
 
-static material_shader_t shader_lambert;
 static material_shader_t shader_mirror;
 static material_shader_t shader_directional;
 static material_shader_t shader_microfacet;
 material_shader_t* shaders[material_count] =
 {
-	shader_lambert,
 	shader_mirror,
 	shader_directional,
 	shader_microfacet,
@@ -1839,37 +1829,25 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 typedef struct
 {
 	cv3 light;
-	cv3 surface;
-	bool hit;
 } ray_hit_t;
 
-static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD, uint64_t sourceTriangleId)
+typedef struct
 {
-	cranpr_begin("scene", "cast");
+	float distance;
+	cv3 normal;
+	cv3 tangent;
+	cv3 bitangent;
+	cv3 barycentric;
+	cv2 uv;
+	material_index_t materialIndex;
+	uint64_t triangleId;
+} scene_hit_t;
 
-	context->depth++;
-	if (context->depth >= context->renderConfig.maxDepth)
-	{
-		context->depth--;
-		cranpr_end("scene", "cast");
-		return (ray_hit_t) { 0 };
-	}
-
-	cran_stat(context->renderStats.rayCount++);
-
+scene_hit_t scene_closest_hit(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD, uint64_t sourceTriangleId)
+{
 	const float NoRayIntersection = FLT_MAX;
 
-	struct
-	{
-		float distance;
-		cv3 normal;
-		cv3 tangent;
-		cv3 bitangent;
-		cv3 barycentric;
-		cv2 uv;
-		material_index_t materialIndex;
-		uint64_t triangleId;
-	} closestHitInfo = { 0 };
+	scene_hit_t closestHitInfo = { 0 };
 	closestHitInfo.distance = NoRayIntersection;
 
 	cran_stat(uint64_t intersectionStartTime = cranpl_timestamp_micro());
@@ -2024,57 +2002,77 @@ static ray_hit_t cast_scene(render_context_t* context, ray_scene_t const* scene,
 	}
 	cran_stat(context->renderStats.intersectionTime += cranpl_timestamp_micro() - intersectionStartTime);
 
-	if (closestHitInfo.triangleId != 0)
+	return closestHitInfo;
+}
+
+static cv3 cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 rayO, cv3 rayD)
+{
+	cranpr_begin("scene", "cast");
+
+	cv3 light = (cv3) { 0 };
+	cv3 absorption = (cv3) { 1.0f, 1.0f, 1.0f };
+	uint64_t sourceTriangleId = ~0ull;
+	for (uint32_t i = 0; i < context->renderConfig.maxDepth; i++)
 	{
-		material_index_t materialIndex = closestHitInfo.materialIndex;
-		cv3 intersectionPoint = cv3_add(rayO, cv3_mulf(rayD, closestHitInfo.distance));
+		cran_stat(context->renderStats.rayCount++);
 
-		uint32_t shaderIndex = context->renderConfig.useDirectionalMat ? material_directional : materialIndex.typeIndex;
-		shader_outputs_t shaderResults = shaders[shaderIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
-			(shader_inputs_t)
-			{
-				.surface = intersectionPoint,
-				.normal = closestHitInfo.normal,
-				.tangent = closestHitInfo.tangent,
-				.bitangent = closestHitInfo.bitangent,
-				.viewDir = rayD,
-				.uv = closestHitInfo.uv,
-				.triangleId = closestHitInfo.triangleId
-			});
-		context->depth--;
-
-		cranpr_end("scene", "cast");
-		return (ray_hit_t)
+		scene_hit_t closestHitInfo = scene_closest_hit(context, scene, rayO, rayD, sourceTriangleId);
+		if (closestHitInfo.triangleId != 0)
 		{
-			.light = shaderResults.light,
-			.surface = shaderResults.shadedSurface,
-			.hit = true
-		};
-	}
+			sourceTriangleId = closestHitInfo.triangleId;
 
-	cran_stat(uint64_t skyboxStartTime = cranpl_timestamp_micro());
-	cv3 skybox;
-	if (scene->environment.texture.id == 0)
-	{
-		skybox = context->renderConfig.environmentLightFallback;
-	}
-	else
-	{
-		cv4 skyboxColor = sampler_sample_3D(&scene->textureStore, scene->environment.sampler, scene->environment.texture, rayD);
-		skybox = (cv3) { skyboxColor.r, skyboxColor.g, skyboxColor.b };
-		skybox = cv3_mulf(skybox, 100.0f);
-	}
-	cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
+			material_index_t materialIndex = closestHitInfo.materialIndex;
+			cv3 intersectionPoint = cv3_add(rayO, cv3_mulf(rayD, closestHitInfo.distance));
 
-	context->depth--;
+			uint32_t shaderIndex = context->renderConfig.useDirectionalMat ? material_directional : materialIndex.typeIndex;
+			shader_outputs_t shaderResults = shaders[shaderIndex](scene->materials[materialIndex.typeIndex], materialIndex.dataIndex, context, scene,
+				(shader_inputs_t)
+				{
+					.surface = intersectionPoint,
+					.normal = closestHitInfo.normal,
+					.tangent = closestHitInfo.tangent,
+					.bitangent = closestHitInfo.bitangent,
+					.viewDir = rayD,
+					.uv = closestHitInfo.uv,
+					.triangleId = closestHitInfo.triangleId
+				});
 
+			light = cv3_add(light, cv3_mul(shaderResults.emission, absorption));
+			absorption = cv3_mul(absorption, shaderResults.absorption);
+
+			if (!shaderResults.skip)
+			{
+				rayO = intersectionPoint;
+				rayD = shaderResults.castDir;
+			}
+
+			if (shaderResults.terminate)
+			{
+				break;
+			}
+		}
+		else
+		{
+			cran_stat(uint64_t skyboxStartTime = cranpl_timestamp_micro());
+			cv3 skybox;
+			if (scene->environment.texture.id == 0)
+			{
+				skybox = context->renderConfig.environmentLightFallback;
+			}
+			else
+			{
+				cv4 skyboxColor = sampler_sample_3D(&scene->textureStore, scene->environment.sampler, scene->environment.texture, rayD);
+				skybox = (cv3) { skyboxColor.r, skyboxColor.g, skyboxColor.b };
+				skybox = cv3_mulf(skybox, 100.0f);
+			}
+			cran_stat(context->renderStats.skyboxTime += cranpl_timestamp_micro() - skyboxStartTime);
+			light = cv3_add(light, cv3_mul(skybox, absorption));
+			break;
+		}
+	}
 	cranpr_end("scene", "cast");
-	return (ray_hit_t)
-	{
-		.light = skybox,
-		.surface = cv3_add(rayO, cv3_mulf(rayD, 1000.0f)),
-		.hit = false
-	};
+
+	return light;
 }
 
 static shader_outputs_t shader_directional(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
@@ -2086,55 +2084,8 @@ static shader_outputs_t shader_directional(const void* cran_restrict materialDat
 
 	return (shader_outputs_t)
 	{
-		.light = cv3_mulf((cv3) { 1.0f, 1.0f, 1.0f }, fmaxf(cv3_dot(inputs.normal, (cv3) { 0.0f, 0.707f, 0.707f }), 0.2f)),
-		.shadedSurface = inputs.surface,
-	};
-}
-
-// Do we want to handle this some other way?
-static shader_outputs_t shader_lambert(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
-{
-	cranpr_begin("shader", "lambert");
-	material_lambert_t lambertData = ((const material_lambert_t* cran_restrict)materialData)[materialIndex];
-	// TODO: Consider iteration instead of recursion
-
-	cv3 normal = cv3_normalize(inputs.normal);
-	cv4 partialDerivative = sampler_sample(&scene->textureStore, lambertData.bumpSampler, lambertData.bumpTexture, inputs.uv);
-	normal = cv3_cross(cv3_add(inputs.tangent, cv3_mulf(normal, partialDerivative.x)), cv3_add(inputs.bitangent, cv3_mulf(normal, partialDerivative.y)));
-	normal = cv3_normalize(normal);
-	cran_assert(cv3_dot(normal, inputs.normal) >= 0.0f);
-
-	float r1 = random01f(&context->randomSeed);
-	float r2 = random01f(&context->randomSeed);
-	cv3 castDir = hemisphere_surface_random_lambert(r1,r2);
-	castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
-	float pdf = lambert_pdf(castDir, normal);
-	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
-
-	const bool ImportanceSampling = false;
-	if (!result.hit && ImportanceSampling)
-	{
-		float bias;
-		castDir = importance_sample_hdr(scene->environment.importance, &bias, &context->randomSeed);
-		result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
-		result.light = cv3_mulf(result.light, cf_rcp(bias));
-	}
-	else
-	{
-		result.light = cv3_mulf(result.light, cf_rcp(pdf));
-	}
-
-	cv3 albedoTint = lambertData.albedoTint;
-	cv4 samplerAlbedo = sampler_sample(&scene->textureStore, lambertData.albedoSampler, lambertData.albedoTexture, inputs.uv);
-
-	cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
-	cv3 light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
-
-	cranpr_end("shader", "lambert");
-	return (shader_outputs_t)
-	{
-		.light = cv3_mul(light, cv3_mulf(albedo, cran_rpi)),
-		.shadedSurface = inputs.surface,
+		.absorption = cv3_mulf((cv3) { 1.0f, 1.0f, 1.0f }, fmaxf(cv3_dot(inputs.normal, (cv3) { 0.0f, 0.707f, 0.707f }), 0.2f)),
+		.terminate = true,
 	};
 }
 
@@ -2215,18 +2166,18 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 {
 	cranpr_begin("shader", "microfacet");
 	material_microfacet_t microfacetData = ((const material_microfacet_t* cran_restrict)materialData)[materialIndex];
-	// TODO: Consider iteration instead of recursion
 
 	if (microfacetData.maskTexture.id != 0)
 	{
 		float mask = sampler_sample(&scene->textureStore, microfacetData.maskSampler, microfacetData.maskTexture, inputs.uv).x;
 		if (mask == 0.0f)
 		{
-			ray_hit_t result = cast_scene(context, scene, inputs.surface, inputs.viewDir, inputs.triangleId);
 			return (shader_outputs_t)
 			{
-				.light = result.light,
-				.shadedSurface = result.surface,
+				.absorption = (cv3) { 1.0f, 1.0f, 1.0f },
+				.emission = (cv3) { 0 },
+				.castDir = inputs.viewDir,
+				.skip = true
 			};
 		}
 	}
@@ -2271,7 +2222,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 
 		bool reflected = random01f(&context->randomSeed) < weights[distribution_ggx];
 		distribution = reflected ? distribution_ggx : distribution_lambert;
-		if (random01f(&context->randomSeed) < 0.5f) // Explicit light sampling
+		if (random01f(&context->randomSeed) < 0.0f) // Explicit light sampling
 		{
 			// TODO: Probability is tiny, causing the lights to be over exposed...
 			light_bvh_sample_t result = sample_light_bvh(context, scene, inputs.surface, normal);
@@ -2316,22 +2267,14 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		}
 	}
 
-	cv3 light;
+	cv3 absorption = (cv3) { 1.0f, 1.0f, 1.0f };
 	if(distribution == distribution_lambert)
 	{
-		ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
-		if (result.hit)
-		{
-			result.light = cv3_mulf(result.light, light_attenuation(result.surface, inputs.surface));
-		}
-
-		light = cv3_mulf(result.light, fmaxf(cv3_dot(castDir, normal), 0.0f));
-
 		cv3 albedoTint = microfacetData.albedoTint;
 		cv4 samplerAlbedo = sampler_sample(&scene->textureStore, microfacetData.albedoSampler, microfacetData.albedoTexture, inputs.uv);
 
 		cv3 albedo = cv3_mul(albedoTint, (cv3) { samplerAlbedo.x, samplerAlbedo.y, samplerAlbedo.z });
-		light = cv3_mul(light, cv3_mulf(albedo, cran_rpi));
+		absorption = cv3_mulf(albedo, fmaxf(cv3_dot(castDir, normal), 0.0f) * cran_rpi);
 	}
 	else
 	{
@@ -2344,38 +2287,33 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			float F = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, h, viewDir);
 			float brdf = ggx_smith_uncorrelated(roughness, cv3_dot(h, normal), cv3_dot(viewDir, normal), cv3_dot(castDir, normal), F);
 
-			ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
-			if (result.hit)
-			{
-				result.light = cv3_mulf(result.light, light_attenuation(result.surface, inputs.surface));
-			}
-
-			light = cv3_mulf(result.light, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f));
-			light = cv3_mul(light, microfacetData.specularTint); // TODO: Is there any physics behind this specular albedo concept?
+			absorption = cv3_mulf(microfacetData.specularTint, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f)); // TODO: Is there any physics behind this specular albedo concept?
 		}
 		else
 		{
-			light = (cv3) { 0 };
+			absorption = (cv3) { 0 };
 		}
 	}
-	light = cv3_mulf(light, weight);
-	light = cv3_add(light, cv3_mulf(microfacetData.emission, 5.0f));
+	absorption = cv3_mulf(absorption, weight);
 
 	cranpr_end("shader", "microfacet");
 	return (shader_outputs_t)
 	{
-		.light = light,
-		.shadedSurface = inputs.surface,
+		.emission = microfacetData.emission,
+		.absorption = absorption,
+		.castDir = castDir,
 	};
 }
 
 static shader_outputs_t shader_mirror(const void* cran_restrict materialData, uint32_t materialIndex, render_context_t* context, ray_scene_t const* scene, shader_inputs_t inputs)
 {
+	(void)context;
+	(void)scene;
+
 	cranpr_begin("shader", "mirror");
 	material_mirror_t mirrorData = ((const material_mirror_t* cran_restrict)materialData)[materialIndex];
 
 	cv3 castDir = cv3_reflect(inputs.viewDir, inputs.normal);
-	ray_hit_t result = cast_scene(context, scene, inputs.surface, castDir, inputs.triangleId);
 
 	float lambertCosine = fmaxf(0.0f, cv3_dot(cv3_normalize(castDir), inputs.normal));
 
@@ -2383,13 +2321,12 @@ static shader_outputs_t shader_mirror(const void* cran_restrict materialData, ui
 	// c*reflect(l,n).n=1
 	// c=1/reflect(l,n)
 	float normalization = cf_rcp(lambertCosine); // cancels our lambert cosine
-	cv3 sceneCast = cv3_mulf(result.light, lambertCosine * normalization);
 
 	cranpr_end("shader", "mirror");
 	return (shader_outputs_t)
 	{
-		.light = cv3_mul(sceneCast, mirrorData.color),
-		.shadedSurface = inputs.surface,
+		.absorption = cv3_mulf(mirrorData.color, lambertCosine * normalization),
+		.castDir = castDir,
 	};
 }
 
@@ -2493,8 +2430,8 @@ static void render_scene_async(void* cran_restrict data)
 					// V = F*n + R*ix*worldWidth/imgWidth + U*iy*worldHeight/imgHeight
 					cv3 rayDir = cv3_add(cv3_mulf(renderData->forward, renderData->near), cv3_add(cv3_mulf(renderData->right, randX), cv3_mulf(renderData->up, randY)));
 
-					ray_hit_t hit = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir, ~0ull);
-					sceneColor = cv3_add(sceneColor, cv3_mulf(hit.light, rsamplesPerPixel));
+					cv3 light = cast_scene(renderContext, &renderData->scene, renderData->origin, rayDir);
+					sceneColor = cv3_add(sceneColor, cv3_mulf(light, rsamplesPerPixel));
 				}
 
 				crana_stack_free(&renderContext->stack, samplingPoints);
@@ -2577,7 +2514,7 @@ int main()
 	render_config_t renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
-		.samplesPerPixel = 1,
+		.samplesPerPixel = 10,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,
@@ -2599,7 +2536,7 @@ int main()
 		.scratchStackMemory = 1024ull*1024ull*1024ull,
 
 		//.environmentMap = "background.hdr",
-		.environmentLightFallback = (cv3) { 0.0f, 0.0f, 0.0f }
+		.environmentLightFallback = (cv3) { 10.0f, 10.0f, 10.0f }
 	};
 
 	// 3GB for persistent memory

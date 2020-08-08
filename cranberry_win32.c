@@ -65,12 +65,21 @@ void* cran_restrict cranpl_create_window(char const* cran_restrict windowName, u
 		.lpszClassName = windowName
 	});
 
+	RECT rect =
+	{
+		.left = 0,
+		.right = width,
+		.top = 0,
+		.bottom = height
+	};
+
+	AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
 	HWND hwnd = CreateWindowEx(
 		0,
 		windowName,
 		windowName,
 		WS_OVERLAPPEDWINDOW,
-		CW_USEDEFAULT, CW_USEDEFAULT, width, height,
+		CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
 		NULL,
 		NULL,
 		hinstance,
@@ -112,7 +121,7 @@ void cranpl_blit_bmp(void* window, uint8_t* cran_restrict pixels, uint32_t width
 	SelectObject(src, map);
 
 	RECT rect;
-	GetWindowRect(window, &rect);
+	GetClientRect(window, &rect);
 	StretchBlt(windowDC, 0, 0, rect.right - rect.left, rect.bottom - rect.top, src, 0, 0, width, height, SRCCOPY);
 	DeleteDC(src);
 }
