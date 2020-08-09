@@ -236,6 +236,18 @@ static cv4 gamma_to_linear(cv4 color)
 	return (cv4) { color.x*color.x, color.y*color.y, color.z*color.z, color.w };
 }
 
+// Implementation from: https://www.shadertoy.com/view/WdjSW3
+float tonemap_ACES(float x)
+{
+	// Narkowicz 2015, "ACES Filmic Tone Mapping Curve"
+	const float a = 2.51;
+	const float b = 0.03;
+	const float c = 2.43;
+	const float d = 0.59;
+	const float e = 0.14;
+	return (x * (a * x + b)) / (x * (c * x + d) + e);
+}
+
 static bool sphere_does_ray_intersect(cv3 rayO, cv3 rayD, float sphereR)
 {
 	float projectedDistance = -cv3_dot(rayO, rayD);
@@ -1732,7 +1744,8 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		crana_stack_commit(&context->stack, lightIter);
 	}
 
-	bvh_t lightBVH;
+	bvh_t lightBVH = { 0 };
+	if(lightCount > 0)
 	{
 		cran_log("Partitioning Lights\n");
 
@@ -2536,7 +2549,7 @@ int main()
 		.scratchStackMemory = 1024ull*1024ull*1024ull,
 
 		//.environmentMap = "background.hdr",
-		.environmentLightFallback = (cv3) { 10.0f, 10.0f, 10.0f }
+		.environmentLightFallback = (cv3) { 100.0f, 100.0f, 100.0f }
 	};
 
 	// 3GB for persistent memory
@@ -2691,18 +2704,73 @@ int main()
 	if(enableImageSpace)
 	{
 		cran_stat(uint64_t imageSpaceStartTime = cranpl_timestamp_micro());
-		// reinhard tonemapping
+
+		float minLogLuminance = log2f(0.5f);
+		float luminanceLogRange = log2f(80.0f);
+		float rluminanceLogRange = cf_rcp(luminanceLogRange);
+
+		uint32_t histogram[256] = { 0 };
+		for (int32_t y = 0; y < mainRenderData.imgHeight; y++)
+		{
+			for (int32_t x = 0; x < mainRenderData.imgWidth; x++)
+			{
+				int32_t readIndex = (y * mainRenderData.imgWidth + x) * mainRenderData.imgStride;
+				float luminance = rgb_to_luminance(hdrImage[readIndex + 0], hdrImage[readIndex + 1], hdrImage[readIndex + 2]);
+
+				uint32_t index = 0;
+				if (luminance > 0.0f)
+				{
+					float range = fminf(fmaxf((log2f(luminance) - minLogLuminance) * rluminanceLogRange, 0.0f), 1.0f);
+					index = (uint32_t)(range * 254.0f) + 1;
+				}
+
+				histogram[index]++;
+			}
+		}
+
+		uint32_t weighedSum = 0;
+		uint32_t nonZeroPixels = 0;
+		for (uint32_t i = 0; i < 256; i++)
+		{
+			weighedSum += histogram[i] * i;
+			if (i > 0)
+			{
+				nonZeroPixels += histogram[i];
+			}
+		}
+
+		float logAverage = (float)weighedSum / fmaxf((float)nonZeroPixels, 1.0f) - 1.0f;
+		float averageLuminance = exp2f(logAverage / 254.0f * luminanceLogRange + minLogLuminance);
+
+		// https://bruop.github.io/exposure/
+		const float S = 100.0f;
+		const float K = 12.5f;
+		const float q = 0.65f;
+
+		float EV100 = log2f(averageLuminance * S/K);
+		float LMax = 78.0f / (S*q)*powf(2.0f, EV100);
+		float H = cf_rcp(LMax);
+
 		for (int32_t y = 0; y < mainRenderData.imgHeight; y++)
 		{
 			for (int32_t x = 0; x < mainRenderData.imgWidth; x++)
 			{
 				int32_t readIndex = (y * mainRenderData.imgWidth + x) * mainRenderData.imgStride;
 
-				hdrImage[readIndex + 0] = hdrImage[readIndex + 0] / (hdrImage[readIndex + 0] + 1.0f);
-				hdrImage[readIndex + 1] = hdrImage[readIndex + 1] / (hdrImage[readIndex + 1] + 1.0f);
-				hdrImage[readIndex + 2] = hdrImage[readIndex + 2] / (hdrImage[readIndex + 2] + 1.0f);
+				float r = hdrImage[readIndex + 0];
+				float g = hdrImage[readIndex + 1];
+				float b = hdrImage[readIndex + 2];
+
+				r *= H;
+				g *= H;
+				b *= H;
+
+				hdrImage[readIndex + 0] = tonemap_ACES(r);
+				hdrImage[readIndex + 1] = tonemap_ACES(g);
+				hdrImage[readIndex + 2] = tonemap_ACES(b);
 			}
 		}
+
 		cran_stat(mainRenderContext.renderStats.imageSpaceTime = cranpl_timestamp_micro() - imageSpaceStartTime);
 	}
 
