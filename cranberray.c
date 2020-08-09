@@ -2523,7 +2523,7 @@ int main()
 	};
 	(void)bistro;
 
-	scene_setup_t scene = bistro;
+	scene_setup_t scene = sponza;
 	render_config_t renderConfig = (render_config_t)
 	{
 		.maxDepth = 10,
@@ -2709,6 +2709,7 @@ int main()
 		float luminanceLogRange = log2f(80.0f);
 		float rluminanceLogRange = cf_rcp(luminanceLogRange);
 
+		// http://alextardif.com/HistogramLuminance.html
 		uint32_t histogram[256] = { 0 };
 		for (int32_t y = 0; y < mainRenderData.imgHeight; y++)
 		{
@@ -2717,32 +2718,35 @@ int main()
 				int32_t readIndex = (y * mainRenderData.imgWidth + x) * mainRenderData.imgStride;
 				float luminance = rgb_to_luminance(hdrImage[readIndex + 0], hdrImage[readIndex + 1], hdrImage[readIndex + 2]);
 
-				uint32_t index = 0;
 				if (luminance > 0.0f)
 				{
 					float range = fminf(fmaxf((log2f(luminance) - minLogLuminance) * rluminanceLogRange, 0.0f), 1.0f);
-					index = (uint32_t)(range * 254.0f) + 1;
+					uint32_t index = (uint32_t)(range * 255.0f);
+					histogram[index]++;
 				}
-
-				histogram[index]++;
 			}
 		}
 
-		uint32_t weighedSum = 0;
-		uint32_t nonZeroPixels = 0;
+		// TODO: Could do this in the other loop, not really a bottleneck right now.
+		uint32_t nonZeroPixelSum = 0;
 		for (uint32_t i = 0; i < 256; i++)
 		{
-			weighedSum += histogram[i] * i;
-			if (i > 0)
-			{
-				nonZeroPixels += histogram[i];
-			}
+			nonZeroPixelSum += histogram[i];
 		}
 
-		float logAverage = (float)weighedSum / fmaxf((float)nonZeroPixels, 1.0f) - 1.0f;
-		float averageLuminance = exp2f(logAverage / 254.0f * luminanceLogRange + minLogLuminance);
+		// Weight our index by our histogram count. More entries in the histogram, the more likely we select that bin.
+		uint32_t weighedBinIndex = 0;
+		for (uint32_t i = 0; i < 256; i++)
+		{
+			float weight = (float)histogram[i] * cf_rcp((float)nonZeroPixelSum);
+			weighedBinIndex += i * weight;
+		}
+
+		float binLogLuminance = (float)weighedBinIndex / 255.0f * luminanceLogRange + minLogLuminance;
+		float averageLuminance = exp2f(binLogLuminance);
 
 		// https://bruop.github.io/exposure/
+		// https://64.github.io/tonemapping/
 		const float S = 100.0f;
 		const float K = 12.5f;
 		const float q = 0.65f;
