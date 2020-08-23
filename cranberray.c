@@ -960,44 +960,9 @@ material_shader_t* shaders[material_count] =
 	shader_microfacet,
 };
 
-static int index_aabb_sort_min_x(const void* cran_restrict l, const void* cran_restrict r)
-{
-	const index_aabb_pair_t* cran_restrict left = (const index_aabb_pair_t*)l;
-	const index_aabb_pair_t* cran_restrict right = (const index_aabb_pair_t*)r;
-
-	// If left is greater than right, result is > 0 - left goes after right
-	// If right is greater than left, result is < 0 - right goes after left
-	// If equal, well they're equivalent
-	return (int)cf_sign(caabb_centroid(left->bound, caabb_x) - caabb_centroid(right->bound, caabb_x));
-}
-
-static int index_aabb_sort_min_y(const void* cran_restrict l, const void* cran_restrict r)
-{
-	const index_aabb_pair_t* cran_restrict left = (const index_aabb_pair_t* cran_restrict)l;
-	const index_aabb_pair_t* cran_restrict right = (const index_aabb_pair_t* cran_restrict)r;
-
-	// If left is greater than right, result is > 0 - left goes after right
-	// If right is greater than left, result is < 0 - right goes after left
-	// If equal, well they're equivalent
-	return (int)cf_sign(caabb_centroid(left->bound, caabb_y) - caabb_centroid(right->bound, caabb_y));
-}
-
-static int index_aabb_sort_min_z(const void* cran_restrict l, const void* cran_restrict r)
-{
-	const index_aabb_pair_t* left = (const index_aabb_pair_t* cran_restrict)l;
-	const index_aabb_pair_t* right = (const index_aabb_pair_t* cran_restrict)r;
-
-	// If left is greater than right, result is > 0 - left goes after right
-	// If right is greater than left, result is < 0 - right goes after left
-	// If equal, well they're equivalent
-	return (int)cf_sign(caabb_centroid(left->bound, caabb_z) - caabb_centroid(right->bound, caabb_z));
-}
-
 static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint32_t leafCount)
 {
 	cran_assert(leafCount > 0);
-
-	int(*sortFuncs[3])(const void* cran_restrict l, const void* cran_restrict r) = { index_aabb_sort_min_x, index_aabb_sort_min_y, index_aabb_sort_min_z };
 
 	typedef struct
 	{
@@ -1064,7 +1029,6 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			.leaf.index = start[0].index,
 		};
 
-		// TODO: Since we're doing all the iteration work in the sort, maybe we could also do the partitioning in the sort?
 		cv2 axisSpan[3];
 		for (uint32_t axis = 0; axis < 3; axis++)
 		{
@@ -1088,8 +1052,6 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		{
 			axis = 2;
 		}
-
-		qsort(start, count, sizeof(index_aabb_pair_t), sortFuncs[axis]);
 
 #define cran_bucket_count 12
 		caabb bucketBounds[cran_bucket_count] = { 0 };
@@ -2739,7 +2701,7 @@ int main()
 		for (uint32_t i = 0; i < 256; i++)
 		{
 			float weight = (float)histogram[i] * cf_rcp((float)nonZeroPixelSum);
-			weighedBinIndex += i * weight;
+			weighedBinIndex += (uint32_t)((float)i * weight);
 		}
 
 		float binLogLuminance = (float)weighedBinIndex / 255.0f * luminanceLogRange + minLogLuminance;

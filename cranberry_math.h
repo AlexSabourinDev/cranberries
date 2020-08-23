@@ -151,6 +151,7 @@ cran_forceinline cv3l cv3l_replicate(cv3 v);
 cran_forceinline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i);
 // Stride (in bytes) is stride to next vector
 // Offset (in bytes) is offset from strided element to vector
+// indceCount must be <= cran_lane count. If it isn't, loaded vectors will be limited to cran_lane_count
 cran_forceinline cv3l cv3l_indexed_load(void const* vectors, uint32_t stride, uint32_t offset, uint32_t* indices, uint32_t indexCount);
 cran_forceinline cv3l cv3l_add(cv3l l, cv3l r);
 cran_forceinline cv3l cv3l_sub(cv3l l, cv3l r);
@@ -527,7 +528,7 @@ cran_forceinline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i)
 cran_forceinline cv3l cv3l_indexed_load(void const* vectors, uint32_t stride, uint32_t offset, uint32_t* indices, uint32_t indexCount)
 {
 	__m128 loadedVectors[cran_lane_count];
-	for (uint32_t i = 0; i < indexCount; i++)
+	for (uint32_t i = 0; i < indexCount && i < cran_lane_count; i++)
 	{
 		uint8_t const* vectorData = (uint8_t*)vectors;
 		loadedVectors[i] = _mm_load_ps((float const*)(vectorData + indices[i] * stride + offset));
