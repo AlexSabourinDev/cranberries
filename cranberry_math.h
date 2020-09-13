@@ -51,6 +51,11 @@ typedef union
 	{
 		float r, g, b;
 	};
+
+	struct
+	{
+		float f[3];
+	};
 } cv3;
 
 typedef union
@@ -63,6 +68,11 @@ typedef union
 	struct
 	{
 		float r, g, b, a;
+	};
+
+	struct
+	{
+		float f[4];
 	};
 } cv4;
 
@@ -711,12 +721,12 @@ cran_forceinline cv3 caabb_center(caabb l)
 
 cran_forceinline float caabb_centroid(caabb l, uint32_t axis)
 {
-	return ((&l.max.x)[axis] + (&l.min.x)[axis]) * 0.5f;
+	return (l.max.f[axis] + l.min.f[axis]) * 0.5f;
 }
 
 cran_forceinline float caabb_side(caabb l, uint32_t axis)
 {
-	return ((&l.max.x)[axis] - (&l.min.x)[axis]);
+	return l.max.f[axis] - l.min.f[axis];
 }
 
 cran_forceinline caabb caabb_merge(caabb l, caabb r)

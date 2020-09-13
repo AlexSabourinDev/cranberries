@@ -1034,13 +1034,13 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		{
 			for (uint32_t i = 0; i < count; i++)
 			{
-				axisSpan[axis].x = fminf(axisSpan[axis].x, (&start[i].bound.max.x)[axis] - (&start[i].bound.min.x)[axis] * 0.5f);
-				axisSpan[axis].y = fmaxf(axisSpan[axis].y, (&start[i].bound.max.x)[axis] - (&start[i].bound.min.x)[axis] * 0.5f);
+				axisSpan[axis].x = fminf(axisSpan[axis].x, caabb_centroid(start[i].bound, axis));
+				axisSpan[axis].y = fmaxf(axisSpan[axis].y, caabb_centroid(start[i].bound, axis));
 			}
 		}
 
 		uint32_t axis;
-		if (axisSpan[0].y - axisSpan[0].x > axisSpan[1].y - axisSpan[1].x)
+		if (axisSpan[0].y - axisSpan[0].x > axisSpan[1].y - axisSpan[1].x && axisSpan[0].y - axisSpan[0].x > axisSpan[2].y - axisSpan[2].x)
 		{
 			axis = 0;
 		}
@@ -1059,7 +1059,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 
 		for (uint32_t i = 0; i < count; i++)
 		{
-			float p = (caabb_centroid(start[i].bound, axis) - (&bounds.min.x)[axis])/caabb_side(bounds,axis);
+			float p = (caabb_centroid(start[i].bound, axis) - bounds.min.f[axis])/caabb_side(bounds,axis);
 			uint32_t bucketIndex = (uint32_t)(p*cran_bucket_count);
 			bucketIndex = bucketIndex == cran_bucket_count ? bucketIndex - 1 : bucketIndex;
 			if (bucketCount[bucketIndex] == 0)
@@ -1102,6 +1102,8 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 			}
 
 			// SAH
+			// https://authors.library.caltech.edu/79167/1/04057175.pdf
+			// http://www.pbr-book.org/3ed-2018/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies.html
 			const float traversalRelativeCost = 0.25f;
 			sah[i] = traversalRelativeCost+((float)leftCount * caabb_surface_area(left) + (float)rightCount * caabb_surface_area(right)) * cf_rcp(caabb_surface_area(bounds));
 		}
@@ -1119,7 +1121,7 @@ static bvh_t build_bvh(render_context_t* context, index_aabb_pair_t* leafs, uint
 		}
 
 		float bucketSize = caabb_side(bounds, axis) / (float)cran_bucket_count;
-		float split = (float)minIndex * bucketSize + bucketSize + (&bounds.min.x)[axis];
+		float split = (float)minIndex * bucketSize + bucketSize + bounds.min.f[axis];
 
 		uint32_t centerIndex = count/2;
 		for (uint32_t i = 0; i < count; i++)
