@@ -2201,7 +2201,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 		distribution = reflected ? distribution_ggx : distribution_lambert;
 		if (random01f(&context->randomSeed) < 0.0f) // Explicit light sampling
 		{
-			// TODO: Probability is tiny, causing the lights to be over exposed...
+			// TODO: Probability is tiny, causing the lights to be over exposed... Might be because it's probability for selecting a light, not a direction
 			light_bvh_sample_t result = sample_light_bvh(context, scene, inputs.surface, normal);
 			castDir = result.direction;
 			h = cv3_normalize(cv3_add(castDir, viewDir));
@@ -2589,6 +2589,14 @@ int main()
 
 			assert(mainRenderQueue.chunks[i].yEnd <= mainRenderData.halfImgHeight);
 			assert(mainRenderQueue.chunks[i].xEnd <= mainRenderData.halfImgWidth);
+		}
+
+		for (uint32_t i = 0; i < blockCount; i++)
+		{
+			render_chunk_t temp = mainRenderQueue.chunks[i];
+			uint32_t src = randomRange(&mainRenderContext.randomSeed, i, blockCount);
+			memcpy(&mainRenderQueue.chunks[i], &mainRenderQueue.chunks[src], sizeof(render_chunk_t));
+			memcpy(&mainRenderQueue.chunks[src], &temp, sizeof(render_chunk_t));
 		}
 		mainRenderQueue.count = blockCount;
 	}
