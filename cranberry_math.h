@@ -1,13 +1,22 @@
 #pragma once
 
+// Convention
+// cf = floating point
+// cfl = floating point lanes
+// cv# = vector math (i.e. cv2, cv3)
+// cvl = vector lane math (i.e. cv3l)
+// cm# = matrix math
+// cmi = miscellaneous
+
 #include <math.h>
 #include <immintrin.h>
 
 #define cran_inline inline
 #define cran_forceinline __forceinline
-#define cran_align(a) __declspec(align(16))
+#define cran_align(a) __declspec(align(a))
 
 #ifdef _MSC_BUILD
+#pragma warning(disable : 4201)
 #define cran_restrict __restrict
 #else
 #define cran_restrict restrict
@@ -28,8 +37,44 @@ cran_align(16) typedef union
 
 typedef struct
 {
-	float x, y, z;
+	float x, y;
+} cv2;
+
+typedef union
+{
+	struct
+	{
+		float x, y, z;
+	};
+
+	struct
+	{
+		float r, g, b;
+	};
+
+	struct
+	{
+		float f[3];
+	};
 } cv3;
+
+typedef union
+{
+	struct
+	{
+		float x, y, z, w;
+	};
+
+	struct
+	{
+		float r, g, b, a;
+	};
+
+	struct
+	{
+		float f[4];
+	};
+} cv4;
 
 typedef struct
 {
@@ -55,6 +100,13 @@ cran_forceinline float cf_fast_rcp(float f);
 cran_forceinline float cf_rsqrt(float f);
 cran_forceinline float cf_fast_rsqrt(float f);
 cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restrict out1, float* cran_restrict out2);
+cran_forceinline float cf_bilinear(float topLeft, float topRight, float bottomLeft, float bottomRight, float tx, float ty);
+cran_forceinline float cf_lerp(float a, float b, float t);
+cran_forceinline float cf_sign(float a);
+// Guarantees to return either -1 or 1
+cran_forceinline float cf_sign_no_zero(float a);
+cran_forceinline bool cf_finite(float a);
+cran_forceinline float cf_frac(float a);
 
 // Lane API
 cran_forceinline cfl cfl_replicate(float f);
@@ -69,6 +121,10 @@ cran_forceinline int cfl_mask(cfl v);
 cran_forceinline cfl cfl_rcp(cfl v);
 cran_forceinline cfl cfl_lt(cfl l, cfl r);
 
+// V2 API
+cran_forceinline cv2 cv2_mulf(cv2 l, float r);
+cran_forceinline cv2 cv2_add(cv2 l, cv2 r);
+
 // V3 API
 cran_forceinline cv3 cv3_mulf(cv3 l, float r);
 cran_forceinline cv3 cv3_add(cv3 l, cv3 r);
@@ -81,22 +137,32 @@ cran_forceinline cv3 cv3_cross(cv3 l, cv3 r);
 cran_forceinline cv3 cv3_lerp(cv3 l, cv3 r, float t);
 cran_forceinline float cv3_length(cv3 v);
 cran_forceinline float cv3_rlength(cv3 v);
-cran_forceinline cv3 cv3_normalized(cv3 v);
+cran_forceinline float cv3_fast_rlength(cv3 v);
+cran_forceinline float cv3_sqrlength(cv3 v);
+cran_forceinline float cv3_sqrdistance(cv3 l, cv3 r);
+cran_forceinline cv3 cv3_normalize(cv3 v);
 cran_forceinline cv3 cv3_min(cv3 v, cv3 m);
 cran_forceinline cv3 cv3_max(cv3 v, cv3 m);
 cran_forceinline cv3 cv3_rcp(cv3 v);
 cran_forceinline cv3 cv3_fast_rcp(cv3 v);
+// Expecting i to be incident. (i.n < 0)
 cran_forceinline cv3 cv3_reflect(cv3 i, cv3 n);
+cran_forceinline cv3 cv3_inverse(cv3 i);
 // a is between 0 and 2 PI
 // t is between 0 and PI (0 being the bottom, PI being the top)
 cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_restrict t);
-// theta is between 0 and 2PI (horizontal plane)
-// phi is between 0 and PI (vertical plane)
+// theta is between 0 and PI (vertical plane)
+// phi is between 0 and 2PI (horizontal plane)
 cran_forceinline cv3 cv3_from_spherical(float theta, float phi, float radius);
+cran_forceinline cv3 cv3_barycentric(cv3 a, cv3 b, cv3 c, cv3 uvw);
 
 // V3 Lane API
 cran_forceinline cv3l cv3l_replicate(cv3 v);
 cran_forceinline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i);
+// Stride (in bytes) is stride to next vector
+// Offset (in bytes) is offset from strided element to vector
+// indceCount must be <= cran_lane count. If it isn't, loaded vectors will be limited to cran_lane_count
+cran_forceinline cv3l cv3l_indexed_load(void const* vectors, uint32_t stride, uint32_t offset, uint32_t* indices, uint32_t indexCount);
 cran_forceinline cv3l cv3l_add(cv3l l, cv3l r);
 cran_forceinline cv3l cv3l_sub(cv3l l, cv3l r);
 cran_forceinline cv3l cv3l_mul(cv3l l, cv3l r);
@@ -111,7 +177,30 @@ cran_forceinline cv3 cm3_rotate_cv3(cm3 m, cv3 v);
 
 // AABB API
 cran_forceinline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin, float rayMax, caabb aabb);
+cran_forceinline bool caabb_does_line_intersect(cv3 a, cv3 b, caabb aabb);
 cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax);
+
+enum
+{
+	caabb_x = 0,
+	caabb_y,
+	caabb_z
+};
+cran_forceinline cv3 caabb_center(caabb l);
+cran_forceinline float caabb_centroid(caabb l, uint32_t axis);
+cran_forceinline float caabb_side(caabb l, uint32_t axis);
+cran_forceinline caabb caabb_merge(caabb l, caabb r);
+cran_forceinline float caabb_surface_area(caabb l);
+cran_forceinline void caabb_split_8(caabb parent, caabb children[8]);
+cran_forceinline caabb caabb_consume(caabb parent, cv3 point);
+
+// Miscellaneous API
+// Expecting i to be exitant (i.n > 0)
+cran_forceinline cv3 cmi_fresnel_schlick_r0(cv3 r0, cv3 n, cv3 i);
+// r1 = exiting refractive index (usually air)
+// r2 = entering refactive index
+// Expecting i to be exitant (i.n > 0)
+cran_forceinline float cmi_fresnel_schlick(float r1, float r2, cv3 n, cv3 i);
 
 // Single Implementation
 cran_forceinline float cf_rcp(float f)
@@ -121,13 +210,9 @@ cran_forceinline float cf_rcp(float f)
 
 cran_forceinline float cf_fast_rcp(float f)
 {
-	union
-	{
-		__m128 sse;
-		float f[4];
-	} conv;
-	conv.sse = _mm_rcp_ss(_mm_set_ss(f));
-	return conv.f[0];
+	__m128 sse = _mm_rcp_ss(_mm_load_ss(&f));
+	_mm_store_ss(&f, sse);
+	return f;
 }
 
 cran_forceinline float cf_rsqrt(float f)
@@ -161,6 +246,72 @@ cran_forceinline bool cf_quadratic(float a, float b, float c, float* cran_restri
 	*out1 = (-b - d) * e;
 	*out2 = (-b + d) * e;
 	return true;
+}
+
+cran_forceinline float cf_bilinear(float topLeft, float topRight, float bottomLeft, float bottomRight, float tx, float ty)
+{
+	float top = tx*topRight + (1.0f-tx)*topLeft;
+	float bottom = tx * bottomRight + (1.0f - tx)*bottomLeft;
+	return ty * top + (1.0f - ty)*bottom;
+}
+
+cran_forceinline float cf_lerp(float a, float b, float t)
+{
+	return t * b + (1.0f - t)*a;
+}
+
+cran_forceinline float cf_sign(float a)
+{
+	// Don't handle NaN, inf
+	/*union
+	{
+		uint32_t u;
+		float f;
+	} conv;
+	conv.f = a;
+	conv.u = (conv.u & 0x80000000 | 0x3F800000) & ((int32_t)(-conv.u ^ conv.u) >> 31);
+	return conv.f;*/
+
+	__m128 f = _mm_load_ss(&a);
+	__m128 c0 = _mm_castsi128_ps(_mm_set1_epi32(0x80000000));
+	__m128 c1 = _mm_castsi128_ps(_mm_set1_epi32(0x3F800000));
+	__m128i c2 = _mm_setzero_si128();
+
+	__m128 s = _mm_or_ps(_mm_and_ps(f, c0), c1);
+
+	__m128i u = _mm_castps_si128(f);
+	u = _mm_srai_epi32(_mm_xor_si128(_mm_sub_epi32(c2, u), u), 31);
+
+	_mm_store_ss(&a, _mm_and_ps(s, _mm_castsi128_ps(u)));
+	return a;
+}
+
+cran_forceinline float cf_sign_no_zero(float a)
+{
+	// Don't handle NaN, inf or 0
+
+	__m128 f = _mm_load_ss(&a);
+	__m128 c0 = _mm_castsi128_ps(_mm_set1_epi32(0x80000000));
+	__m128 c1 = _mm_castsi128_ps(_mm_set1_epi32(0x3F800000));
+
+	_mm_store_ss(&a, _mm_or_ps(_mm_and_ps(f, c0), c1));
+	return a;
+}
+
+cran_forceinline bool cf_finite(float a)
+{
+	union
+	{
+		uint32_t u;
+		float f;
+	} conv;
+	conv.f = a;
+	return (conv.u & 0x7F800000) != 0x7F800000;
+}
+
+cran_forceinline float cf_frac(float a)
+{
+	return a - truncf(a);
 }
 
 // Lane Implementation
@@ -217,6 +368,17 @@ cran_forceinline cfl cfl_rcp(cfl v)
 cran_forceinline cfl cfl_lt(cfl l, cfl r)
 {
 	return  (cfl) { .sse = _mm_cmplt_ps(l.sse, r.sse) };
+}
+
+// V2 Implementation
+cran_forceinline cv2 cv2_mulf(cv2 l, float r)
+{
+	return (cv2) { .x = l.x * r, .y = l.y * r };
+}
+
+cran_forceinline cv2 cv2_add(cv2 l, cv2 r)
+{
+	return (cv2) {.x = l.x + r.x, .y = l.y + r.y};
 }
 
 // V3 Implementation
@@ -280,7 +442,22 @@ cran_forceinline float cv3_rlength(cv3 v)
 	return cf_rsqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
-cran_forceinline cv3 cv3_normalized(cv3 v)
+cran_forceinline float cv3_fast_rlength(cv3 v)
+{
+	return cf_fast_rsqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+cran_forceinline float cv3_sqrlength(cv3 v)
+{
+	return (v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+cran_forceinline float cv3_sqrdistance(cv3 l, cv3 r)
+{
+	return cv3_sqrlength(cv3_sub(l, r));
+}
+
+cran_forceinline cv3 cv3_normalize(cv3 v)
 {
 	return cv3_mulf(v, cv3_rlength(v));
 }
@@ -317,6 +494,11 @@ cran_forceinline cv3 cv3_reflect(cv3 i, cv3 n)
 	return cv3_sub(i, cv3_mulf(n, 2.0f * cv3_dot(i, n)));
 }
 
+cran_forceinline cv3 cv3_inverse(cv3 i)
+{
+	return (cv3) { -i.x, -i.y, -i.z };
+}
+
 cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cran_restrict t)
 {
 	float rlenght = cv3_rlength(v);
@@ -327,7 +509,12 @@ cran_forceinline void cv3_to_spherical(cv3 v, float* cran_restrict a, float* cra
 
 cran_forceinline cv3 cv3_from_spherical(float theta, float phi, float radius)
 {
-	return (cv3) { cosf(theta) * sinf(phi) * radius, sinf(theta) * sinf(phi) * radius, radius * cosf(phi) };
+	return (cv3) { cosf(phi) * sinf(theta) * radius, sinf(phi) * sinf(theta) * radius, radius * cosf(theta) };
+}
+
+cran_forceinline cv3 cv3_barycentric(cv3 a, cv3 b, cv3 c, cv3 uvw)
+{
+	return cv3_add(cv3_add(cv3_mulf(a, uvw.x), cv3_mulf(b, uvw.y)), cv3_mulf(c, uvw.z));
 }
 
 // V3 Lane Implementation
@@ -346,6 +533,28 @@ cran_forceinline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i)
 	lanes->x.f[i] = v.x;
 	lanes->y.f[i] = v.y;
 	lanes->z.f[i] = v.z;
+}
+
+cran_forceinline cv3l cv3l_indexed_load(void const* vectors, uint32_t stride, uint32_t offset, uint32_t* indices, uint32_t indexCount)
+{
+	__m128 loadedVectors[cran_lane_count];
+	for (uint32_t i = 0; i < indexCount && i < cran_lane_count; i++)
+	{
+		uint8_t const* vectorData = (uint8_t*)vectors;
+		loadedVectors[i] = _mm_load_ps((float const*)(vectorData + indices[i] * stride + offset));
+	}
+
+	__m128 XY0 = _mm_shuffle_ps(loadedVectors[0], loadedVectors[1], _MM_SHUFFLE(1, 0, 1, 0));
+	__m128 XY1 = _mm_shuffle_ps(loadedVectors[2], loadedVectors[3], _MM_SHUFFLE(1, 0, 1, 0));
+	__m128 Z0 = _mm_shuffle_ps(loadedVectors[0], loadedVectors[1], _MM_SHUFFLE(3, 2, 3, 2));
+	__m128 Z1 = _mm_shuffle_ps(loadedVectors[2], loadedVectors[3], _MM_SHUFFLE(3, 2, 3, 2));
+
+	return (cv3l)
+	{
+		.x = {.sse = _mm_shuffle_ps(XY0, XY1, _MM_SHUFFLE(2, 0, 2, 0))},
+		.y = {.sse = _mm_shuffle_ps(XY0, XY1, _MM_SHUFFLE(3, 1, 3, 1))},
+		.z = {.sse = _mm_shuffle_ps(Z0, Z1, _MM_SHUFFLE(2, 0, 2, 0))}
+	};
 }
 
 cran_forceinline cv3l cv3l_add(cv3l l, cv3l r)
@@ -401,9 +610,6 @@ cran_forceinline cv3l cv3l_max(cv3l l, cv3l r)
 // Matrix Implementation
 cran_forceinline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k)
 {
-	assert(cv3_length(i) < 1.01f && cv3_length(i) > 0.99f);
-	assert(cv3_length(j) < 1.01f && cv3_length(j) > 0.99f);
-	assert(cv3_length(k) < 1.01f && cv3_length(k) > 0.99f);
 	return (cm3)
 	{
 		.i = i,
@@ -416,9 +622,9 @@ cran_forceinline cm3 cm3_basis_from_normal(cv3 n)
 {
 	// Frisvad ONB from https://backend.orbit.dtu.dk/ws/portalfiles/portal/126824972/onb_frisvad_jgt2012_v2.pdf
 	// revised from Pixar https://graphics.pixar.com/library/OrthonormalB/paper.pdf#page=2&zoom=auto,-233,561
-	float sign = copysignf(1.0f, n.z);
+	float sign = cf_sign_no_zero(n.z);
 	float a = -cf_rcp(sign + n.z);
-	float b = -n.x*n.y*a;
+	float b = n.x*n.y*a;
 	cv3 i = (cv3) { 1.0f + sign * n.x*n.x*a, sign * b, -sign * n.x };
 	cv3 j = (cv3) { b, sign + n.y*n.y*a, -n.y };
 
@@ -427,13 +633,9 @@ cran_forceinline cm3 cm3_basis_from_normal(cv3 n)
 
 cran_forceinline cv3 cm3_mul_cv3(cm3 m, cv3 v)
 {
-	cv3 vx = (cv3) { v.x, v.x, v.x };
-	cv3 vy = (cv3) { v.y, v.y, v.y };
-	cv3 vz = (cv3) { v.z, v.z, v.z };
-
-	cv3 rx = cv3_mul(vx, m.i);
-	cv3 ry = cv3_mul(vy, m.j);
-	cv3 rz = cv3_mul(vz, m.k);
+	cv3 rx = cv3_mulf(m.i, v.x);
+	cv3 ry = cv3_mulf(m.j, v.y);
+	cv3 rz = cv3_mulf(m.k, v.z);
 
 	return cv3_add(cv3_add(rx, ry), rz);
 }
@@ -488,6 +690,12 @@ cran_forceinline bool caabb_does_ray_intersect(cv3 rayO, cv3 rayD, float rayMin,
 	return cfl_mask(cfl_lt(vrayMin, vrayMax));
 }
 
+cran_forceinline bool caabb_does_line_intersect(cv3 a, cv3 b, caabb aabb)
+{
+	// TODO: Can we specialize this intersection?
+	return caabb_does_ray_intersect(a, cv3_sub(b, a), 0.0f, 1.0f, aabb);
+}
+
 cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, float rayMin, float rayMax, cv3l aabbMin, cv3l aabbMax)
 {
 	cv3l rayOLanes = cv3l_replicate(rayO);
@@ -504,4 +712,73 @@ cran_forceinline uint32_t caabb_does_ray_intersect_lanes(cv3 rayO, cv3 rayD, flo
 	cfl tmax = cfl_min(rayMaxLane, cfl_min(tbigger.x, cfl_min(tbigger.y, tbigger.z)));
 	cfl result = cfl_less(tmin, tmax);
 	return cfl_mask(result);
+}
+
+cran_forceinline cv3 caabb_center(caabb l)
+{
+	return (cv3) { (l.max.x + l.min.x)*0.5f, (l.max.y + l.min.y)*0.5f, (l.max.z + l.min.z)*0.5f };
+}
+
+cran_forceinline float caabb_centroid(caabb l, uint32_t axis)
+{
+	return (l.max.f[axis] + l.min.f[axis]) * 0.5f;
+}
+
+cran_forceinline float caabb_side(caabb l, uint32_t axis)
+{
+	return l.max.f[axis] - l.min.f[axis];
+}
+
+cran_forceinline caabb caabb_merge(caabb l, caabb r)
+{
+	return (caabb) { .max = cv3_max(l.max, r.max), .min = cv3_min(l.min, r.min) };
+}
+
+cran_forceinline float caabb_surface_area(caabb l)
+{
+	return ((caabb_side(l,caabb_x)*caabb_side(l,caabb_y))+(caabb_side(l,caabb_y)*caabb_side(l,caabb_z))+(caabb_side(l,caabb_x)*caabb_side(l,caabb_z)))*2.0f;
+}
+
+cran_forceinline void caabb_split_8(caabb parent, caabb children[8])
+{
+	cv3 center = cv3_mulf(cv3_sub(parent.max, parent.min), 0.5f);
+	cv3 childSize = cv3_mulf(cv3_sub(parent.max, parent.min), 0.5f);
+
+	children[0] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.x = -childSize.x;
+	children[1] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.y = -childSize.y;
+	children[2] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.x = -childSize.x;
+	children[3] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.z = -childSize.z;
+	children[4] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.y = -childSize.y;
+	children[5] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.x = -childSize.x;
+	children[6] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+	childSize.y = -childSize.y;
+	children[7] = (caabb) {.min = center, .max = cv3_add(center, childSize) };
+}
+
+cran_forceinline caabb caabb_consume(caabb parent, cv3 point)
+{
+	return (caabb) { .min = cv3_min(parent.min, point), .max = cv3_max(parent.max, point) };
+}
+
+// Miscellaneous Implementation
+cran_forceinline cv3 cmi_fresnel_schlick_r0(cv3 r0, cv3 n, cv3 i)
+{
+	float a = fminf(1.0f - cv3_dot(n, i), 1.0f);
+	return cv3_add(r0, cv3_mulf(cv3_sub((cv3) { 1.0f, 1.0f, 1.0f }, r0), a*a*a*a*a));
+}
+
+// r1 = exiting refractive index (usually air)
+// r2 = entering refactive index
+cran_forceinline float cmi_fresnel_schlick(float r1, float r2, cv3 n, cv3 i)
+{
+	float r0 = (r1 - r2) / (r1 + r2);
+	r0 *= r0;
+	float a = fminf(1.0f - cv3_dot(n, i), 1.0f);
+	return r0 + (1.0f - r0)*a*a*a*a*a;
 }
