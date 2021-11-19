@@ -346,15 +346,35 @@ static cv3 sphere_random(random_seed_t* seed)
 	return p;
 }
 
-static cv3 hemisphere_surface_random_uniform(float r1, float r2, float* pdf)
+static cv3 hemisphere_surface_random_uniform(float r1, float r2)
 {
 	float sinTheta = sqrtf(1.0f - r1 * r1); 
 	float phi = cran_tao * r2;
 	float x = sinTheta * cosf(phi);
 	float y = sinTheta * sinf(phi);
 
-	*pdf = cf_rcp(cran_tao);
 	return (cv3) { x, y, r1 };
+}
+
+static float hemisphere_pdf(cv3 d, cv3 n)
+{
+	return cv3_dot(d, n) > 0.0f ? cf_rcp(2.0f * cran_pi) : 0.0f;
+}
+
+static cv3 sphere_surface_random_uniform(float r1, float r2)
+{
+	r1 = r1 * 2.0f - 1.0f;
+	float sinTheta = sqrtf(1.0f - r1 * r1);
+	float phi = cran_tao * r2;
+	float x = sinTheta * cosf(phi);
+	float y = sinTheta * sinf(phi);
+
+	return (cv3) { x, y, r1 };
+}
+
+static float sphere_pdf()
+{
+	return cf_rcp(4.0f * cran_pi);
 }
 
 static cv3 hemisphere_surface_random_lambert(float r1, float r2)
@@ -1614,7 +1634,7 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			microfacets[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
 			microfacets[i].refractiveIndex = matLib.materials[i].refractiveIndex;
 			microfacets[i].specularTint = (cv3) { matLib.materials[i].specular[0], matLib.materials[i].specular[1], matLib.materials[i].specular[2] };
-			microfacets[i].emission = (cv3) { matLib.materials[i].emission[0], matLib.materials[i].emission[1], matLib.materials[i].emission[2] };
+			microfacets[i].emission = cv3_mulf((cv3) { matLib.materials[i].emission[0], matLib.materials[i].emission[1], matLib.materials[i].emission[2] }, 1.0f);
 			// Conversion taken from http://graphicrants.blogspot.com/2013/08/specular-brdf-reference.html
 			microfacets[i].gloss = 1.0f - sqrtf(cf_rcp(matLib.materials[i].specularAmount + 2.0f)*2.0f);
 
@@ -2182,23 +2202,39 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	{
 		distribution_lambert = 0,
 		distribution_ggx,
+		distribution_sky,
 		distribution_count
 	};
 
 	cv3 castDir, h;
 	float weight;
-	uint32_t distribution;
+	bool specular = false;
 	{
 		float geometricFresnel = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, normal, viewDir);
 		geometricFresnel = fmaxf(geometricFresnel, microfacetData.specularTint.r * gloss); // Force how much we can reflect at a minimum
 		float weights[distribution_count] =
 		{
-			[distribution_lambert] = 1.0f - geometricFresnel,
-			[distribution_ggx] = geometricFresnel
+			[distribution_lambert] = (1.0f - geometricFresnel) * 0.7f,
+			[distribution_ggx] = geometricFresnel * 0.7f,
+			[distribution_sky] = 0.3f,
 		};
 
-		bool reflected = random01f(&context->randomSeed) < weights[distribution_ggx];
-		distribution = reflected ? distribution_ggx : distribution_lambert;
+		float random01 = random01f(&context->randomSeed);
+		specular = random01 < geometricFresnel;
+		random01 = specular ? random01 / geometricFresnel : (1.0f - random01) / (1.0f - geometricFresnel);
+
+		uint32_t distribution = distribution_lambert;
+		float distributionSum = 0.0f;
+		for (uint32_t i = 0; i < distribution_count; i++)
+		{
+			distributionSum += weights[i];
+			if (random01 < distributionSum)
+			{
+				distribution = i;
+				break;
+			}
+		}
+
 		if (random01f(&context->randomSeed) < 0.0f) // Explicit light sampling
 		{
 			// TODO: Probability is tiny, causing the lights to be over exposed... Might be because it's probability for selecting a light, not a direction
@@ -2219,17 +2255,23 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 				castDir = cm3_rotate_cv3(cm3_basis_from_normal(normal), castDir);
 				h = cv3_normalize(cv3_add(castDir, viewDir));
 			}
-			else // ggx distribution
+			else if(distribution == distribution_ggx) // ggx distribution
 			{
 				h = hemisphere_surface_random_ggx_h(r1, r2, roughness);
 				h = cm3_rotate_cv3(cm3_basis_from_normal(normal), h);
 				castDir = cv3_reflect(cv3_inverse(viewDir), h);
 			}
+			else
+			{
+				castDir = hemisphere_surface_random_lambert(r1, r2);
+				h = cv3_normalize(cv3_add(castDir, viewDir));
+			}
 
 			float PDFs[distribution_count] =
 			{
-				[distribution_lambert] = lambert_pdf(castDir, normal),
-				[distribution_ggx] = ggx_pdf(roughness, cv3_dot(h, normal), cv3_dot(viewDir, h))
+				[distribution_lambert] = lambert_pdf(castDir, normal) * weights[distribution_lambert],
+				[distribution_ggx] = ggx_pdf(roughness, cv3_dot(h, normal), cv3_dot(viewDir, h)) * weights[distribution_ggx],
+				[distribution_sky] = lambert_pdf(castDir, (cv3) {0.0f, 0.0f, 1.0f})* weights[distribution_sky]
 			};
 
 			// final weight and PDF using balance heuristic
@@ -2237,15 +2279,16 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			float sum = 0.00001f;
 			for (uint32_t i = 0; i < distribution_count; i++)
 			{
-				sum += weights[i] * PDFs[i];
+				sum += PDFs[i];
 			}
 
-			weight = cf_rcp(sum);
+			float balanceWeight = PDFs[distribution] * cf_rcp(sum);
+			weight = balanceWeight * cf_rcp(PDFs[distribution]);
 		}
 	}
 
 	cv3 absorption = (cv3) { 1.0f, 1.0f, 1.0f };
-	if(distribution == distribution_lambert)
+	if(!specular)
 	{
 		cv3 albedoTint = microfacetData.albedoTint;
 		cv4 samplerAlbedo = sampler_sample(&scene->textureStore, microfacetData.albedoSampler, microfacetData.albedoTexture, inputs.uv);
@@ -2487,10 +2530,10 @@ int main()
 	};
 	(void)bistro;
 
-	scene_setup_t scene = sponza;
+	scene_setup_t scene = bistro;
 	render_config_t renderConfig = (render_config_t)
 	{
-		.maxDepth = 10,
+		.maxDepth = 4,
 		.samplesPerPixel = 10,
 		.renderWidth = 512,
 		.renderHeight = 384,
