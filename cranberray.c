@@ -231,20 +231,30 @@ static float rgb_to_luminance(float r, float g, float b)
 	return (0.2126f*r + 0.7152f*g + 0.0722f*b);
 }
 
+static float rgb_to_luminance_cv3(cv3 rgb)
+{
+	return (0.2126f*rgb.r + 0.7152f*rgb.g + 0.0722f*rgb.b);
+}
+
 static cv4 gamma_to_linear(cv4 color)
 {
 	return (cv4) { color.x*color.x, color.y*color.y, color.z*color.z, color.w };
+}
+
+static cv3 gamma_to_linear_cv3(cv3 color)
+{
+	return (cv3) { color.x*color.x, color.y*color.y, color.z*color.z };
 }
 
 // Implementation from: https://www.shadertoy.com/view/WdjSW3
 float tonemap_ACES(float x)
 {
 	// Narkowicz 2015, "ACES Filmic Tone Mapping Curve"
-	const float a = 2.51;
-	const float b = 0.03;
-	const float c = 2.43;
-	const float d = 0.59;
-	const float e = 0.14;
+	const float a = 2.51f;
+	const float b = 0.03f;
+	const float c = 2.43f;
+	const float d = 0.59f;
+	const float e = 0.14f;
 	return (x * (a * x + b)) / (x * (c * x + d) + e);
 }
 
@@ -392,15 +402,15 @@ static float lambert_pdf(cv3 d, cv3 n)
 	return cv3_dot(d, n) * cran_rpi;
 }
 
-static float ggx_smith_uncorrelated(float roughness, float hdotn, float vdotn, float ldotn, float fresnel)
+static cv3 ggx_smith_uncorrelated(float roughness, float hdotn, float vdotn, float ldotn, cv3 fresnel)
 {
 	float t = hdotn*hdotn*roughness*roughness - (hdotn*hdotn - 1.0f);
 	float D = (roughness*roughness)*cf_rcp(t*t)*cran_rpi;
-	float F = fresnel;
+	cv3 F = fresnel;
 	float Gv = vdotn * sqrtf(roughness*roughness + (1.0f - roughness * roughness)*ldotn*ldotn);
 	float Gl = ldotn * sqrtf(roughness*roughness + (1.0f - roughness * roughness)*vdotn*vdotn);
 	float G = cf_rcp(Gv + Gl);
-	return F*G*D*cf_rcp(2.0f);
+	return cv3_mulf(F,G*D*cf_rcp(2.0f));
 }
 
 static cv3 hemisphere_surface_random_ggx_h(float r1, float r2, float a)
@@ -1631,9 +1641,9 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 		memset(microfacets, 0, sizeof(material_microfacet_t) * matLib.count);
 		for (uint32_t i = 0; i < matLib.count; i++)
 		{
-			microfacets[i].albedoTint = (cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] };
+			microfacets[i].albedoTint = ((cv3) { matLib.materials[i].albedo[0], matLib.materials[i].albedo[1], matLib.materials[i].albedo[2] });
 			microfacets[i].refractiveIndex = matLib.materials[i].refractiveIndex;
-			microfacets[i].specularTint = (cv3) { matLib.materials[i].specular[0], matLib.materials[i].specular[1], matLib.materials[i].specular[2] };
+			microfacets[i].specularTint = ((cv3) { matLib.materials[i].specular[0], matLib.materials[i].specular[1], matLib.materials[i].specular[2] });
 			microfacets[i].emission = cv3_mulf((cv3) { matLib.materials[i].emission[0], matLib.materials[i].emission[1], matLib.materials[i].emission[2] }, 1.0f);
 			// Conversion taken from http://graphicrants.blogspot.com/2013/08/specular-brdf-reference.html
 			microfacets[i].gloss = 1.0f - sqrtf(cf_rcp(matLib.materials[i].specularAmount + 2.0f)*2.0f);
@@ -2127,14 +2137,14 @@ static light_bvh_sample_t sample_light_bvh(render_context_t* context, ray_scene_
 		if (randomNumber < leftPMF * cf_fast_rcp(maxPMF))
 		{
 			nextNode = left;
-			randomNumber = randomNumber * maxPMF * cf_rcp(leftPMF);
+			randomNumber = random01f(&context->randomSeed);
 
 			probability *= leftPMF * cf_fast_rcp(maxPMF);
 		}
 		else
 		{
 			nextNode = right;
-			randomNumber = (randomNumber * maxPMF - leftPMF) * cf_rcp(rightPMF);
+			randomNumber = random01f(&context->randomSeed);
 
 			probability *= rightPMF * cf_fast_rcp(maxPMF);
 		}
@@ -2210,18 +2220,18 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	float weight;
 	bool specular = false;
 	{
-		float geometricFresnel = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, normal, viewDir);
-		geometricFresnel = fmaxf(geometricFresnel, microfacetData.specularTint.r * gloss); // Force how much we can reflect at a minimum
+		float fresnelWeight = cmi_fresnel_schlick_r0(microfacetData.specularTint, normal, viewDir);
+		fresnelWeight = fmaxf(fresnelWeight, microfacetData.specularTint.r * gloss); // Force how much we can reflect at a minimum
 		float weights[distribution_count] =
 		{
-			[distribution_lambert] = (1.0f - geometricFresnel) * 0.7f,
-			[distribution_ggx] = geometricFresnel * 0.7f,
+			[distribution_lambert] = (1.0f - fresnelWeight) * 0.7f,
+			[distribution_ggx] = fresnelWeight * 0.7f,
 			[distribution_sky] = 0.3f,
 		};
 
 		float random01 = random01f(&context->randomSeed);
-		specular = random01 < geometricFresnel;
-		random01 = specular ? random01 / geometricFresnel : (1.0f - random01) / (1.0f - geometricFresnel);
+		specular = random01 < fresnelWeight;
+		random01 = random01f(&context->randomSeed);
 
 		uint32_t distribution = distribution_lambert;
 		float distributionSum = 0.0f;
@@ -2304,10 +2314,10 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			// https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf
 			// specular BRDF
 
-			float F = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, h, viewDir);
-			float brdf = ggx_smith_uncorrelated(roughness, cv3_dot(h, normal), cv3_dot(viewDir, normal), cv3_dot(castDir, normal), F);
+			cv3 geometricFresnel = cmi_fresnel_schlick_r0(microfacetData.specularTint, normal, viewDir);
+			cv3 brdf = ggx_smith_uncorrelated(roughness, cv3_dot(h, normal), cv3_dot(viewDir, normal), cv3_dot(castDir, normal), geometricFresnel);
 
-			absorption = cv3_mulf(microfacetData.specularTint, brdf*fmaxf(cv3_dot(castDir, normal), 0.0f)); // TODO: Is there any physics behind this specular albedo concept?
+			absorption = cv3_mulf(brdf, fmaxf(cv3_dot(castDir, normal), 0.0f));
 		}
 		else
 		{
@@ -2534,14 +2544,14 @@ int main()
 	render_config_t renderConfig = (render_config_t)
 	{
 		.maxDepth = 4,
-		.samplesPerPixel = 10,
+		.samplesPerPixel = 4,
 		.renderWidth = 512,
 		.renderHeight = 384,
 		.renderBlockWidth = 16,
 		.renderBlockHeight = 12,
 		.useDirectionalMat = false,
 
-		.renderToWindow = true,
+		.renderToWindow = false,
 		.renderRefreshRate = 1000,
 
 		.workingDir = scene.dir,
