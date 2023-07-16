@@ -2047,6 +2047,14 @@ static cv3 cast_scene(render_context_t* context, ray_scene_t const* scene, cv3 r
 			light = cv3_add(light, cv3_mul(shaderResults.emission, absorption));
 			absorption = cv3_mul(absorption, shaderResults.absorption);
 
+			// Russian roulette
+			float killThreshold = 0.001f;
+			if(random01f(&context->randomSeed) < killThreshold)
+			{
+				break;
+			}
+			absorption = cv3_mulf(absorption, cf_rcp(1.0f-killThreshold));
+
 			if (!shaderResults.skip)
 			{
 				rayO = intersectionPoint;
@@ -2220,7 +2228,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	float weight;
 	bool specular = false;
 	{
-		float fresnelWeight = cmi_fresnel_schlick_r0(microfacetData.specularTint, normal, viewDir);
+		float fresnelWeight = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, normal, viewDir);
 		fresnelWeight = fmaxf(fresnelWeight, microfacetData.specularTint.r * gloss); // Force how much we can reflect at a minimum
 		float weights[distribution_count] =
 		{
