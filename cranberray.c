@@ -413,19 +413,66 @@ static cv3 ggx_smith_uncorrelated(float roughness, float hdotn, float vdotn, flo
 	return cv3_mulf(F,G*D*cf_rcp(2.0f));
 }
 
-static cv3 hemisphere_surface_random_ggx_h(float r1, float r2, float a)
+float ggx_d(float roughnessSq, float hdotn)
 {
-	float cosTheta = sqrtf((1.0f-r1)*cf_rcp(r1*(a*a-1.0f)+1.0f));
-	float sinTheta = sqrtf(1.0f - cosTheta*cosTheta);
-	float phi = cran_tao * r2;
-	return (cv3) { sinTheta*cosf(phi), sinTheta*sinf(phi), cosTheta };
+	// https://jcgt.org/published/0003/02/03/paper.pdf
+	float hdotnSq = hdotn * hdotn;
+	float t = (hdotnSq * (roughnessSq - 1.0f) + 1.0f);
+	return roughnessSq * cf_rcp(t * t) * cran_rpi;
 }
 
-static float ggx_pdf(float roughness, float hdotn, float vdoth)
+float ggx_lambda(float roughnessSq, float cosTheta)
 {
-	float t = hdotn*hdotn*roughness*roughness - (hdotn*hdotn - 1.0f);
-	float D = (roughness*roughness)*cf_rcp(t*t)*cran_rpi;
-	return D*hdotn*cf_rcp(4.0f*fabsf(vdoth));
+	return 0.5f * (sqrtf(roughnessSq * (cf_rcp(cosTheta * cosTheta) - 1.0f) + 1.0f) - 1.0f);
+}
+
+cv3 spherical_cap_VNDF_sampling(cv3 v, float r1, float r2)
+{
+	// sample a spherical cap in (-v.z, 1]
+	float phi = 2.0f * cran_pi * r1;
+	float z = (1.0f - r2) * (1.0f + v.z) - v.z;
+	float sinTheta = sqrtf(fminf(fmaxf(1.0f - z * z, 0.0f), 1.0f));
+	float x = sinTheta * cosf(phi);
+	float y = sinTheta * sinf(phi);
+	cv3 c = (cv3){x, y, z};
+	// compute halfway direction;
+	cv3 h = cv3_add(c, v);
+	// return without normalization (as this is done later)
+	return h;
+}
+
+cv3 hemisphere_surface_random_ggx_h(cv3 view, float r1, float r2, float roughness)
+{
+	// Sampling routine from https://hal.science/hal-01509746/document
+	// https://jcgt.org/published/0007/04/01/paper.pdf
+	// Improvement: https://arxiv.org/pdf/2306.05044.pdf
+
+	// stretch view
+	cv3 V = cv3_normalize((cv3){roughness * view.x, roughness * view.y, view.z});
+
+	cv3 N = spherical_cap_VNDF_sampling(V, r1, r2);
+	// unstretch
+	N = cv3_normalize((cv3){roughness*N.x, roughness*N.y, fmaxf(0.0f, N.z)});
+	return N;
+}
+
+float microfacet_g(float lambda)
+{
+	return cf_rcp(1.0f + lambda);
+}
+
+float ggx_pdf(float roughness, float hdotn, float vdotn)
+{
+	// https://jcgt.org/published/0007/04/01/paper.pdf
+	float roughnessSq = roughness*roughness;
+	// Base formulation is:
+	// VNDF (Visible normal distribution function)
+	// Dv = D*G1*v.h/v.n
+	// PDF = Dv/(4*v.h)
+	// Simplifying:
+	// PDF = D*G1*v.h/(4*v.n*v.h)
+	// PDF = D*G1/(4*v.n)
+	return ggx_d(roughnessSq, hdotn) * microfacet_g(ggx_lambda(roughnessSq, vdotn)) / (4.0f * vdotn);
 }
 
 static cv3 box_random(random_seed_t* seed)
@@ -1645,8 +1692,21 @@ static void generate_scene(render_context_t* context, ray_scene_t* scene)
 			microfacets[i].refractiveIndex = matLib.materials[i].refractiveIndex;
 			microfacets[i].specularTint = ((cv3) { matLib.materials[i].specular[0], matLib.materials[i].specular[1], matLib.materials[i].specular[2] });
 			microfacets[i].emission = cv3_mulf((cv3) { matLib.materials[i].emission[0], matLib.materials[i].emission[1], matLib.materials[i].emission[2] }, 1.0f);
+			
+			// Graphics Rant Conversion:
 			// Conversion taken from http://graphicrants.blogspot.com/2013/08/specular-brdf-reference.html
 			microfacets[i].gloss = 1.0f - sqrtf(cf_rcp(matLib.materials[i].specularAmount + 2.0f)*2.0f);
+
+			// G3D Conversion:
+			// Using http://svn.code.sf.net/p/g3d/code/G3D10/G3D-app.lib/source/ArticulatedModel_OBJ.cpp as a baseline
+			/*if(matLib.materials[i].specularAmount > 99.0f)
+			{
+				microfacets[i].gloss = 1.0f;
+			}
+			else
+			{
+				microfacets[i].gloss = matLib.materials[i].specularAmount / 100.0f;
+			}*/
 
 			microfacets[i].albedoSampler = (sampler_t) {.settings = sample_type_bilinear | sample_flag_gamma_to_linear };
 			if (matLib.materials[i].albedoMap != NULL)
@@ -2209,12 +2269,11 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	}
 
 	float gloss = microfacetData.gloss; // Sharing gloss as both "minimum reflectance" and "roughness"...
-	if (microfacetData.specTexture.id != 0)
-	{
-		cv4 glossAmount = sampler_sample(&scene->textureStore, microfacetData.specSampler, microfacetData.specTexture, inputs.uv);
-		gloss = glossAmount.r;
-	}
 	float roughness = fmaxf(1.0f - gloss, 0.00001f);
+
+	cv4 specularSample = sampler_sample(&scene->textureStore, microfacetData.specSampler, microfacetData.specTexture, inputs.uv);
+	cv3 specularColor = (cv3){specularSample.r, specularSample.g, specularSample.b};
+	specularColor = cv3_mul(specularColor, microfacetData.specularTint);
 
 	enum
 	{
@@ -2228,8 +2287,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 	float weight;
 	bool specular = false;
 	{
-		float fresnelWeight = cmi_fresnel_schlick(1.0f, microfacetData.refractiveIndex, normal, viewDir);
-		fresnelWeight = fmaxf(fresnelWeight, microfacetData.specularTint.r * gloss); // Force how much we can reflect at a minimum
+		float fresnelWeight = rgb_to_luminance_cv3(cmi_fresnel_schlick_r0(specularColor, normal, viewDir));
 		float weights[distribution_count] =
 		{
 			[distribution_lambert] = (1.0f - fresnelWeight) * 0.7f,
@@ -2275,8 +2333,10 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			}
 			else if(distribution == distribution_ggx) // ggx distribution
 			{
-				h = hemisphere_surface_random_ggx_h(r1, r2, roughness);
-				h = cm3_rotate_cv3(cm3_basis_from_normal(normal), h);
+				cm3 basis = cm3_basis_from_normal(normal);
+				cm3 inverseBasis = cm3_tranpose(basis);
+				h = hemisphere_surface_random_ggx_h(cm3_rotate_cv3(inverseBasis, viewDir), r1, r2, roughness);
+				h = cm3_rotate_cv3(basis, h);
 				castDir = cv3_reflect(cv3_inverse(viewDir), h);
 			}
 			else
@@ -2288,7 +2348,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			float PDFs[distribution_count] =
 			{
 				[distribution_lambert] = lambert_pdf(castDir, normal) * weights[distribution_lambert],
-				[distribution_ggx] = ggx_pdf(roughness, cv3_dot(h, normal), cv3_dot(viewDir, h)) * weights[distribution_ggx],
+				[distribution_ggx] = ggx_pdf(roughness, cv3_dot(h, normal), cv3_dot(viewDir, normal)) * weights[distribution_ggx],
 				[distribution_sky] = lambert_pdf(castDir, (cv3) {0.0f, 0.0f, 1.0f})* weights[distribution_sky]
 			};
 
@@ -2322,7 +2382,7 @@ static shader_outputs_t shader_microfacet(const void* cran_restrict materialData
 			// https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf
 			// specular BRDF
 
-			cv3 geometricFresnel = cmi_fresnel_schlick_r0(microfacetData.specularTint, normal, viewDir);
+			cv3 geometricFresnel = cmi_fresnel_schlick_r0(specularColor, normal, viewDir);
 			cv3 brdf = ggx_smith_uncorrelated(roughness, cv3_dot(h, normal), cv3_dot(viewDir, normal), cv3_dot(castDir, normal), geometricFresnel);
 
 			absorption = cv3_mulf(brdf, fmaxf(cv3_dot(castDir, normal), 0.0f));
@@ -2553,13 +2613,13 @@ int main()
 	{
 		.maxDepth = 4,
 		.samplesPerPixel = 4,
-		.renderWidth = 512,
-		.renderHeight = 384,
+		.renderWidth = 640,
+		.renderHeight = 480,
 		.renderBlockWidth = 16,
 		.renderBlockHeight = 12,
 		.useDirectionalMat = false,
 
-		.renderToWindow = false,
+		.renderToWindow = true,
 		.renderRefreshRate = 1000,
 
 		.workingDir = scene.dir,

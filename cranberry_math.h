@@ -172,6 +172,7 @@ cran_forceinline cv3l cv3l_max(cv3l l, cv3l r);
 // Matrix API
 cran_forceinline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k);
 cran_forceinline cm3 cm3_basis_from_normal(cv3 n);
+cran_forceinline cm3 cm3_tranpose(cm3 m);
 cran_forceinline cv3 cm3_mul_cv3(cm3 m, cv3 v);
 cran_forceinline cv3 cm3_rotate_cv3(cm3 m, cv3 v);
 
@@ -629,6 +630,16 @@ cran_forceinline cm3 cm3_basis_from_normal(cv3 n)
 	cv3 j = (cv3) { b, sign + n.y*n.y*a, -n.y };
 
 	return cm3_from_basis(i, j, n);
+}
+
+cran_forceinline cm3 cm3_tranpose(cm3 m)
+{
+	return (cm3)
+	{
+		.i = {m.i.x, m.j.x, m.k.x},
+		.j = {m.i.y, m.j.y, m.k.y},
+		.k = {m.i.z, m.j.z, m.k.z},
+	};
 }
 
 cran_forceinline cv3 cm3_mul_cv3(cm3 m, cv3 v)
