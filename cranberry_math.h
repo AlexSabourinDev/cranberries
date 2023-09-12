@@ -110,15 +110,18 @@ cran_forceinline float cf_frac(float a);
 
 // Lane API
 cran_forceinline cfl cfl_replicate(float f);
-cran_forceinline cfl cfl_load(float* v);
+cran_forceinline cfl cfl_load(float const* v);
+cran_forceinline void cfl_store(float* s, cfl v);
 cran_forceinline cfl cfl_max(cfl l, cfl r);
 cran_forceinline cfl cfl_min(cfl l, cfl r);
 cran_forceinline cfl cfl_less(cfl l, cfl r);
 cran_forceinline cfl cfl_add(cfl l, cfl r);
 cran_forceinline cfl cfl_sub(cfl l, cfl r);
 cran_forceinline cfl cfl_mul(cfl l, cfl r);
+cran_forceinline cfl cfl_div(cfl l, cfl r);
 cran_forceinline int cfl_mask(cfl v);
 cran_forceinline cfl cfl_rcp(cfl v);
+cran_forceinline cfl cfl_sqrt(cfl v);
 cran_forceinline cfl cfl_lt(cfl l, cfl r);
 
 // V2 API
@@ -168,10 +171,13 @@ cran_forceinline cv3l cv3l_sub(cv3l l, cv3l r);
 cran_forceinline cv3l cv3l_mul(cv3l l, cv3l r);
 cran_forceinline cv3l cv3l_min(cv3l l, cv3l r);
 cran_forceinline cv3l cv3l_max(cv3l l, cv3l r);
+cran_forceinline cfl cv3l_dot(cv3l l, cv3l r);
+cran_forceinline cfl cv3l_length(cv3l v);
 
 // Matrix API
 cran_forceinline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k);
 cran_forceinline cm3 cm3_basis_from_normal(cv3 n);
+cran_forceinline cm3 cm3_tranpose(cm3 m);
 cran_forceinline cv3 cm3_mul_cv3(cm3 m, cv3 v);
 cran_forceinline cv3 cm3_rotate_cv3(cm3 m, cv3 v);
 
@@ -320,9 +326,14 @@ cran_forceinline cfl cfl_replicate(float f)
 	return (cfl) { .sse = _mm_set_ps1(f) };
 }
 
-cran_forceinline cfl cfl_load(float* f)
+cran_forceinline cfl cfl_load(float const* f)
 {
 	return (cfl) { .sse = _mm_loadu_ps(f) };
+}
+
+cran_forceinline void cfl_store(float* s, cfl v)
+{
+	_mm_storeu_ps(s, v.sse);
 }
 
 cran_forceinline cfl cfl_max(cfl l, cfl r)
@@ -355,6 +366,11 @@ cran_forceinline cfl cfl_mul(cfl l, cfl r)
 	return (cfl) { .sse = _mm_mul_ps(l.sse, r.sse) };
 }
 
+cran_forceinline cfl cfl_div(cfl l, cfl r)
+{
+	return (cfl) { .sse = _mm_div_ps(l.sse, r.sse) };
+}
+
 cran_forceinline int cfl_mask(cfl v)
 {
 	return _mm_movemask_ps(v.sse);
@@ -363,6 +379,11 @@ cran_forceinline int cfl_mask(cfl v)
 cran_forceinline cfl cfl_rcp(cfl v)
 {
 	return (cfl) { .sse = _mm_rcp_ps(v.sse) };
+}
+
+cran_forceinline cfl cfl_sqrt(cfl v)
+{
+	return (cfl) { .sse = _mm_sqrt_ps(v.sse) };
 }
 
 cran_forceinline cfl cfl_lt(cfl l, cfl r)
@@ -607,6 +628,20 @@ cran_forceinline cv3l cv3l_max(cv3l l, cv3l r)
 	};
 }
 
+cran_forceinline cfl cv3l_dot(cv3l l, cv3l r)
+{
+	cfl x = cfl_mul(l.x, r.x);
+	cfl y = cfl_mul(l.y, r.y);
+	cfl z = cfl_mul(l.z, r.z);
+
+	return cfl_add(cfl_add(x, y), z);
+}
+
+cran_forceinline cfl cv3l_length(cv3l v)
+{
+	return cfl_sqrt(cv3l_dot(v, v));
+}
+
 // Matrix Implementation
 cran_forceinline cm3 cm3_from_basis(cv3 i, cv3 j, cv3 k)
 {
@@ -629,6 +664,16 @@ cran_forceinline cm3 cm3_basis_from_normal(cv3 n)
 	cv3 j = (cv3) { b, sign + n.y*n.y*a, -n.y };
 
 	return cm3_from_basis(i, j, n);
+}
+
+cran_forceinline cm3 cm3_tranpose(cm3 m)
+{
+	return (cm3)
+	{
+		.i = {m.i.x, m.j.x, m.k.x},
+		.j = {m.i.y, m.j.y, m.k.y},
+		.k = {m.i.z, m.j.z, m.k.z},
+	};
 }
 
 cran_forceinline cv3 cm3_mul_cv3(cm3 m, cv3 v)
