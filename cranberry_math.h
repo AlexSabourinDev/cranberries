@@ -54,11 +54,13 @@
 #define cran_f32_exp_bits 8
 #define cran_f32_exp_bias 127
 
-typedef uint32_t cu32;
-typedef int32_t ci32;
-typedef uint16_t cu16;
+typedef uint32_t c32u;
+typedef int32_t c32i;
+typedef uint16_t c16u;
+typedef int16_t c16i;
 typedef uint16_t half;
 typedef float cf;
+typedef half ch;
 
 #define cran_lane_count 4
 cran_align(16) typedef union
@@ -110,6 +112,20 @@ typedef struct
 	uint32_t x, y, z;
 } cu3;
 
+typedef struct 
+{
+	c16i x, y;
+} c16i2;
+
+typedef struct 
+{
+	c16i x, y, z;
+} c16i3;
+
+typedef struct 
+{
+	c16u x, y, z;
+} c16u3;
 
 typedef union
 {
@@ -206,20 +222,20 @@ cran_forceinline float cf_sign(float a);
 cran_forceinline float cf_sign_no_zero(float a);
 cran_forceinline bool cf_finite(float a);
 cran_forceinline float cf_frac(float a);
-cran_forceinline cu16 cf_f32_to_f16(float f32);
-cran_forceinline float cf_f16_to_f32(cu16 f16);
+cran_forceinline c16u cf_f32_to_f16(float f32);
+cran_forceinline float cf_f16_to_f32(c16u f16);
 cran_forceinline float cf_mad(float a, float b, float c); 
 cran_forceinline bool cf_close_enough(float a, float b, float t);
 cran_forceinline float cf_saturate(float f);
-cran_forceinline cu32 cf_compress_unorm(float f, uint32_t bitCount);
-cran_forceinline float cf_decompress_unorm(cu32 u, uint32_t bitCount);
+cran_forceinline c32u cf_compress_unorm(float f, uint32_t bitCount);
+cran_forceinline float cf_decompress_unorm(c32u u, uint32_t bitCount);
 cran_forceinline uint32_t cf_compress_float_unsigned(float f, uint32_t exponentBitCount, uint32_t mantissaBitCount);
 cran_forceinline float cf_decompress_float_unsigned(uint32_t u, uint32_t exponentBitCount, uint32_t mantissaBitCount);
 cran_forceinline uint32_t cf_f32_bits_to_u32(float v);
 cran_forceinline float cf_u32_bits_to_f32(uint32_t u);
 
 // Uint32
-cran_forceinline cu32 cu_div_ceil(cu32 left, cu32 right);
+cran_forceinline c32u cu_div_ceil(c32u left, c32u right);
 
 // Lane API
 cran_forceinline cfl cfl_replicate(float f);
@@ -241,8 +257,13 @@ cran_forceinline cv2 cv2_rcp(cv2 v);
 cran_forceinline cv2 cv2_madf(cv2 v, float m, float a);
 cran_forceinline ch2 cv2_f32_to_f16(cv2 f32);
 cran_forceinline cv2 cv2_f16_to_f32(ch2 f16);
+cran_forceinline cv2 cv2_min(cv2 l, cv2 r);
+cran_forceinline cv2 cv2_max(cv2 l, cv2 r);
 
 cran_forceinline cv2 cu2_to_cv2(cu2 v);
+
+cran_forceinline c16i2 cv2_to_c16i2(cv2 v);
+cran_forceinline cv2 c16i2_to_cv2(c16i2 v);
 
 // V3 API
 cran_forceinline cv3 cv3_mulf(cv3 l, float r);
@@ -285,6 +306,9 @@ cran_forceinline cv3 cv3_madf(cv3 v, float m, float a);
 cran_forceinline ch3 cv3_f32_to_f16(cv3 f32);
 cran_forceinline cv3 cv3_f16_to_f32(ch3 f16);
 
+cran_forceinline c16i3 cv3_to_c16i3(cv3 v);
+cran_forceinline cv3 c16i3_to_cv3(c16i3 v);
+
 // V3 Lane API
 cran_forceinline cv3l cv3l_replicate(cv3 v);
 cran_forceinline void cv3l_set(cv3l* lanes, cv3 v, uint32_t i);
@@ -320,6 +344,7 @@ cran_forceinline cm3 cm3_inverse_orthonormal(cm3 m);
 cran_forceinline cm4 cm3x4_to_cm4(cm3x4 m);
 
 cran_forceinline cm4 cm4_rotate_xy(float theta);
+cran_forceinline cm4 cm4_rotate_xz(float theta);
 cran_forceinline cm4 cm4_translate(cv3 pos);
 cran_forceinline cm4 cm4_mul(cm4 l, cm4 r);
 cran_forceinline cm4 cm4_perspective_projection(float fov, float nearPlane, float farPlane, float aspectRatio);
@@ -475,12 +500,12 @@ cran_forceinline float cf_frac(float a)
 	return a - truncf(a);
 }
 
-cran_forceinline cu16 cf_f32_to_f16(float f32)
+cran_forceinline c16u cf_f32_to_f16(float f32)
 {
-	return (cu16)_mm_cvtsi128_si32(_mm_cvtps_ph(_mm_set_ss(f32), _MM_FROUND_TO_NEAREST_INT));
+	return (c16u)_mm_cvtsi128_si32(_mm_cvtps_ph(_mm_set_ss(f32), _MM_FROUND_TO_NEAREST_INT));
 }
 
-cran_forceinline  float cf_f16_to_f32(cu16 f16)
+cran_forceinline  float cf_f16_to_f32(c16u f16)
 {
 	return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128((int)f16)));
 }
@@ -506,13 +531,13 @@ cran_forceinline float cf_saturate(float f)
 	return fminf(fmaxf(f, 0.0f), 1.0f);
 }
 
-cran_forceinline cu32 cf_compress_unorm(float f, uint32_t bitCount)
+cran_forceinline c32u cf_compress_unorm(float f, uint32_t bitCount)
 {
 	float maxVal = (float)((1u << bitCount) - 1);
-	return (cu32)roundf(f * maxVal);
+	return (c32u)roundf(f * maxVal);
 }
 
-cran_forceinline float cf_decompress_unorm(cu32 u, uint32_t bitCount)
+cran_forceinline float cf_decompress_unorm(c32u u, uint32_t bitCount)
 {
 	float invMaxVal = cf_rcp((float)((1u << bitCount) - 1));
 	return (float)u * invMaxVal;
@@ -587,7 +612,7 @@ cran_forceinline float cf_u32_bits_to_f32(uint32_t u)
 	return conv.f;
 }
 
-cran_forceinline cu32 cu_div_ceil(cu32 left, cu32 right)
+cran_forceinline c32u cu_div_ceil(c32u left, c32u right)
 {
 	return (left + right - 1) / right;
 }
@@ -673,6 +698,16 @@ cran_forceinline cv2 cv2_madf(cv2 v, float m, float a)
 	};
 }
 
+cran_forceinline cv2 cv2_min(cv2 l, cv2 r)
+{
+    return (cv2) { fminf(l.x, r.x), fminf(l.y, r.y) };
+}
+
+cran_forceinline cv2 cv2_max(cv2 l, cv2 r)
+{
+    return (cv2) { fmaxf(l.x, r.x), fmaxf(l.y, r.y) };
+}
+
 cran_forceinline ch2 cv2_f32_to_f16(cv2 f32)
 {
 	return (ch2){cf_f32_to_f16(f32.x), cf_f32_to_f16(f32.y)};
@@ -686,6 +721,16 @@ cran_forceinline cv2 cv2_f16_to_f32(ch2 f16)
 cran_forceinline cv2 cu2_to_cv2(cu2 v)
 {
 	return (cv2){ (float)v.x, (float)v.y };
+}
+
+cran_forceinline c16i2 cv2_to_c16i2(cv2 v)
+{
+    return (c16i2){ (c16i)v.x, (c16i)v.y };
+}
+
+cran_forceinline cv2 c16i2_to_cv2(c16i2 v)
+{
+    return (cv2){ (cf)v.x, (cf)v.y };
 }
 
 // V3 Implementation
@@ -883,6 +928,16 @@ cran_forceinline ch3 cv3_f32_to_f16(cv3 f32)
 cran_forceinline cv3 cv3_f16_to_f32(ch3 f16)
 {
 	return (cv3){cf_f16_to_f32(f16.x), cf_f16_to_f32(f16.y), cf_f16_to_f32(f16.z)};
+}
+
+cran_forceinline c16i3 cv3_to_c16i3(cv3 v)
+{
+    return (c16i3) { (c16i)v.x, (c16i)v.y, (c16i)v.z };
+}
+
+cran_forceinline cv3 c16i3_to_cv3(c16i3 v)
+{
+    return (cv3) { (cf)v.x, (cf)v.y, (cf)v.z };
 }
 
 // V3 Lane Implementation
@@ -1115,6 +1170,17 @@ cran_forceinline cm4 cm4_rotate_xy(float theta)
 		cosf(theta), -sinf(theta), 0.0f, 0.0f,
 		sinf(theta), cosf(theta), 0.0f, 0.0f,
 		0.0f, 0.0f, 1.0f, 0.0f,
+		0.0f, 0.0f, 0.0f, 1.0f
+	};
+}
+
+cran_forceinline cm4 cm4_rotate_xz(float theta)
+{
+	return (cm4)
+	{
+		cosf(theta), 0.0f, -sinf(theta), 0.0f,
+		0.0f, 1.0f, 0.0f, 0.0f,
+		sinf(theta), 0.0f, cosf(theta), 0.0f,
 		0.0f, 0.0f, 0.0f, 1.0f
 	};
 }
